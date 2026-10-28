@@ -1,55 +1,150 @@
 pub mod theme;
 
 use gpui::{
-    App, Bounds, Context, FontWeight, KeyBinding, Menu, MenuItem, Subscription, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
+    App, Bounds, Context, FontWeight, KeyBinding, Menu, MenuItem, TitlebarOptions, Window,
+    WindowBounds, WindowControlArea, WindowOptions, actions, div, point, prelude::*, px, size,
 };
 use theme::{ActiveTheme, Theme};
 
 actions!(ganymede, [Quit]);
 
-struct Ganymede {
-    _appearance: Subscription,
-}
+struct Ganymede;
 
 impl Ganymede {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        theme::set_appearance(window.appearance(), cx);
+    fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // Keep the reference palette consistent while exploring the window shell.
+        cx.set_global(theme::ThemeSpec::dark().resolve(&theme::Derivation::default()));
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
-        Self {
-            _appearance: window.observe_window_appearance(|window, cx| {
-                theme::set_appearance(window.appearance(), cx);
-            }),
-        }
+        Self
     }
 }
 
 impl Render for Ganymede {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let surface = theme.app;
+        let outer = theme.sidebar;
+        let sidebar = theme.card;
+        let body = theme.app;
         div()
             .size_full()
             .flex()
             .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_3()
-            .p_8()
-            .bg(surface.bg)
-            .text_color(surface.fg)
+            .bg(outer.bg)
+            .text_color(outer.fg)
             .font_family(theme.font.sans.clone())
             .text_size(theme.font.base)
             .child(
                 div()
-                    .text_size(theme.font.xl)
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .id("titlebar")
+                    .h(px(44.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .pl(px(88.))
+                    .text_size(theme.font.sm)
+                    .text_color(outer.muted_fg)
+                    .window_control_area(WindowControlArea::Drag)
+                    .on_click(|event, window, _| {
+                        if event.click_count() == 2 {
+                            window.titlebar_double_click();
+                        }
+                    })
                     .child("Ganymede"),
             )
             .child(
                 div()
-                    .text_color(surface.muted_fg)
-                    .child("A native workspace for Jupyter notebooks."),
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .pr(px(4.))
+                    .pb(px(4.))
+                    .child(
+                        div()
+                            .w(px(52.))
+                            .flex_shrink_0()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .py_2()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .size(px(36.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(theme.radius.md())
+                                    .bg(outer.accent)
+                                    .text_color(outer.accent_fg)
+                                    .text_size(theme.font.xl)
+                                    .child("▦"),
+                            )
+                            .child(div().text_color(outer.muted_fg).child("◷")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .rounded(theme.radius.xl())
+                            .overflow_hidden()
+                            .bg(outer.bg)
+                            .text_color(outer.fg)
+                            .child(
+                                div()
+                                    .w(px(240.))
+                                    .flex_shrink_0()
+                                    .h_full()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_6()
+                                    .p_4()
+                                    .bg(sidebar.bg)
+                                    .text_color(sidebar.fg)
+                                    .rounded_l(theme.radius.xl())
+                                    .border_r_1()
+                                    .border_color(sidebar.border)
+                                    .child(
+                                        div().font_weight(FontWeight::SEMIBOLD).child("Workspace"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_3()
+                                            .text_size(theme.font.sm)
+                                            .text_color(sidebar.muted_fg)
+                                            .child("Notebooks")
+                                            .child("No notebooks open"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .bg(body.bg)
+                                    .text_color(body.fg)
+                                    .rounded_r(theme.radius.xl())
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_3()
+                                    .p_6()
+                                    .child(
+                                        div()
+                                            .text_size(theme.font.xl)
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child("Ganymede"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(body.muted_fg)
+                                            .child("A native workspace for Jupyter notebooks."),
+                                    ),
+                            ),
+                    ),
             )
     }
 }
@@ -80,7 +175,8 @@ fn main() {
                 window_min_size: Some(size(px(480.), px(320.))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Ganymede".into()),
-                    ..Default::default()
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(12.), px(14.))),
                 }),
                 ..Default::default()
             },

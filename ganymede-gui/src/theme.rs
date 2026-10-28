@@ -476,18 +476,18 @@ impl ThemeSpec {
     pub fn dark() -> Self {
         Self {
             is_dark: true,
-            background: oklch(0.160, 0.008, 264.),
+            background: gpui::rgb(0x181818).into(),
             foreground: oklch(0.970, 0.004, 264.),
             muted: oklch(0.240, 0.010, 264.),
             muted_foreground: oklch(0.700, 0.015, 264.),
-            border: oklch(0.280, 0.012, 264.),
+            border: gpui::rgb(0x343434).into(),
 
-            card: oklch(0.200, 0.009, 264.),
+            card: gpui::rgb(0x222222).into(),
             popover: oklch(0.220, 0.009, 264.),
-            sidebar: oklch(0.185, 0.008, 264.),
+            sidebar: gpui::rgb(0x333333).into(),
             sidebar_foreground: oklch(0.940, 0.004, 264.),
             sidebar_border: oklch(0.260, 0.012, 264.),
-            sidebar_accent: oklch(0.290, 0.016, 264.),
+            sidebar_accent: gpui::rgb(0x454545).into(),
 
             primary: oklch(0.680, 0.160, 259.), // lighter, less chroma
             primary_foreground: oklch(0.170, 0.020, 259.),
