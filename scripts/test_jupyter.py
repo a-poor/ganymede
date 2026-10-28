@@ -65,6 +65,9 @@ def main():
                 if result.returncode:
                     log.seek(0)
                     print(log.read().replace(token, "[REDACTED]"), file=sys.stderr)
+                if result.returncode == 0:
+                    result = subprocess.run(["cargo", "run", "-p", "ganymede-core", "--example", "notebook"],
+                                            cwd=repo, env=env, timeout=90)
                 return result.returncode
             finally:
                 # Include kernels in cleanup, even when a Rust assertion fails.
