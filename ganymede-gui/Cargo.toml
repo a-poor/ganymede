@@ -1,0 +1,7 @@
+[package]
+name = "ganymede-gui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ganymede-core.workspace = true
