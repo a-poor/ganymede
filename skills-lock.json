@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "skills": {
+    "gpui": {
+      "source": "a-poor/skills",
+      "sourceType": "github",
+      "skillPath": "skills/gpui/SKILL.md",
+      "computedHash": "2f35edfdc6b3bb8b202a56f7e0c994b598b5478b033a96ca23b36a085b20a962"
+    },
+    "gpui-editor": {
+      "source": "a-poor/skills",
+      "sourceType": "github",
+      "skillPath": "skills/gpui-editor/SKILL.md",
+      "computedHash": "d1be7e558b3c4abb7793c897bc3f867b2bf89da10bae9a14f63579b3c1b720a0"
+    },
+    "gpui-style": {
+      "source": "a-poor/skills",
+      "sourceType": "github",
+      "skillPath": "skills/gpui-style/SKILL.md",
+      "computedHash": "bc22ac4e3ddba13854403844649c7db204e32d8fb566f881a29d046400d95af5"
+    },
+    "ratatui": {
+      "source": "a-poor/skills",
+      "sourceType": "github",
+      "skillPath": "skills/ratatui/SKILL.md",
+      "computedHash": "1a08724acd364d10f51733a0b582020cc262a4c256c987b6074387220d7c6dfc"
+    }
+  }
+}
