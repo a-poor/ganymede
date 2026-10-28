@@ -1,4 +1,6 @@
-# Ganymede
+# ganymede
+
+`ganymede` is a fast native Jupyter Server client written in Rust.
 
 A Rust workspace containing:
 
