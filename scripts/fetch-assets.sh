@@ -32,4 +32,9 @@ cp -R "$temp_dir/inter/." "$assets/fonts/inter/"
 cp -R "$temp_dir/jetbrains-mono/." "$assets/fonts/jetbrains-mono/"
 cp -R "$temp_dir/phosphor/assets/." "$assets/icons/phosphor/"
 cp "$temp_dir/phosphor/LICENSE" "$assets/icons/phosphor/LICENSE"
+# These additions postdate the pinned release above.
+phosphor_additions_revision=2b75f3ad12b420c9504ef05df8d2564a28f8500e
+for icon in rows-plus-top rows-plus-bottom; do
+    download "https://raw.githubusercontent.com/phosphor-icons/core/$phosphor_additions_revision/assets/regular/$icon.svg" "$assets/icons/phosphor/regular/$icon.svg"
+done
 echo "Assets ready in $assets"

@@ -35,6 +35,14 @@ macro_rules! define_icons {
 define_icons! {
     SquaresFour => "regular/squares-four.svg",
     Clock => "regular/clock.svg",
+    SidebarSimple => "regular/sidebar-simple.svg",
+    Trash => "regular/trash.svg",
+    DotsThree => "regular/dots-three.svg",
+    Copy => "regular/copy.svg",
+    ArrowUp => "regular/arrow-up.svg",
+    ArrowDown => "regular/arrow-down.svg",
+    RowsPlusTop => "regular/rows-plus-top.svg",
+    RowsPlusBottom => "regular/rows-plus-bottom.svg",
 }
 
 impl Icon {

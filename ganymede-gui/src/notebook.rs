@@ -35,6 +35,19 @@ impl RunQueue {
         Some(run)
     }
 
+    fn remap(&mut self, map: impl Fn(usize) -> usize) {
+        self.active = self.active.map(&map);
+        for (index, _, _) in &mut self.pending {
+            *index = map(*index);
+        }
+    }
+
+    fn remove(&mut self, index: usize) {
+        self.finish(index);
+        self.pending.retain(|run| run.0 != index);
+        self.remap(|i| if i > index { i - 1 } else { i });
+    }
+
     fn finish(&mut self, index: usize) {
         if self.active == Some(index) {
             self.active = None;
@@ -78,6 +91,63 @@ impl Notebook {
             };
             match event {
                 CellEvent::Selected => this.select(index, cx),
+                CellEvent::DeleteCell => {
+                    // Cancel the disposable simulation before removing the entity.
+                    cell.update(cx, |cell, cx| cell.simulate_run(None, String::new(), cx));
+                    this.runs.remove(index);
+                    this.cells.remove(index);
+                    if this.cells.is_empty() {
+                        this.append_cell(window, cx);
+                    }
+                    let target = index.min(this.cells.len() - 1);
+                    this.select(target, cx);
+                    this.cells[target]
+                        .read(cx)
+                        .focus_handle(cx)
+                        .focus(window, cx);
+                    this.start_next_run(cx);
+                    cx.notify();
+                }
+                CellEvent::Duplicate | CellEvent::InsertAbove | CellEvent::InsertBelow => {
+                    let source = if matches!(event, CellEvent::Duplicate) {
+                        cell.read(cx).text().to_owned()
+                    } else {
+                        String::new()
+                    };
+                    let target = if matches!(event, CellEvent::InsertAbove) {
+                        index
+                    } else {
+                        index + 1
+                    };
+                    this.append_cell(window, cx);
+                    let added = this.cells.pop().unwrap();
+                    added.update(cx, |cell, cx| cell.set_text(source, cx));
+                    this.runs.remap(|i| if i >= target { i + 1 } else { i });
+                    this.cells.insert(target, added.clone());
+                    this.select(target, cx);
+                    added.read(cx).focus_handle(cx).focus(window, cx);
+                    this.scroll.scroll_to_item(target);
+                    cx.notify();
+                }
+                CellEvent::MoveUp | CellEvent::MoveDown => {
+                    let target = if matches!(event, CellEvent::MoveUp) {
+                        index.saturating_sub(1)
+                    } else {
+                        (index + 1).min(this.cells.len() - 1)
+                    };
+                    this.cells.swap(index, target);
+                    this.runs.remap(|i| {
+                        if i == index {
+                            target
+                        } else if i == target {
+                            index
+                        } else {
+                            i
+                        }
+                    });
+                    this.scroll.scroll_to_item(target);
+                    cx.notify();
+                }
                 CellEvent::RunFinished => {
                     this.runs.finish(index);
                     this.start_next_run(cx);
@@ -146,6 +216,40 @@ impl Render for Notebook {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleting_running_cell_removes_its_reruns_and_advances_queue() {
+        let mut queue = RunQueue::default();
+        queue.pending.extend([
+            (1, 1, "deleted".into()),
+            (1, 2, "rerun".into()),
+            (2, 3, "next".into()),
+        ]);
+        queue.start_next();
+        queue.remove(1);
+        assert_eq!(queue.active, None);
+        assert_eq!(queue.start_next(), Some((1, 3, "next".into())));
+    }
+
+    #[test]
+    fn queued_and_running_cells_follow_insertions_and_moves() {
+        let mut queue = RunQueue::default();
+        queue
+            .pending
+            .extend([(0, 1, "first".into()), (1, 2, "second".into())]);
+        queue.start_next();
+        queue.remap(|i| i + 1);
+        assert_eq!(queue.active, Some(1));
+        assert!(queue.is_queued(2));
+        queue.remap(|i| match i {
+            1 => 2,
+            2 => 1,
+            _ => i,
+        });
+        assert_eq!(queue.active, Some(2));
+        queue.finish(2);
+        assert_eq!(queue.start_next(), Some((1, 2, "second".into())));
+    }
 
     #[test]
     fn runs_wait_for_completion_and_start_in_submission_order() {

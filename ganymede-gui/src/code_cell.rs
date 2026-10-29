@@ -161,7 +161,14 @@ fn from_utf16(text: &str, offset: usize) -> usize {
     text.len()
 }
 
+#[derive(Clone, Copy)]
 pub enum CellEvent {
+    Duplicate,
+    DeleteCell,
+    MoveUp,
+    MoveDown,
+    InsertAbove,
+    InsertBelow,
     Selected,
     RunAndAdvance,
     RunFinished,
@@ -173,6 +180,7 @@ const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '�
 
 pub struct CodeCell {
     current: bool,
+    menu_open: bool,
     execution_count: Option<u64>,
     running_frame: Option<usize>,
     queued: bool,
@@ -205,6 +213,9 @@ impl CodeCell {
                 cx.emit(CellEvent::Selected);
                 cx.notify();
             }),
+            cx.on_blur(&cell_focus, window, |_, _, cx| {
+                cx.notify();
+            }),
             cx.on_focus(&focus, window, |this, _, cx| {
                 this.reset_blink(cx);
                 cx.emit(CellEvent::Selected);
@@ -218,6 +229,7 @@ impl CodeCell {
         ];
         Self {
             current: false,
+            menu_open: false,
             execution_count: None,
             running_frame: None,
             queued: false,
@@ -240,6 +252,11 @@ impl CodeCell {
             blink: Task::ready(()),
             _subscriptions: subscriptions,
         }
+    }
+
+    pub fn set_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.buffer.text = text;
+        cx.notify();
     }
 
     pub fn text(&self) -> &str {
@@ -582,7 +599,6 @@ impl EntityInputHandler for CodeCell {
 
 impl Render for CodeCell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let editing = self.focus.is_focused(window);
         let theme = cx.theme();
         let surface = theme.card;
         let cell_padding = px(4.);
@@ -606,6 +622,7 @@ impl Render for CodeCell {
             .text_size(theme.font.code)
             .line_height(theme.font.line_height_tight)
             .p_3()
+            .pr(px(44.))
             .on_action(cx.listener(|this, _: &Left, w, cx| {
                 let offset = if this.buffer.selection().is_empty() {
                     this.buffer.previous()
@@ -707,6 +724,130 @@ impl Render for CodeCell {
                     .child(CellText { cell: cx.entity() }),
             );
 
+        let popover = theme.popover;
+        let menu = div()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.menu_open = false;
+                cx.notify();
+            }))
+            .id("cell-actions-menu")
+            .w(px(190.))
+            .p_1()
+            .flex()
+            .flex_col()
+            .bg(popover.bg)
+            .text_color(popover.fg)
+            .border_1()
+            .border_color(popover.border)
+            .rounded(theme.radius.xl())
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .children(
+                [
+                    ("Duplicate", crate::icon::Icon::Copy, CellEvent::Duplicate),
+                    ("Move up", crate::icon::Icon::ArrowUp, CellEvent::MoveUp),
+                    (
+                        "Move down",
+                        crate::icon::Icon::ArrowDown,
+                        CellEvent::MoveDown,
+                    ),
+                    (
+                        "Insert above",
+                        crate::icon::Icon::RowsPlusTop,
+                        CellEvent::InsertAbove,
+                    ),
+                    (
+                        "Insert below",
+                        crate::icon::Icon::RowsPlusBottom,
+                        CellEvent::InsertBelow,
+                    ),
+                    ("Delete", crate::icon::Icon::Trash, CellEvent::DeleteCell),
+                ]
+                .into_iter()
+                .map(|(label, icon, event)| {
+                    div()
+                        .id(label)
+                        .group(label)
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .rounded(theme.radius.lg())
+                        .cursor_pointer()
+                        .font_family(theme.font.sans.clone())
+                        .text_size(theme.font.sm)
+                        .hover(|s| s.bg(surface.primary).text_color(surface.primary_fg))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.menu_open = false;
+                            cx.notify();
+                            cx.emit(event);
+                        }))
+                        .child(
+                            icon.svg()
+                                .size(px(16.))
+                                .text_color(popover.fg)
+                                .group_hover(label, |s| s.text_color(surface.primary_fg)),
+                        )
+                        .child(label)
+                }),
+            );
+        let editor = div()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .child(editor)
+            .when(self.current, |editor| {
+                editor.child(
+                    div()
+                        .absolute()
+                        .right(px(8.))
+                        .top(px(10.))
+                        .child(
+                            div()
+                                .id("cell-actions")
+                                .size(px(24.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .rounded(theme.radius.sm())
+                                .hover(|s| s.bg(surface.accent).text_color(surface.accent_fg))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.menu_open = true;
+                                    cx.notify();
+                                }))
+                                .child(
+                                    crate::icon::Icon::DotsThree
+                                        .svg()
+                                        .size(px(20.))
+                                        .text_color(if self.focus.is_focused(window) {
+                                            surface.fg
+                                        } else {
+                                            surface.muted_fg
+                                        })
+                                        .group_hover("notebook-cell", |style| {
+                                            style.text_color(surface.fg)
+                                        }),
+                                ),
+                        )
+                        .when(self.menu_open, |button| {
+                            button.child(gpui::deferred(
+                                gpui::anchored()
+                                    .anchor(gpui::Anchor::TopRight)
+                                    .offset(point(px(24.), px(4.)))
+                                    .snap_to_window_with_margin(px(8.))
+                                    .child(menu),
+                            ))
+                        }),
+                )
+            });
+
         let input = div()
             .w_full()
             .min_w_0()
@@ -753,6 +894,7 @@ impl Render for CodeCell {
 
         div()
             .id("notebook-cell")
+            .group("notebook-cell")
             .key_context("NotebookCell")
             .track_focus(&self.cell_focus)
             .w_full()
@@ -761,16 +903,22 @@ impl Render for CodeCell {
             .flex_col()
             .flex_shrink_0()
             .p(cell_padding)
+            .px(px(6.))
+            .pr(px(4.))
             .bg(theme.app.bg)
             .text_color(theme.app.fg)
             .border_1()
-            .border_color(if self.current && !editing {
+            .border_color(if self.current && self.cell_focus.is_focused(window) {
                 surface.primary
             } else {
                 theme.app.bg
             })
-            // Include both padding and border in the editor's outer inset.
-            .rounded(theme.radius.md() + cell_padding + px(1.))
+            .rounded(theme.radius.md() + cell_padding / 2. + px(1.))
+            .on_mouse_down_out(cx.listener(|this, _, window, _| {
+                if this.focus.is_focused(window) || this.cell_focus.is_focused(window) {
+                    window.blur();
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {

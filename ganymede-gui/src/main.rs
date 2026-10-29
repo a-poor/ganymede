@@ -15,6 +15,7 @@ actions!(ganymede, [Quit]);
 
 struct Ganymede {
     notebook: Entity<notebook::Notebook>,
+    sidebar_open: bool,
 }
 
 impl Ganymede {
@@ -23,7 +24,10 @@ impl Ganymede {
         cx.set_global(theme::ThemeSpec::light().resolve(&theme::Derivation::default()));
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         let notebook = cx.new(|cx| notebook::Notebook::new(window, cx));
-        Self { notebook }
+        Self {
+            notebook,
+            sidebar_open: true,
+        }
     }
 }
 
@@ -57,7 +61,31 @@ impl Render for Ganymede {
                             window.titlebar_double_click();
                         }
                     })
-                    .child("Ganymede"),
+                    .child(
+                        div()
+                            .id("toggle-sidebar")
+                            .size(px(28.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(theme.radius.md())
+                            .cursor_pointer()
+                            .hover(|s| s.bg(outer.accent).text_color(outer.accent_fg))
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation()
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.sidebar_open = !this.sidebar_open;
+                                cx.notify();
+                            }))
+                            .child(
+                                Icon::SidebarSimple
+                                    .svg()
+                                    .size(px(18.))
+                                    .text_color(outer.muted_fg),
+                            ),
+                    ),
             )
             .child(
                 div()
@@ -111,34 +139,38 @@ impl Render for Ganymede {
                             .overflow_hidden()
                             .bg(outer.bg)
                             .text_color(outer.fg)
-                            .child(
-                                div()
-                                    .w(px(240.))
-                                    .flex_shrink_0()
-                                    .h_full()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_6()
-                                    .p_4()
-                                    .bg(sidebar.bg)
-                                    .text_color(sidebar.fg)
-                                    .rounded_l(theme.radius.xl())
-                                    .border_r_1()
-                                    .border_color(sidebar.border)
-                                    .child(
-                                        div().font_weight(FontWeight::SEMIBOLD).child("Workspace"),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_3()
-                                            .text_size(theme.font.sm)
-                                            .text_color(sidebar.muted_fg)
-                                            .child("Notebooks")
-                                            .child("No notebooks open"),
-                                    ),
-                            )
+                            .when(self.sidebar_open, |body| {
+                                body.child(
+                                    div()
+                                        .w(px(240.))
+                                        .flex_shrink_0()
+                                        .h_full()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_6()
+                                        .p_4()
+                                        .bg(sidebar.bg)
+                                        .text_color(sidebar.fg)
+                                        .rounded_l(theme.radius.xl())
+                                        .border_r_1()
+                                        .border_color(sidebar.border)
+                                        .child(
+                                            div()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child("Workspace"),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_3()
+                                                .text_size(theme.font.sm)
+                                                .text_color(sidebar.muted_fg)
+                                                .child("Notebooks")
+                                                .child("No notebooks open"),
+                                        ),
+                                )
+                            })
                             .child(
                                 div()
                                     .flex_1()
@@ -147,6 +179,9 @@ impl Render for Ganymede {
                                     .bg(body.bg)
                                     .text_color(body.fg)
                                     .rounded_r(theme.radius.xl())
+                                    .when(!self.sidebar_open, |body| {
+                                        body.rounded_l(theme.radius.xl())
+                                    })
                                     .flex()
                                     .flex_col()
                                     .child(self.notebook.clone()),
