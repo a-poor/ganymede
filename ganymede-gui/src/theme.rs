@@ -447,13 +447,13 @@ impl ThemeSpec {
     pub fn light() -> Self {
         Self {
             is_dark: false,
-            background: oklch(0.990, 0.002, 264.),
+            background: oklch(1.000, 0.000, 264.),
             foreground: oklch(0.180, 0.010, 264.),
             muted: oklch(0.960, 0.006, 264.),
             muted_foreground: oklch(0.535, 0.015, 264.),
             border: oklch(0.900, 0.008, 264.),
 
-            card: oklch(1.000, 0.000, 264.),
+            card: oklch(0.990, 0.002, 264.),
             popover: oklch(1.000, 0.000, 264.),
             sidebar: oklch(0.975, 0.004, 264.),
             sidebar_foreground: oklch(0.180, 0.010, 264.),

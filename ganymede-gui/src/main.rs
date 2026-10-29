@@ -16,7 +16,7 @@ struct Ganymede;
 impl Ganymede {
     fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Keep the reference palette consistent while exploring the window shell.
-        cx.set_global(theme::ThemeSpec::dark().resolve(&theme::Derivation::default()));
+        cx.set_global(theme::ThemeSpec::light().resolve(&theme::Derivation::default()));
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         Self
     }
@@ -101,7 +101,8 @@ impl Render for Ganymede {
                             .min_w_0()
                             .rounded(theme.radius.xl())
                             .shadow(vec![theme.body_shadow.clone()])
-                            .when(theme.is_dark, |el| el.border_1().border_color(body.border))
+                            .border_1()
+                            .border_color(body.border)
                             .overflow_hidden()
                             .bg(outer.bg)
                             .text_color(outer.fg)
