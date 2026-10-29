@@ -31,6 +31,9 @@ actions!(
         Backspace,
         Delete,
         Enter,
+        RunAndAdvance,
+        SelectCell,
+        EditCell,
         Tab,
         Copy,
         Cut,
@@ -41,6 +44,11 @@ actions!(
 );
 
 pub fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("escape", SelectCell, Some("CodeCell")),
+        KeyBinding::new("enter", EditCell, Some("NotebookCell && !CodeCell")),
+        KeyBinding::new("shift-enter", RunAndAdvance, Some("NotebookCell")),
+    ]);
     let context = Some("CodeCell");
     cx.bind_keys([
         KeyBinding::new("left", Left, context),
@@ -58,6 +66,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("backspace", Backspace, context),
         KeyBinding::new("delete", Delete, context),
         KeyBinding::new("enter", Enter, context),
+        KeyBinding::new("shift-enter", RunAndAdvance, context),
         KeyBinding::new("tab", Tab, context),
     ]);
     let modifier = if cfg!(target_os = "macos") {
@@ -152,9 +161,26 @@ fn from_utf16(text: &str, offset: usize) -> usize {
     text.len()
 }
 
+pub enum CellEvent {
+    Selected,
+    RunAndAdvance,
+    RunFinished,
+}
+
+impl gpui::EventEmitter<CellEvent> for CodeCell {}
+
+const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
 pub struct CodeCell {
+    current: bool,
+    execution_count: Option<u64>,
+    running_frame: Option<usize>,
+    queued: bool,
+    output: Option<String>,
+    simulation: Task<()>,
     buffer: Buffer,
     focus: FocusHandle,
+    cell_focus: FocusHandle,
     marked: Option<Range<usize>>,
     undo: Vec<Buffer>,
     redo: Vec<Buffer>,
@@ -173,8 +199,16 @@ pub struct CodeCell {
 impl CodeCell {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
+        let cell_focus = cx.focus_handle();
         let subscriptions = vec![
-            cx.on_focus(&focus, window, |this, _, cx| this.reset_blink(cx)),
+            cx.on_focus(&cell_focus, window, |_, _, cx| {
+                cx.emit(CellEvent::Selected);
+                cx.notify();
+            }),
+            cx.on_focus(&focus, window, |this, _, cx| {
+                this.reset_blink(cx);
+                cx.emit(CellEvent::Selected);
+            }),
             cx.on_blur(&focus, window, |this, _, cx| {
                 this.blink = Task::ready(());
                 this.cursor_visible = false;
@@ -183,8 +217,15 @@ impl CodeCell {
             }),
         ];
         Self {
+            current: false,
+            execution_count: None,
+            running_frame: None,
+            queued: false,
+            output: None,
+            simulation: Task::ready(()),
             buffer: Buffer::default(),
             focus,
+            cell_focus,
             marked: None,
             undo: vec![],
             redo: vec![],
@@ -199,6 +240,53 @@ impl CodeCell {
             blink: Task::ready(()),
             _subscriptions: subscriptions,
         }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.buffer.text
+    }
+
+    pub fn set_current(&mut self, current: bool, cx: &mut Context<Self>) {
+        if self.current != current {
+            self.current = current;
+            cx.notify();
+        }
+    }
+
+    pub fn set_queued(&mut self, queued: bool, cx: &mut Context<Self>) {
+        self.queued = queued;
+        cx.notify();
+    }
+
+    pub fn simulate_run(&mut self, count: Option<u64>, source: String, cx: &mut Context<Self>) {
+        // The notebook starts only one simulation at a time.
+        self.simulation = Task::ready(());
+        self.execution_count = count;
+        self.output = None;
+        self.running_frame = count.map(|_| 0);
+        if count.is_some() {
+            self.simulation = cx.spawn(async move |this, cx| {
+                for tick in 1..=15 {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(100))
+                        .await;
+                    if this
+                        .update(cx, |this, cx| {
+                            this.running_frame = (tick < 15).then_some(tick % SPINNER.len());
+                            if tick == 15 {
+                                this.output = Some(source.clone());
+                                cx.emit(CellEvent::RunFinished);
+                            }
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+        }
+        cx.notify();
     }
 
     fn reset_blink(&mut self, cx: &mut Context<Self>) {
@@ -340,6 +428,7 @@ impl CodeCell {
     }
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        cx.stop_propagation();
         self.focus.focus(window, cx);
         self.selecting = true;
         let offset = self.index_at(event.position);
@@ -492,9 +581,11 @@ impl EntityInputHandler for CodeCell {
 }
 
 impl Render for CodeCell {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let editing = self.focus.is_focused(window);
         let theme = cx.theme();
         let surface = theme.card;
+        let cell_padding = px(4.);
         let height =
             theme.font.line_height_tight * self.buffer.text.split('\n').count().clamp(1, 16) as f32;
         let editor = div()
@@ -579,6 +670,12 @@ impl Render for CodeCell {
             .on_action(
                 cx.listener(|this, _: &Tab, w, cx| this.replace_text_in_range(None, "    ", w, cx)),
             )
+            .on_action(cx.listener(|_, _: &RunAndAdvance, _, cx| {
+                cx.emit(CellEvent::RunAndAdvance);
+            }))
+            .on_action(cx.listener(|this, _: &SelectCell, window, cx| {
+                this.cell_focus.focus(window, cx);
+            }))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
@@ -610,21 +707,21 @@ impl Render for CodeCell {
                     .child(CellText { cell: cx.entity() }),
             );
 
-        div()
+        let input = div()
             .w_full()
             .min_w_0()
             .flex()
             .items_stretch()
             .flex_shrink_0()
-            // This standalone cell is the selected cell. Keep the marker outside
-            // the editor so a future output region can have its own marker.
+            // Reserve the marker gutter even for cells that are not current.
             .child(
                 div()
                     .w(px(8.))
                     .flex_shrink_0()
                     .rounded_full()
-                    .bg(surface.primary)
-                    .text_color(surface.primary_fg),
+                    .when(self.current, |bar| {
+                        bar.bg(surface.primary).text_color(surface.primary_fg)
+                    }),
             )
             .child(
                 div()
@@ -637,11 +734,91 @@ impl Render for CodeCell {
                     .font_family(theme.font.mono.clone())
                     .text_size(theme.font.code)
                     .line_height(theme.font.line_height_tight)
-                    .text_color(theme.app.muted_fg)
+                    .text_color(if self.current {
+                        surface.primary
+                    } else {
+                        theme.app.muted_fg
+                    })
                     .text_right()
-                    .child("[ ]:"),
+                    .child(match self.running_frame {
+                        Some(frame) => format!("[{}]:", SPINNER[frame]),
+                        None if self.queued => "[*]:".to_owned(),
+                        None => match self.execution_count {
+                            Some(count) => format!("[{count}]:"),
+                            None => "[ ]:".to_owned(),
+                        },
+                    }),
             )
-            .child(editor)
+            .child(editor);
+
+        div()
+            .id("notebook-cell")
+            .key_context("NotebookCell")
+            .track_focus(&self.cell_focus)
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .p(cell_padding)
+            .bg(theme.app.bg)
+            .text_color(theme.app.fg)
+            .border_1()
+            .border_color(if self.current && !editing {
+                surface.primary
+            } else {
+                theme.app.bg
+            })
+            // Include both padding and border in the editor's outer inset.
+            .rounded(theme.radius.md() + cell_padding + px(1.))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.cell_focus.focus(window, cx);
+                }),
+            )
+            .on_action(cx.listener(|this, _: &EditCell, window, cx| {
+                this.focus.focus(window, cx);
+            }))
+            .on_action(cx.listener(|_, _: &RunAndAdvance, _, cx| {
+                cx.emit(CellEvent::RunAndAdvance);
+            }))
+            .gap_2()
+            .child(input)
+            .when_some(self.output.as_ref(), |cell, output| {
+                cell.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .items_stretch()
+                        .child(
+                            div()
+                                .w(px(8.))
+                                .flex_shrink_0()
+                                .rounded_full()
+                                .when(self.current, |bar| {
+                                    bar.bg(surface.primary).text_color(surface.primary_fg)
+                                }),
+                        )
+                        // Match the input's execution-prompt gutter.
+                        .child(div().w(px(50.)).flex_shrink_0())
+                        .child(
+                            div()
+                                .id("cell-output")
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_x_scroll()
+                                .px(px(13.))
+                                .py_2()
+                                .font_family(theme.font.mono.clone())
+                                .text_size(theme.font.code)
+                                .line_height(theme.font.line_height_tight)
+                                .text_color(theme.app.fg)
+                                .child(output.clone()),
+                        ),
+                )
+            })
     }
 }
 

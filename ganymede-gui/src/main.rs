@@ -1,6 +1,7 @@
 mod assets;
 mod code_cell;
 pub mod icon;
+mod notebook;
 pub mod theme;
 
 use gpui::{
@@ -13,7 +14,7 @@ use theme::{ActiveTheme, Theme};
 actions!(ganymede, [Quit]);
 
 struct Ganymede {
-    cell: Entity<code_cell::CodeCell>,
+    notebook: Entity<notebook::Notebook>,
 }
 
 impl Ganymede {
@@ -21,8 +22,8 @@ impl Ganymede {
         // Keep the reference palette consistent while exploring the window shell.
         cx.set_global(theme::ThemeSpec::light().resolve(&theme::Derivation::default()));
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
-        let cell = cx.new(|cx| code_cell::CodeCell::new(window, cx));
-        Self { cell }
+        let notebook = cx.new(|cx| notebook::Notebook::new(window, cx));
+        Self { notebook }
     }
 }
 
@@ -148,9 +149,7 @@ impl Render for Ganymede {
                                     .rounded_r(theme.radius.xl())
                                     .flex()
                                     .flex_col()
-                                    .p_6()
-                                    .pl_4()
-                                    .child(self.cell.clone()),
+                                    .child(self.notebook.clone()),
                             ),
                     ),
             )
