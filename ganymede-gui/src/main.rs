@@ -1,9 +1,10 @@
 mod assets;
+mod code_cell;
 pub mod icon;
 pub mod theme;
 
 use gpui::{
-    App, Bounds, Context, FontWeight, KeyBinding, Menu, MenuItem, TitlebarOptions, Window,
+    App, Bounds, Context, Entity, FontWeight, KeyBinding, Menu, MenuItem, TitlebarOptions, Window,
     WindowBounds, WindowControlArea, WindowOptions, actions, div, point, prelude::*, px, size,
 };
 use icon::Icon;
@@ -11,14 +12,17 @@ use theme::{ActiveTheme, Theme};
 
 actions!(ganymede, [Quit]);
 
-struct Ganymede;
+struct Ganymede {
+    cell: Entity<code_cell::CodeCell>,
+}
 
 impl Ganymede {
-    fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Keep the reference palette consistent while exploring the window shell.
         cx.set_global(theme::ThemeSpec::light().resolve(&theme::Derivation::default()));
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
-        Self
+        let cell = cx.new(|cx| code_cell::CodeCell::new(window, cx));
+        Self { cell }
     }
 }
 
@@ -144,21 +148,9 @@ impl Render for Ganymede {
                                     .rounded_r(theme.radius.xl())
                                     .flex()
                                     .flex_col()
-                                    .items_center()
-                                    .justify_center()
-                                    .gap_3()
                                     .p_6()
-                                    .child(
-                                        div()
-                                            .text_size(theme.font.xl)
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child("Ganymede"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_color(body.muted_fg)
-                                            .child("A native workspace for Jupyter notebooks."),
-                                    ),
+                                    .pl_4()
+                                    .child(self.cell.clone()),
                             ),
                     ),
             )
@@ -170,6 +162,7 @@ fn main() {
         .with_assets(assets::Assets)
         .run(|cx: &mut App| {
             assets::register_fonts(cx).expect("failed to register embedded fonts");
+            code_cell::init(cx);
             cx.on_action(|_: &Quit, cx| cx.quit());
             let quit_key = if cfg!(target_os = "macos") {
                 "cmd-q"

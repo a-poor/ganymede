@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 anyhow = "1"
+unicode-segmentation = "1"
 rust-embed = { version = "8.12", features = ["debug-embed", "include-exclude"] }
 ganymede-core.workspace = true
 gpui = { version = "0.2.2", git = "https://github.com/zed-industries/zed.git", rev = "4c7244790a075e862eeb4e5ccc12d6c8f5da6f7e" }
