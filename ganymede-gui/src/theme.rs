@@ -1,6 +1,6 @@
 //! Semantic design tokens shared by the application views.
 
-use gpui::{App, Global, Hsla, Pixels, SharedString, px};
+use gpui::{App, BoxShadow, Global, Hsla, Pixels, SharedString, px};
 
 // ---------------------------------------------------------------- color utils
 
@@ -272,6 +272,7 @@ pub struct Theme {
     pub destructive_fg: Hsla,
     pub input: Hsla,
     pub scrim: Hsla,
+    pub body_shadow: BoxShadow,
     pub chart: [Hsla; 5],
 
     // derived — see the `Derivation` rules
@@ -427,6 +428,17 @@ impl ThemeSpec {
                 a: 0.5,
             },
             chart: self.chart,
+            body_shadow: BoxShadow::new(
+                px(0.),
+                px(0.5),
+                Hsla {
+                    h: 0.,
+                    s: 0.,
+                    l: 0.,
+                    a: if self.is_dark { 0.12 } else { 0.05 },
+                },
+            )
+            .blur_radius(px(2.)),
 
             radius: Radii { base: self.radius },
             font: self.font.clone(),

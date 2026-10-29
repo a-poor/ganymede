@@ -87,6 +87,8 @@ impl Render for Ganymede {
                             .flex_1()
                             .min_w_0()
                             .rounded(theme.radius.xl())
+                            .shadow(vec![theme.body_shadow.clone()])
+                            .when(theme.is_dark, |el| el.border_1().border_color(body.border))
                             .overflow_hidden()
                             .bg(outer.bg)
                             .text_color(outer.fg)
