@@ -1,9 +1,12 @@
+mod assets;
+pub mod icon;
 pub mod theme;
 
 use gpui::{
     App, Bounds, Context, FontWeight, KeyBinding, Menu, MenuItem, TitlebarOptions, Window,
     WindowBounds, WindowControlArea, WindowOptions, actions, div, point, prelude::*, px, size,
 };
+use icon::Icon;
 use theme::{ActiveTheme, Theme};
 
 actions!(ganymede, [Quit]);
@@ -77,9 +80,19 @@ impl Render for Ganymede {
                                     .bg(outer.accent)
                                     .text_color(outer.accent_fg)
                                     .text_size(theme.font.xl)
-                                    .child("▦"),
+                                    .child(
+                                        Icon::SquaresFour
+                                            .svg()
+                                            .size(theme.font.xl)
+                                            .text_color(outer.accent_fg),
+                                    ),
                             )
-                            .child(div().text_color(outer.muted_fg).child("◷")),
+                            .child(
+                                Icon::Clock
+                                    .svg()
+                                    .size(theme.font.xl)
+                                    .text_color(outer.muted_fg),
+                            ),
                     )
                     .child(
                         div()
@@ -152,39 +165,42 @@ impl Render for Ganymede {
 }
 
 fn main() {
-    gpui_platform::application().run(|cx: &mut App| {
-        cx.on_action(|_: &Quit, cx| cx.quit());
-        let quit_key = if cfg!(target_os = "macos") {
-            "cmd-q"
-        } else {
-            "ctrl-q"
-        };
-        cx.bind_keys([KeyBinding::new(quit_key, Quit, None)]);
-        cx.set_menus(vec![
-            Menu::new("Ganymede").items([MenuItem::action("Quit Ganymede", Quit)]),
-        ]);
-        cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
+    gpui_platform::application()
+        .with_assets(assets::Assets)
+        .run(|cx: &mut App| {
+            assets::register_fonts(cx).expect("failed to register embedded fonts");
+            cx.on_action(|_: &Quit, cx| cx.quit());
+            let quit_key = if cfg!(target_os = "macos") {
+                "cmd-q"
+            } else {
+                "ctrl-q"
+            };
+            cx.bind_keys([KeyBinding::new(quit_key, Quit, None)]);
+            cx.set_menus(vec![
+                Menu::new("Ganymede").items([MenuItem::action("Quit Ganymede", Quit)]),
+            ]);
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
 
-        let bounds = Bounds::centered(None, size(px(1000.), px(700.)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(480.), px(320.))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Ganymede".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(12.), px(14.))),
-                }),
-                ..Default::default()
-            },
-            |window, cx| cx.new(|cx| Ganymede::new(window, cx)),
-        )
-        .expect("failed to open the Ganymede window");
-        cx.activate(true);
-    });
+            let bounds = Bounds::centered(None, size(px(1000.), px(700.)), cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(480.), px(320.))),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Ganymede".into()),
+                        appears_transparent: true,
+                        traffic_light_position: Some(point(px(12.), px(14.))),
+                    }),
+                    ..Default::default()
+                },
+                |window, cx| cx.new(|cx| Ganymede::new(window, cx)),
+            )
+            .expect("failed to open the Ganymede window");
+            cx.activate(true);
+        });
 }

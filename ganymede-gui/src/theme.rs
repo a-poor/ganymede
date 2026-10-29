@@ -213,11 +213,9 @@ pub struct FontTokens {
 impl Default for FontTokens {
     fn default() -> Self {
         Self {
-            // Placeholders. Set these to families the app actually registers
-            // (e.g. via `cx.text_system().add_fonts(...)`); an unregistered
-            // family silently falls back to the platform default.
-            sans: ".SystemUIFont".into(),
-            mono: "monospace".into(),
+            // Registered from the embedded asset bundle during startup.
+            sans: "Inter".into(),
+            mono: "JetBrains Mono".into(),
             xs: px(11.),
             sm: px(13.),
             base: px(14.),

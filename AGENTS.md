@@ -11,7 +11,7 @@ Ganymede is a Rust 2024 workspace with two crates:
 - `ganymede-core/examples/`: executable client and notebook examples.
 - `scripts/test_jupyter.py`: disposable Jupyter test runner.
 
-There is currently no dedicated asset directory. GPUI dependencies are pinned to a Zed Git revision; update both GPUI dependencies together.
+Downloaded fonts and icons live in `ganymede-gui/assets/`, whose contents are gitignored. Run `just fetch-assets` to populate them. GPUI dependencies are pinned to a Zed Git revision; update both GPUI dependencies together.
 
 ## Build, Test, and Development Commands
 

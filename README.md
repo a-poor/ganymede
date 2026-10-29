@@ -10,6 +10,30 @@ A Rust workspace containing:
 Run the application with `cargo run` (or `cargo run -p ganymede-gui`).
 Check all workspace members with `cargo check --workspace`.
 
+With [just](https://github.com/casey/just) installed, run `just` to list commands
+in definition order, or `just run-gui` to launch the application.
+
+Run `just fetch-assets` to download the GUI assets (requires Bash, curl, unzip,
+and tar):
+
+- [Inter 4.1](https://github.com/rsms/inter/releases/tag/v4.1) desktop fonts → `ganymede-gui/assets/fonts/inter/`
+- [JetBrains Mono 2.304](https://github.com/JetBrains/JetBrainsMono/releases/tag/v2.304) desktop fonts → `ganymede-gui/assets/fonts/jetbrains-mono/`
+- [Phosphor 2.0.8](https://github.com/phosphor-icons/core/releases/tag/v2.0.8) SVG icons, in all six weights → `ganymede-gui/assets/icons/phosphor/`
+
+Downloaded assets and their licenses are ignored by Git. Versions are pinned in
+`scripts/fetch-assets.sh`; rerunning the command refreshes the downloaded files.
+Fetch assets before building the GUI on a fresh checkout. Selected fonts and
+icons are embedded with `rust-embed` in debug and release builds, so the binary
+does not need the asset directory at runtime. Startup registers Inter and
+JetBrains Mono with GPUI; the theme uses these for UI and code text.
+
+The `define_icons!` declaration in `ganymede-gui/src/icon.rs` is the icon
+allowlist. For example, adding `CircleCheck => "regular/check-circle.svg",`
+generates `Icon::CircleCheck`, its path, and its embed entry together. Render it
+with `Icon::CircleCheck.svg().size(...).text_color(...)`, using theme values.
+Only declared icons are embedded, alongside their license. Font weights are
+selected explicitly in `ganymede-gui/src/assets.rs`.
+
 ## Jupyter clients
 
 `ganymede_core::jupyter` exposes `JupyterRestClient`, `KernelClient`, and
