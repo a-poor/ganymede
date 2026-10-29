@@ -5,7 +5,7 @@
       "source": "a-poor/skills",
       "sourceType": "github",
       "skillPath": "skills/gpui/SKILL.md",
-      "computedHash": "2f35edfdc6b3bb8b202a56f7e0c994b598b5478b033a96ca23b36a085b20a962"
+      "computedHash": "92f1156e39d1d0b06016db125db11360f2ec7d13c8fe8aa09074432f840254c8"
     },
     "gpui-editor": {
       "source": "a-poor/skills",
@@ -17,7 +17,7 @@
       "source": "a-poor/skills",
       "sourceType": "github",
       "skillPath": "skills/gpui-style/SKILL.md",
-      "computedHash": "bc22ac4e3ddba13854403844649c7db204e32d8fb566f881a29d046400d95af5"
+      "computedHash": "cbe58da01e5bfd97386436f793549b6367cfb7cadc40ceaf27d72a5fbcb14cb1"
     },
     "ratatui": {
       "source": "a-poor/skills",

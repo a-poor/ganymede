@@ -49,8 +49,14 @@ links via `color` + `underline: UnderlineStyle`. Styles flow correctly through w
 
 ## SVG
 
-- `svg().path(...)` paints with its **own** `text_color` — the parent's text color does *not* cascade into
-  it. Hover recoloring must be mirrored onto the svg explicitly (e.g. via `.group_hover(...)`).
+- **Every SVG needs its own `.text_color(...)`.** The parent's text color does *not* cascade into
+  `svg()`. The renderer checks the SVG's own `style.text.color`; if it is absent, it skips drawing
+  the icon, even when the SVG file is bundled correctly and its asset path is valid. Set an explicit
+  foreground from the app's theme, e.g. `svg().path("icons/x.svg").size(px(16.)).text_color(icon_color)`.
+  For a blank icon, check this before investigating asset loading.
+- Hover recoloring must also be applied directly to the SVG (e.g. via `.group_hover(...)`); changing
+  only the parent's `.text_color(...)` does not recolor it. Always set a base color as well so the icon
+  renders when it is not hovered.
 - Transforms: `.with_transformation(Transformation::rotate(percentage(0.25)))` (also `translate`/`scale`).
   This is the only high-level transform in gpui — divs have no CSS-style `transform` (see layout-style.md).
 

@@ -244,8 +244,9 @@ div()
 - Group names are **window-global**: every element sharing one name forms a single group, so repeated rows
   need per-row names (`format!("row-{id}")`) or all rows reveal together. The styled element doesn't have
   to be a descendant of the group.
-- `svg()` does not inherit the parent's text color — mirror hover recoloring onto it via `group_hover`
-  (see [text-styling.md](text-styling.md)).
+- `svg()` does not inherit the parent's text color. Set `.text_color(...)` directly on the SVG or GPUI
+  skips drawing it, even with a correctly bundled asset. Set a base color, then mirror hover recoloring
+  onto it via `group_hover` (see [text-styling.md](text-styling.md#svg)).
 - `.tab_group()` is an unrelated namesake (keyboard tab scoping), not a style group.
 
 ## Transforms & animation

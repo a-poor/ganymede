@@ -8,7 +8,7 @@ Contents: [Preamble](#preamble) · [Button](#button) · [Icon button](#icon-butt
 
 ```rust
 use crate::theme::{ActiveTheme, SurfaceKind, Theme};
-use gpui::{BoxShadow, prelude::*, div, point, px, FontWeight, SharedString};
+use gpui::{BoxShadow, prelude::*, div, point, px, svg, FontWeight, SharedString};
 ```
 
 Every recipe starts by resolving the surface it is drawn onto:
@@ -106,19 +106,32 @@ Outline variant, if needed: transparent background, `border_1` + `border_color(s
 
 ## Icon button
 
-Same as ghost, square, icon inherits `text_color`:
+Same as ghost, square, with explicit normal and hover foreground tokens on the SVG:
 
 ```rust
+// Use an ID that distinguishes this button instance across the window.
+let hover_group: SharedString = format!("icon-button-{:?}", self.id).into();
+
 div()
     .id(self.id)
+    .group(hover_group.clone())
     .size(px(28.)).flex().items_center().justify_center()
     .rounded(t.radius.sm())
-    .text_color(s.muted_fg)
-    .hover(|st| st.bg(s.accent).text_color(s.accent_fg))
-    .child(svg().path(self.icon).size(px(15.)).text_color(gpui::Hsla::default()))
+    .hover(|st| st.bg(s.accent))
+    .child(
+        svg()
+            .path(self.icon)
+            .size(px(15.))
+            .text_color(s.muted_fg)
+            .group_hover(hover_group, |st| st.text_color(s.accent_fg)),
+    )
 ```
 
-Icons in GPUI are `svg()` tinted by `.text_color()`. Set the color on the icon's *parent* and let it cascade; do not hardcode icon colors.
+`svg()` does **not** inherit its parent's text color. Without a color on the SVG itself, GPUI skips
+drawing it even if its asset path and bundle are correct. Use the appropriate theme token directly;
+`Hsla::default()` is a concrete color, not an inheritance marker. Mirror parent hover recoloring onto
+the SVG with `group_hover` so hovering anywhere on the button updates the icon. Group names must
+distinguish button instances across the window.
 
 ## Text input
 

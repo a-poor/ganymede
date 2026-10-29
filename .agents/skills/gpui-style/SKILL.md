@@ -78,7 +78,11 @@ This is what makes contrast correct by construction across every theme and both 
 
 `border`, `input`, and `ring` have no foreground pair — they are line colors, never surfaces.
 
-`.text_color()` cascades to children in GPUI, so set it once on the container that owns the surface rather than on every leaf.
+`.text_color()` cascades to text children, so set it on the container that owns the surface.
+**SVG icons are an exception:** set `.text_color(...)` directly on every `svg()` using the appropriate
+theme foreground token. Without its own color, the SVG renderer skips drawing the icon, even when
+the asset is bundled correctly. Parent hover colors do not recolor SVGs either; apply the hover token
+on the SVG via `.group_hover(...)` (see the [icon-button recipe](references/component-recipes.md#icon-button)).
 
 ## 3. Regions → surfaces (GPUI has no CSS cascade, so this is explicit)
 
@@ -208,6 +212,7 @@ Either way components are identical, because they only ever see the resolved `Th
 
 - [ ] Zero `rgb(0x…)` / `rgba(0x…)` / `hsla(…)` literals in render code (scrim excepted).
 - [ ] Every `.bg()` on a surface has a matching `.text_color()` from the same pair.
+- [ ] Every `svg()` has its own theme-based `.text_color(...)`; any hover recoloring is applied directly to the SVG too.
 - [ ] Radius comes from `t.radius.*()`, not `.rounded_md()` / `.rounded_lg()`.
 - [ ] Secondary text uses `s.muted_fg`; no third gray was invented.
 - [ ] The region uses the surface from §3's table, and its border comes from that surface.
