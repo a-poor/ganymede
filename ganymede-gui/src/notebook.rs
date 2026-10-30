@@ -61,6 +61,7 @@ impl RunQueue {
 
 pub struct Notebook {
     cells: Vec<Entity<CodeCell>>,
+    selected: usize,
     counter: ExecutionCounter,
     runs: RunQueue,
     scroll: ScrollHandle,
@@ -70,6 +71,7 @@ impl Notebook {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut notebook = Self {
             cells: vec![],
+            selected: 0,
             counter: ExecutionCounter::default(),
             runs: RunQueue::default(),
             scroll: ScrollHandle::new(),
@@ -90,6 +92,7 @@ impl Notebook {
                 return;
             };
             match event {
+                CellEvent::Changed | CellEvent::RunProgress => cx.notify(),
                 CellEvent::Selected => this.select(index, cx),
                 CellEvent::DeleteCell => {
                     // Cancel the disposable simulation before removing the entity.
@@ -145,6 +148,7 @@ impl Notebook {
                             i
                         }
                     });
+                    this.select(target, cx);
                     this.scroll.scroll_to_item(target);
                     cx.notify();
                 }
@@ -178,7 +182,189 @@ impl Notebook {
         self.cells.push(cell);
     }
 
+    /// Draft baseline is the initial empty cell until server persistence is wired up.
+    pub fn is_dirty(&self, cx: &gpui::App) -> bool {
+        self.cells.len() != 1
+            || self.counter.0 > 0
+            || self
+                .cells
+                .iter()
+                .any(|cell| !cell.read(cx).text().is_empty())
+    }
+    pub fn running_spinner(&self, cx: &gpui::App) -> Option<char> {
+        self.runs
+            .active
+            .and_then(|index| self.cells.get(index))
+            .and_then(|cell| cell.read(cx).running_spinner())
+    }
+
+    pub fn focus_selected(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(cell) = self.cells.get(self.selected) {
+            cell.read(cx).focus_handle(cx).focus(window, cx);
+        }
+    }
+
+    fn toolbar_action(
+        &mut self,
+        action: ToolbarAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            ToolbarAction::Add | ToolbarAction::Paste => {
+                let text = if matches!(action, ToolbarAction::Paste) {
+                    cx.read_from_clipboard()
+                        .and_then(|item| item.text())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                let target = self.selected + 1;
+                self.append_cell(window, cx);
+                let added = self.cells.pop().unwrap();
+                added.update(cx, |cell, cx| cell.set_text(text, cx));
+                self.runs.remap(|i| if i >= target { i + 1 } else { i });
+                self.cells.insert(target, added);
+                self.select(target, cx);
+                self.scroll.scroll_to_item(target);
+            }
+            ToolbarAction::Copy | ToolbarAction::Cut => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                    self.cells[self.selected].read(cx).text().to_owned(),
+                ));
+                if matches!(action, ToolbarAction::Cut) {
+                    let index = self.selected;
+                    self.cells[index]
+                        .update(cx, |cell, cx| cell.simulate_run(None, String::new(), cx));
+                    self.runs.remove(index);
+                    self.cells.remove(index);
+                    if self.cells.is_empty() {
+                        self.append_cell(window, cx);
+                    }
+                    self.select(index.min(self.cells.len() - 1), cx);
+                    self.start_next_run(cx);
+                }
+            }
+            ToolbarAction::Run | ToolbarAction::RunAll => {
+                let indices = if matches!(action, ToolbarAction::RunAll) {
+                    0..self.cells.len()
+                } else {
+                    self.selected..self.selected + 1
+                };
+                for index in indices {
+                    let source = self.cells[index].read(cx).text().to_owned();
+                    if let Some(count) = self.counter.run(&source) {
+                        self.runs.pending.push_back((index, count, source));
+                    }
+                }
+                self.start_next_run(cx);
+            }
+            ToolbarAction::Stop | ToolbarAction::Restart => {
+                self.runs = RunQueue::default();
+                for cell in &self.cells {
+                    cell.update(cx, |cell, cx| {
+                        cell.simulate_run(None, String::new(), cx);
+                        cell.set_queued(false, cx);
+                    });
+                }
+                if matches!(action, ToolbarAction::Restart) {
+                    self.counter = ExecutionCounter::default();
+                }
+            }
+        }
+        self.focus_selected(window, cx);
+        cx.notify();
+    }
+
+    fn toolbar(&self, cx: &Context<Self>) -> gpui::Div {
+        use crate::{icon::Icon, theme::ActiveTheme, workspace::icon_button};
+        let t = cx.theme();
+        div()
+            .h(gpui::px(36.))
+            .flex_shrink_0()
+            .px_2()
+            .flex()
+            .items_center()
+            .gap(gpui::px(2.))
+            .border_b_1()
+            .border_color(t.app.border)
+            .bg(t.app.bg)
+            .text_color(t.app.fg)
+            .child(
+                icon_button(
+                    "save-notebook",
+                    "Save — requires a server connection",
+                    Icon::Save,
+                    cx,
+                )
+                .opacity(0.4)
+                .cursor_default()
+                .tab_index(-1),
+            )
+            .child(
+                div()
+                    .h(gpui::px(16.))
+                    .w(gpui::px(1.))
+                    .mx_1()
+                    .bg(t.app.border),
+            )
+            .children(
+                [
+                    (ToolbarAction::Add, "Insert cell", Icon::Plus),
+                    (ToolbarAction::Cut, "Cut cell", Icon::Scissors),
+                    (ToolbarAction::Copy, "Copy cell", Icon::Copy),
+                    (ToolbarAction::Paste, "Paste cell", Icon::Clipboard),
+                    (ToolbarAction::Run, "Run cell", Icon::Play),
+                    (ToolbarAction::Stop, "Interrupt execution", Icon::Stop),
+                    (
+                        ToolbarAction::Restart,
+                        "Restart demo execution",
+                        Icon::Restart,
+                    ),
+                    (ToolbarAction::RunAll, "Run all cells", Icon::RunAll),
+                ]
+                .into_iter()
+                .map(|(action, label, icon)| {
+                    icon_button(label, label, icon, cx)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.toolbar_action(action, window, cx)
+                        }))
+                        .on_key_down(cx.listener(
+                            move |this, event: &gpui::KeyDownEvent, window, cx| {
+                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                    this.toolbar_action(action, window, cx);
+                                    cx.stop_propagation();
+                                }
+                            },
+                        ))
+                }),
+            )
+            .child(
+                div()
+                    .h(gpui::px(16.))
+                    .w(gpui::px(1.))
+                    .mx_1()
+                    .bg(t.app.border),
+            )
+            .child(
+                div()
+                    .text_size(t.font.xs)
+                    .px_2()
+                    .text_color(t.app.muted_fg)
+                    .child("Code"),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .text_size(t.font.xs)
+                    .text_color(t.app.muted_fg)
+                    .flex_shrink_0()
+                    .child("No kernel"),
+            )
+    }
+
     fn start_next_run(&mut self, cx: &mut Context<Self>) {
+        cx.notify();
         if let Some((index, count, source)) = self.runs.start_next() {
             self.cells[index].update(cx, |cell, cx| cell.simulate_run(Some(count), source, cx));
         }
@@ -190,26 +376,47 @@ impl Notebook {
     }
 
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.selected = index;
         for (position, cell) in self.cells.iter().enumerate() {
             cell.update(cx, |cell, cx| cell.set_current(position == index, cx));
         }
     }
 }
 
+#[derive(Clone, Copy)]
+enum ToolbarAction {
+    Add,
+    Cut,
+    Copy,
+    Paste,
+    Run,
+    Stop,
+    Restart,
+    RunAll,
+}
+
 impl Render for Notebook {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .id("notebook-cells")
             .size_full()
             .min_h_0()
             .flex()
             .flex_col()
-            .gap_3()
-            .p_6()
-            .pl_4()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .children(self.cells.iter().cloned())
+            .child(self.toolbar(cx))
+            .child(
+                div()
+                    .id("notebook-cells")
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_4()
+                    .pl_3()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .children(self.cells.iter().cloned()),
+            )
     }
 }
 

@@ -33,6 +33,20 @@ macro_rules! define_icons {
 }
 
 define_icons! {
+    Plus => "regular/plus.svg",
+    Play => "regular/play.svg",
+    Stop => "regular/stop.svg",
+    Restart => "regular/arrow-clockwise.svg",
+    Save => "regular/floppy-disk.svg",
+    Scissors => "regular/scissors.svg",
+    Clipboard => "regular/clipboard.svg",
+    Terminal => "regular/terminal-window.svg",
+    FileText => "regular/file-text.svg",
+    FileCode => "regular/file-code.svg",
+    Notebook => "regular/notebook.svg",
+    CaretDown => "regular/caret-down.svg",
+    RunAll => "regular/fast-forward.svg",
+
     Info => "regular/info.svg",
     CheckCircle => "regular/check-circle.svg",
     WarningCircle => "regular/warning-circle.svg",

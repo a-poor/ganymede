@@ -163,6 +163,7 @@ fn from_utf16(text: &str, offset: usize) -> usize {
 
 #[derive(Clone, Copy)]
 pub enum CellEvent {
+    Changed,
     Duplicate,
     DeleteCell,
     MoveUp,
@@ -172,6 +173,7 @@ pub enum CellEvent {
     Selected,
     RunAndAdvance,
     RunFinished,
+    RunProgress,
 }
 
 impl gpui::EventEmitter<CellEvent> for CodeCell {}
@@ -180,6 +182,7 @@ const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '�
 
 pub struct CodeCell {
     current: bool,
+    document: bool,
     menu_open: bool,
     execution_count: Option<u64>,
     running_frame: Option<usize>,
@@ -229,6 +232,7 @@ impl CodeCell {
         ];
         Self {
             current: false,
+            document: false,
             menu_open: false,
             execution_count: None,
             running_frame: None,
@@ -254,8 +258,15 @@ impl CodeCell {
         }
     }
 
+    pub fn new_document(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut this = Self::new(window, cx);
+        this.document = true;
+        this
+    }
+
     pub fn set_text(&mut self, text: String, cx: &mut Context<Self>) {
         self.buffer.text = text;
+        cx.emit(CellEvent::Changed);
         cx.notify();
     }
 
@@ -268,6 +279,10 @@ impl CodeCell {
             self.current = current;
             cx.notify();
         }
+    }
+
+    pub fn running_spinner(&self) -> Option<char> {
+        self.running_frame.map(|frame| SPINNER[frame])
     }
 
     pub fn set_queued(&mut self, queued: bool, cx: &mut Context<Self>) {
@@ -293,6 +308,8 @@ impl CodeCell {
                             if tick == 15 {
                                 this.output = Some(source.clone());
                                 cx.emit(CellEvent::RunFinished);
+                            } else {
+                                cx.emit(CellEvent::RunProgress);
                             }
                             cx.notify();
                         })
@@ -536,6 +553,7 @@ impl EntityInputHandler for CodeCell {
             .or(self.marked.clone())
             .unwrap_or_else(|| self.buffer.selection());
         self.edit(range, text);
+        cx.emit(CellEvent::Changed);
         self.changed(window, cx);
     }
     fn replace_and_mark_text_in_range(
@@ -558,6 +576,7 @@ impl EntityInputHandler for CodeCell {
             self.buffer.anchor = range.start + from_utf16(text, selection.start);
             self.buffer.head = range.start + from_utf16(text, selection.end);
         }
+        cx.emit(CellEvent::Changed);
         self.changed(window, cx);
     }
     fn bounds_for_range(
@@ -701,12 +720,14 @@ impl Render for CodeCell {
                 if let Some(previous) = this.undo.pop() {
                     this.redo
                         .push(std::mem::replace(&mut this.buffer, previous));
+                    cx.emit(CellEvent::Changed);
                     this.changed(w, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &Redo, w, cx| {
                 if let Some(next) = this.redo.pop() {
                     this.undo.push(std::mem::replace(&mut this.buffer, next));
+                    cx.emit(CellEvent::Changed);
                     this.changed(w, cx);
                 }
             }))
@@ -719,11 +740,21 @@ impl Render for CodeCell {
                     .id("code-scroll")
                     .w_full()
                     .h(height)
+                    .when(self.document, |s| s.h_full())
                     .overflow_scroll()
                     .track_scroll(&self.scroll)
                     .child(CellText { cell: cx.entity() }),
             );
 
+        if self.document {
+            return editor
+                .h_full()
+                .bg(theme.app.bg)
+                .text_color(theme.app.fg)
+                .border_0()
+                .pr_3()
+                .into_any_element();
+        }
         let popover = theme.popover;
         let menu = div()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -967,6 +998,7 @@ impl Render for CodeCell {
                         ),
                 )
             })
+            .into_any_element()
     }
 }
 

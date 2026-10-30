@@ -75,7 +75,7 @@ mod tests {
         }
         assert!(
             Assets
-                .load("icons/phosphor/regular/play.svg")
+                .load("icons/phosphor/regular/airplane.svg")
                 .unwrap()
                 .is_none()
         );

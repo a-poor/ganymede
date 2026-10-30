@@ -5,15 +5,17 @@ mod notebook;
 mod settings;
 pub mod theme;
 pub mod toast;
+mod workspace;
 
 use gpui::{
     App, Bounds, Context, Entity, FontWeight, KeyBinding, Menu, MenuItem, TitlebarOptions, Window,
     WindowBounds, WindowControlArea, WindowOptions, actions, div, point, prelude::*, px, size,
 };
 use icon::Icon;
+use std::time::{Duration, Instant};
 use theme::{ActiveTheme, Theme};
 
-actions!(ganymede, [Quit]);
+actions!(ganymede, [Quit, NewTab, CloseTab]);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SidebarTab {
@@ -21,15 +23,39 @@ enum SidebarTab {
     Kernels,
 }
 
+const SIDEBAR_DURATION: Duration = Duration::from_millis(220);
+
+struct SidebarMotion {
+    from: f32,
+    to: f32,
+    started: Instant,
+}
+impl SidebarMotion {
+    fn value(&self, now: Instant) -> f32 {
+        let progress = (now.duration_since(self.started).as_secs_f32()
+            / SIDEBAR_DURATION.as_secs_f32())
+        .min(1.);
+        self.to + (self.from - self.to) * (1. - progress).powi(3)
+    }
+    fn set_open(&mut self, open: bool, now: Instant) {
+        let target = if open { 1. } else { 0. };
+        if self.to != target {
+            self.from = self.value(now);
+            self.to = target;
+            self.started = now;
+        }
+    }
+}
+
 struct Ganymede {
-    notebook: Entity<notebook::Notebook>,
+    workspace: Entity<workspace::Workspace>,
     toasts: Entity<toast::ToastHost>,
     sidebar_open: bool,
+    sidebar_motion: SidebarMotion,
     sidebar_tab: SidebarTab,
     settings_window: Option<gpui::WindowHandle<settings::Settings>>,
     notebooks_expanded: bool,
     folder_focus: gpui::FocusHandle,
-    file_focus: gpui::FocusHandle,
 }
 
 impl Ganymede {
@@ -40,18 +66,29 @@ impl Ganymede {
         })
         .detach();
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
-        let notebook = cx.new(|cx| notebook::Notebook::new(window, cx));
+        let workspace = cx.new(|cx| workspace::Workspace::new(window, cx));
+        cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
         let toasts = cx.new(|cx| toast::ToastHost::new(window, cx));
         Self {
-            notebook,
+            workspace,
             toasts,
             sidebar_open: true,
+            sidebar_motion: SidebarMotion {
+                from: 1.,
+                to: 1.,
+                started: Instant::now(),
+            },
             sidebar_tab: SidebarTab::Files,
             settings_window: None,
             notebooks_expanded: true,
             folder_focus: cx.focus_handle(),
-            file_focus: cx.focus_handle(),
         }
+    }
+
+    fn set_sidebar_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.sidebar_open = open;
+        self.sidebar_motion.set_open(open, Instant::now());
+        cx.notify();
     }
 
     fn rail_button(
@@ -160,41 +197,9 @@ impl Ganymede {
                             .child("Notebooks"),
                     )
                     .when(self.notebooks_expanded, |tree| {
-                        tree.child(
-                            div()
-                                .id("scratch-notebook")
-                                .track_focus(&self.file_focus)
-                                .on_mouse_down_out(cx.listener(|this, _, window, cx| {
-                                    if this.file_focus.is_focused(window) {
-                                        window.blur();
-                                        cx.notify();
-                                    }
-                                }))
-                                .flex()
-                                .items_center()
-                                .gap_1p5()
-                                .h(px(24.))
-                                .pl(px(16.))
-                                .pr_2()
-                                .rounded(theme.radius.md())
-                                .cursor_pointer()
-                                .tab_index(0)
-                                .bg(theme.active_file_bg)
-                                .text_color(theme.active_file_fg)
-                                .hover(|s| {
-                                    s.bg(theme.active_file_bg).text_color(theme.active_file_fg)
-                                })
-                                .active(|s| s.bg(surface.accent).text_color(surface.accent_fg))
-                                .focus(|s| s.border_1().border_color(surface.ring))
-                                .child(
-                                    Icon::File
-                                        .svg()
-                                        .size(px(14.))
-                                        .text_color(theme.active_file_fg),
-                                )
-                                .child("Untitled.ipynb"),
-                        )
-                    }),
+                        tree.child(workspace::Workspace::files(&self.workspace, cx, true))
+                    })
+                    .child(workspace::Workspace::files(&self.workspace, cx, false)),
             ),
             SidebarTab::Kernels => panel
                 .child(div().pt_3().child("No connected kernels"))
@@ -224,13 +229,44 @@ impl Ganymede {
 }
 
 impl Render for Ganymede {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let now = Instant::now();
+        let reveal = if cx.reduce_motion() {
+            self.sidebar_motion.to
+        } else {
+            self.sidebar_motion.value(now)
+        };
+        if !cx.reduce_motion()
+            && now.duration_since(self.sidebar_motion.started) < SIDEBAR_DURATION
+            && self.sidebar_motion.from != self.sidebar_motion.to
+        {
+            window.request_animation_frame();
+        }
+        let sidebar_width = 240. * reveal;
         let theme = cx.theme();
         let outer = theme.sidebar;
         let sidebar = theme.sidebar_content;
         let body = theme.app;
         div()
             .id("main-window")
+            .on_action(cx.listener(|this, _: &NewTab, window, cx| {
+                this.workspace
+                    .update(cx, |workspace, cx| workspace.open_launcher(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                this.workspace
+                    .update(cx, |workspace, cx| workspace.close_active(window, cx));
+            }))
+            .on_key_down(|event, window, cx| {
+                if event.keystroke.key == "tab" {
+                    if event.keystroke.modifiers.shift {
+                        window.focus_prev(cx);
+                    } else {
+                        window.focus_next(cx);
+                    }
+                    cx.stop_propagation();
+                }
+            })
             .relative()
             .size_full()
             .flex()
@@ -270,8 +306,7 @@ impl Render for Ganymede {
                             })
                             .on_click(cx.listener(|this, _, _, cx| {
                                 cx.stop_propagation();
-                                this.sidebar_open = !this.sidebar_open;
-                                cx.notify();
+                                this.set_sidebar_open(!this.sidebar_open, cx);
                             }))
                             .child(
                                 Icon::SidebarSimple
@@ -279,7 +314,9 @@ impl Render for Ganymede {
                                     .size(px(18.))
                                     .text_color(outer.muted_fg),
                             ),
-                    ),
+                    )
+                    .child(div().w(px((sidebar_width - 80.).max(0.))).flex_shrink_0())
+                    .child(workspace::Workspace::header(&self.workspace, cx)),
             )
             .child(
                 div()
@@ -308,8 +345,7 @@ impl Render for Ganymede {
                                 .on_click(cx.listener(
                                     |this, _, _, cx| {
                                         this.sidebar_tab = SidebarTab::Files;
-                                        this.sidebar_open = true;
-                                        cx.notify();
+                                        this.set_sidebar_open(true, cx);
                                     },
                                 )),
                             )
@@ -323,8 +359,7 @@ impl Render for Ganymede {
                                 .on_click(cx.listener(
                                     |this, _, _, cx| {
                                         this.sidebar_tab = SidebarTab::Kernels;
-                                        this.sidebar_open = true;
-                                        cx.notify();
+                                        this.set_sidebar_open(true, cx);
                                     },
                                 )),
                             )
@@ -348,20 +383,25 @@ impl Render for Ganymede {
                             .overflow_hidden()
                             .bg(outer.bg)
                             .text_color(outer.fg)
-                            .when(self.sidebar_open, |body| {
+                            .when(sidebar_width > 0., |body| {
                                 body.child(
                                     div()
-                                        .w(px(240.))
+                                        .w(px(sidebar_width))
                                         .flex_shrink_0()
                                         .h_full()
-                                        .flex()
-                                        .flex_col()
+                                        .overflow_hidden()
                                         .bg(sidebar.bg)
                                         .text_color(sidebar.fg)
                                         .rounded_l(theme.radius.xl())
                                         .border_r_1()
                                         .border_color(sidebar.border)
-                                        .child(self.sidebar_content(cx)),
+                                        .child(
+                                            div()
+                                                .w(px(240.))
+                                                .h_full()
+                                                .opacity(reveal)
+                                                .child(self.sidebar_content(cx)),
+                                        ),
                                 )
                             })
                             .child(
@@ -372,12 +412,12 @@ impl Render for Ganymede {
                                     .bg(body.bg)
                                     .text_color(body.fg)
                                     .rounded_r(theme.radius.xl())
-                                    .when(!self.sidebar_open, |body| {
+                                    .when(sidebar_width == 0., |body| {
                                         body.rounded_l(theme.radius.xl())
                                     })
                                     .flex()
                                     .flex_col()
-                                    .child(self.notebook.clone()),
+                                    .child(self.workspace.clone()),
                             ),
                     ),
             )
@@ -397,7 +437,27 @@ fn main() {
             } else {
                 "ctrl-q"
             };
-            cx.bind_keys([KeyBinding::new(quit_key, Quit, None)]);
+            cx.bind_keys([
+                KeyBinding::new(quit_key, Quit, None),
+                KeyBinding::new(
+                    if cfg!(target_os = "macos") {
+                        "cmd-t"
+                    } else {
+                        "ctrl-t"
+                    },
+                    NewTab,
+                    None,
+                ),
+                KeyBinding::new(
+                    if cfg!(target_os = "macos") {
+                        "cmd-w"
+                    } else {
+                        "ctrl-w"
+                    },
+                    CloseTab,
+                    None,
+                ),
+            ]);
             cx.set_menus(vec![
                 Menu::new("Ganymede").items([MenuItem::action("Quit Ganymede", Quit)]),
             ]);
@@ -425,4 +485,27 @@ fn main() {
             .expect("failed to open the Ganymede window");
             cx.activate(true);
         });
+}
+
+#[cfg(test)]
+mod sidebar_tests {
+    use super::*;
+    #[test]
+    fn reversing_sidebar_motion_preserves_current_position() {
+        let start = Instant::now();
+        let mut motion = SidebarMotion {
+            from: 1.,
+            to: 1.,
+            started: start,
+        };
+        motion.set_open(false, start);
+        let midway = start + SIDEBAR_DURATION / 2;
+        let before = motion.value(midway);
+        assert!(before > 0. && before < 1.);
+        motion.set_open(true, midway);
+        assert_eq!(motion.value(midway), before);
+        assert_eq!(motion.value(midway + SIDEBAR_DURATION), 1.);
+        motion.set_open(false, midway + SIDEBAR_DURATION);
+        assert_eq!(motion.value(midway + SIDEBAR_DURATION * 2), 0.);
+    }
 }
