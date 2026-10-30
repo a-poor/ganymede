@@ -251,9 +251,16 @@ impl Workspace {
                             .text_size(t.font.xs)
                             .cursor_pointer()
                             .when(selected, |s| {
-                                s.bg(t.app.bg)
+                                // Inset shadows use this element's rounded bounds; clipping
+                                // also keeps tab content inside the same silhouette.
+                                s.overflow_hidden()
+                                    .bg(t.app.bg)
                                     .text_color(t.app.fg)
-                                    .shadow(vec![t.body_shadow.clone()])
+                                    .shadow(vec![
+                                        t.body_shadow.clone(),
+                                        t.active_tab_edges[0].clone(),
+                                        t.active_tab_edges[1].clone(),
+                                    ])
                             })
                             .when(!selected, |s| {
                                 s.text_color(t.sidebar.muted_fg)

@@ -275,6 +275,7 @@ pub struct Theme {
     pub input: Hsla,
     pub scrim: Hsla,
     pub body_shadow: BoxShadow,
+    pub active_tab_edges: [BoxShadow; 2],
     pub toast_shadow: BoxShadow,
     pub segment_track_bg: Hsla,
     pub selected_segment_bg: Hsla,
@@ -457,6 +458,22 @@ impl ThemeSpec {
             )
             .blur_radius(px(2.)),
 
+            active_tab_edges: [
+                BoxShadow::new(
+                    px(0.75),
+                    px(0.75),
+                    alpha(gpui::white(), if self.is_dark { 0.10 } else { 0.85 }),
+                )
+                .blur_radius(px(0.))
+                .inset(),
+                BoxShadow::new(
+                    px(-0.75),
+                    px(-0.75),
+                    alpha(gpui::black(), if self.is_dark { 0.20 } else { 0.07 }),
+                )
+                .blur_radius(px(0.))
+                .inset(),
+            ],
             segment_track_bg: card.bg.blend(alpha(sidebar.accent, 0.4)),
             selected_segment_bg: gpui::rgb(0xffffff).into(),
             selected_segment_fg: gpui::rgb(0x242830).into(),
@@ -602,9 +619,16 @@ impl AppearancePreference {
         }
     }
 
-    pub fn apply(self, appearance: gpui::WindowAppearance, cx: &mut App) {
+    pub fn apply(self, _appearance: gpui::WindowAppearance, cx: &mut App) {
         cx.set_global(self);
-        let spec = if self.is_dark(appearance) {
+        // Keep native window edges in sync with the content theme. Clearing the
+        // override first also restores the actual OS appearance for System.
+        cx.set_window_appearance(match self {
+            Self::System => None,
+            Self::Light => Some(gpui::WindowAppearance::Light),
+            Self::Dark => Some(gpui::WindowAppearance::Dark),
+        });
+        let spec = if self.is_dark(cx.window_appearance()) {
             ThemeSpec::dark()
         } else {
             ThemeSpec::light()

@@ -183,6 +183,7 @@ const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '�
 pub struct CodeCell {
     current: bool,
     document: bool,
+    kind: ganymede_core::notebook::CellKind,
     menu_open: bool,
     execution_count: Option<u64>,
     running_frame: Option<usize>,
@@ -233,6 +234,7 @@ impl CodeCell {
         Self {
             current: false,
             document: false,
+            kind: ganymede_core::notebook::CellKind::Code,
             menu_open: false,
             execution_count: None,
             running_frame: None,
@@ -272,6 +274,20 @@ impl CodeCell {
 
     pub fn text(&self) -> &str {
         &self.buffer.text
+    }
+
+    pub fn kind(&self) -> ganymede_core::notebook::CellKind {
+        self.kind
+    }
+
+    pub fn set_kind(&mut self, kind: ganymede_core::notebook::CellKind, cx: &mut Context<Self>) {
+        if self.kind != kind {
+            self.kind = kind;
+            self.simulate_run(None, String::new(), cx);
+            self.set_queued(false, cx);
+            cx.emit(CellEvent::Changed);
+            cx.notify();
+        }
     }
 
     pub fn set_current(&mut self, current: bool, cx: &mut Context<Self>) {
@@ -913,6 +929,7 @@ impl Render for CodeCell {
                     })
                     .text_right()
                     .child(match self.running_frame {
+                        _ if self.kind != ganymede_core::notebook::CellKind::Code => String::new(),
                         Some(frame) => format!("[{}]:", SPINNER[frame]),
                         None if self.queued => "[*]:".to_owned(),
                         None => match self.execution_count {

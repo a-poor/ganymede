@@ -3,6 +3,8 @@ use std::collections::VecDeque;
 
 use gpui::{Context, Entity, Focusable, ScrollHandle, Window, div, prelude::*};
 
+use ganymede_core::notebook::CellKind;
+
 use crate::code_cell::{CellEvent, CodeCell};
 
 #[derive(Default)]
@@ -62,6 +64,9 @@ impl RunQueue {
 pub struct Notebook {
     cells: Vec<Entity<CodeCell>>,
     selected: usize,
+    type_menu_open: bool,
+    type_menu_index: usize,
+    type_focus: gpui::FocusHandle,
     counter: ExecutionCounter,
     runs: RunQueue,
     scroll: ScrollHandle,
@@ -72,6 +77,9 @@ impl Notebook {
         let mut notebook = Self {
             cells: vec![],
             selected: 0,
+            type_menu_open: false,
+            type_menu_index: 0,
+            type_focus: cx.focus_handle(),
             counter: ExecutionCounter::default(),
             runs: RunQueue::default(),
             scroll: ScrollHandle::new(),
@@ -117,6 +125,11 @@ impl Notebook {
                     } else {
                         String::new()
                     };
+                    let kind = if matches!(event, CellEvent::Duplicate) {
+                        cell.read(cx).kind()
+                    } else {
+                        CellKind::Code
+                    };
                     let target = if matches!(event, CellEvent::InsertAbove) {
                         index
                     } else {
@@ -124,7 +137,10 @@ impl Notebook {
                     };
                     this.append_cell(window, cx);
                     let added = this.cells.pop().unwrap();
-                    added.update(cx, |cell, cx| cell.set_text(source, cx));
+                    added.update(cx, |cell, cx| {
+                        cell.set_text(source, cx);
+                        cell.set_kind(kind, cx);
+                    });
                     this.runs.remap(|i| if i >= target { i + 1 } else { i });
                     this.cells.insert(target, added.clone());
                     this.select(target, cx);
@@ -158,7 +174,9 @@ impl Notebook {
                 }
                 CellEvent::RunAndAdvance => {
                     let source = cell.read(cx).text().to_owned();
-                    let count = this.counter.run(&source);
+                    let count = (cell.read(cx).kind() == CellKind::Code)
+                        .then(|| this.counter.run(&source))
+                        .flatten();
                     if let Some(count) = count {
                         this.runs.pending.push_back((index, count, source));
                         this.start_next_run(cx);
@@ -186,10 +204,9 @@ impl Notebook {
     pub fn is_dirty(&self, cx: &gpui::App) -> bool {
         self.cells.len() != 1
             || self.counter.0 > 0
-            || self
-                .cells
-                .iter()
-                .any(|cell| !cell.read(cx).text().is_empty())
+            || self.cells.iter().any(|cell| {
+                !cell.read(cx).text().is_empty() || cell.read(cx).kind() != CellKind::Code
+            })
     }
     pub fn running_spinner(&self, cx: &gpui::App) -> Option<char> {
         self.runs
@@ -252,6 +269,9 @@ impl Notebook {
                     self.selected..self.selected + 1
                 };
                 for index in indices {
+                    if self.cells[index].read(cx).kind() != CellKind::Code {
+                        continue;
+                    }
                     let source = self.cells[index].read(cx).text().to_owned();
                     if let Some(count) = self.counter.run(&source) {
                         self.runs.pending.push_back((index, count, source));
@@ -276,6 +296,145 @@ impl Notebook {
         cx.notify();
     }
 
+    fn choose_cell_type(&mut self, kind: CellKind, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cells[self.selected].read(cx).kind() != kind {
+            self.runs.finish(self.selected);
+            self.runs.pending.retain(|run| run.0 != self.selected);
+            self.cells[self.selected].update(cx, |cell, cx| cell.set_kind(kind, cx));
+            self.start_next_run(cx);
+        }
+        self.type_menu_open = false;
+        self.focus_selected(window, cx);
+        cx.notify();
+    }
+
+    fn cell_type_control(&self, cx: &Context<Self>) -> impl IntoElement {
+        use crate::{icon::Icon, theme::ActiveTheme};
+        use gpui::{point, px};
+        let t = cx.theme();
+        let kinds = [CellKind::Code, CellKind::Markdown, CellKind::Raw];
+        let labels = ["Code", "Markdown", "Raw"];
+        let selected = kinds
+            .iter()
+            .position(|kind| *kind == self.cells[self.selected].read(cx).kind())
+            .unwrap();
+        div()
+            .id("cell-type-control")
+            .relative()
+            .child(
+                div()
+                    .id("cell-type")
+                    .track_focus(&self.type_focus)
+                    .tab_index(0)
+                    .h(px(26.))
+                    .w(px(100.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(t.font.xs)
+                    .text_color(t.app.fg)
+                    .rounded(t.radius.sm())
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.app.accent).text_color(t.app.accent_fg))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.type_menu_open = true;
+                        this.type_menu_index = selected;
+                        this.type_focus.focus(window, cx);
+                        cx.notify();
+                    }))
+                    .on_key_down(cx.listener(
+                        move |this, event: &gpui::KeyDownEvent, window, cx| {
+                            match event.keystroke.key.as_str() {
+                                "enter" | "space" if this.type_menu_open => {
+                                    this.choose_cell_type(kinds[this.type_menu_index], window, cx);
+                                }
+                                "enter" | "space" | "down" | "up" if !this.type_menu_open => {
+                                    this.type_menu_open = true;
+                                    this.type_menu_index = selected;
+                                }
+                                "down" => this.type_menu_index = (this.type_menu_index + 1) % 3,
+                                "up" => this.type_menu_index = (this.type_menu_index + 2) % 3,
+                                "escape" => this.type_menu_open = false,
+                                "tab" => {
+                                    this.type_menu_open = false;
+                                    cx.notify();
+                                    return;
+                                }
+                                _ => return,
+                            }
+                            cx.stop_propagation();
+                            cx.notify();
+                        },
+                    ))
+                    .child(labels[selected])
+                    .child(div().flex_1())
+                    .child(
+                        Icon::CaretDown
+                            .svg()
+                            .size(px(12.))
+                            .text_color(t.app.muted_fg),
+                    ),
+            )
+            .when(self.type_menu_open, |control| {
+                control.child(gpui::deferred(
+                    gpui::anchored()
+                        .offset(point(px(0.), px(4.)))
+                        .snap_to_window_with_margin(px(8.))
+                        .child(
+                            div()
+                                .id("cell-type-menu")
+                                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                    this.type_menu_open = false;
+                                    cx.notify();
+                                }))
+                                .w(px(132.))
+                                .p_1()
+                                .flex()
+                                .flex_col()
+                                .bg(t.popover.bg)
+                                .text_color(t.popover.fg)
+                                .border_1()
+                                .border_color(t.popover.border)
+                                .rounded(t.radius.lg())
+                                .shadow_lg()
+                                .occlude()
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation()
+                                })
+                                .children(kinds.into_iter().enumerate().map(|(index, kind)| {
+                                    div()
+                                        .id(labels[index])
+                                        .h(px(26.))
+                                        .px_2()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .text_size(t.font.xs)
+                                        .rounded(t.radius.sm())
+                                        .cursor_pointer()
+                                        .when(index == self.type_menu_index, |s| {
+                                            s.bg(t.popover.accent).text_color(t.popover.accent_fg)
+                                        })
+                                        .hover(|s| {
+                                            s.bg(t.popover.accent).text_color(t.popover.accent_fg)
+                                        })
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            this.choose_cell_type(kind, window, cx);
+                                        }))
+                                        .child(div().w(px(12.)).child(if index == selected {
+                                            "✓"
+                                        } else {
+                                            ""
+                                        }))
+                                        .child(labels[index])
+                                })),
+                        ),
+                ))
+            })
+    }
+
     fn toolbar(&self, cx: &Context<Self>) -> gpui::Div {
         use crate::{icon::Icon, theme::ActiveTheme, workspace::icon_button};
         let t = cx.theme();
@@ -288,7 +447,9 @@ impl Notebook {
             .gap(gpui::px(2.))
             .border_b_1()
             .border_color(t.app.border)
-            .bg(t.app.bg)
+            // The containing panel paints the background with rounded corners.
+            // GPUI's overflow mask is rectangular, so an opaque toolbar would
+            // paint over those corners.
             .text_color(t.app.fg)
             .child(
                 icon_button(
@@ -346,13 +507,7 @@ impl Notebook {
                     .mx_1()
                     .bg(t.app.border),
             )
-            .child(
-                div()
-                    .text_size(t.font.xs)
-                    .px_2()
-                    .text_color(t.app.muted_fg)
-                    .child("Code"),
-            )
+            .child(self.cell_type_control(cx))
             .child(div().flex_1())
             .child(
                 div()
@@ -377,6 +532,8 @@ impl Notebook {
 
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
         self.selected = index;
+        self.type_menu_open = false;
+        cx.notify();
         for (position, cell) in self.cells.iter().enumerate() {
             cell.update(cx, |cell, cx| cell.set_current(position == index, cx));
         }
