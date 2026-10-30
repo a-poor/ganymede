@@ -264,6 +264,8 @@ pub struct Theme {
     pub card: Surface,
     pub popover: Surface,
     pub sidebar: Surface,
+    pub sidebar_content: Surface,
+    pub rail_hover_bg: Hsla,
 
     pub secondary: Hsla,
     pub secondary_fg: Hsla,
@@ -273,6 +275,13 @@ pub struct Theme {
     pub input: Hsla,
     pub scrim: Hsla,
     pub body_shadow: BoxShadow,
+    pub segment_track_bg: Hsla,
+    pub selected_segment_bg: Hsla,
+    pub selected_segment_fg: Hsla,
+    pub selected_segment_shadow: BoxShadow,
+    pub selected_segment_edge: BoxShadow,
+    pub active_file_bg: Hsla,
+    pub active_file_fg: Hsla,
     pub chart: [Hsla; 5],
 
     // derived — see the `Derivation` rules
@@ -414,6 +423,11 @@ impl ThemeSpec {
             card,
             popover,
             sidebar,
+            rail_hover_bg: sidebar.bg.blend(alpha(sidebar.accent, 0.5)),
+            sidebar_content: Surface {
+                bg: sidebar.bg.blend(alpha(app.bg, 0.5)),
+                ..sidebar
+            },
 
             secondary: self.secondary,
             secondary_fg: self.secondary_foreground,
@@ -440,6 +454,42 @@ impl ThemeSpec {
             )
             .blur_radius(px(2.)),
 
+            segment_track_bg: card.bg.blend(alpha(sidebar.accent, 0.4)),
+            selected_segment_bg: gpui::rgb(0xffffff).into(),
+            selected_segment_fg: gpui::rgb(0x242830).into(),
+            selected_segment_shadow: BoxShadow::new(
+                px(0.),
+                px(0.75),
+                Hsla {
+                    h: 0.,
+                    s: 0.,
+                    l: 0.,
+                    a: 0.12,
+                },
+            )
+            .blur_radius(px(3.)),
+            selected_segment_edge: BoxShadow::new(
+                px(0.),
+                px(0.),
+                Hsla {
+                    h: 0.,
+                    s: 0.,
+                    l: 1.,
+                    a: 0.9,
+                },
+            )
+            .spread_radius(px(1.))
+            .inset(),
+            active_file_bg: if self.is_dark {
+                oklch(0.32, 0.08, 259.)
+            } else {
+                oklch(0.93, 0.04, 259.)
+            },
+            active_file_fg: if self.is_dark {
+                oklch(0.93, 0.04, 259.)
+            } else {
+                oklch(0.40, 0.14, 259.)
+            },
             radius: Radii { base: self.radius },
             font: self.font.clone(),
         }
@@ -525,12 +575,45 @@ impl ThemeSpec {
     }
 }
 
-pub fn set_appearance(appearance: gpui::WindowAppearance, cx: &mut App) {
-    let spec = match appearance {
-        gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark => ThemeSpec::dark(),
-        _ => ThemeSpec::light(),
-    };
-    cx.set_global(spec.resolve(&Derivation::default()));
+/// Kept independently from the resolved palette so System remains selected
+/// when the operating system changes appearance. Preserved across settings windows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AppearancePreference {
+    System,
+    #[default]
+    Light,
+    Dark,
+}
+
+impl Global for AppearancePreference {}
+
+impl AppearancePreference {
+    fn is_dark(self, appearance: gpui::WindowAppearance) -> bool {
+        match self {
+            Self::System => matches!(
+                appearance,
+                gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+            ),
+            Self::Light => false,
+            Self::Dark => true,
+        }
+    }
+
+    pub fn apply(self, appearance: gpui::WindowAppearance, cx: &mut App) {
+        cx.set_global(self);
+        let spec = if self.is_dark(appearance) {
+            ThemeSpec::dark()
+        } else {
+            ThemeSpec::light()
+        };
+        cx.set_global(spec.resolve(&Derivation::default()));
+    }
+}
+
+pub fn follow_system_appearance(window: &gpui::Window, cx: &mut App) {
+    if *cx.global::<AppearancePreference>() == AppearancePreference::System {
+        AppearancePreference::System.apply(window.appearance(), cx);
+    }
 }
 
 #[cfg(test)]
@@ -540,10 +623,21 @@ mod tests {
     fn check(theme: &Theme, name: &str) {
         let pairs: &[(&str, Hsla, Hsla)] = &[
             ("app", theme.app.bg, theme.app.fg),
+            (
+                "selected segment",
+                theme.selected_segment_bg,
+                theme.selected_segment_fg,
+            ),
             ("app/muted", theme.app.bg, theme.app.muted_fg),
             ("card", theme.card.bg, theme.card.fg),
             ("popover", theme.popover.bg, theme.popover.fg),
             ("sidebar", theme.sidebar.bg, theme.sidebar.fg),
+            (
+                "sidebar contents",
+                theme.sidebar_content.bg,
+                theme.sidebar_content.fg,
+            ),
+            ("active file", theme.active_file_bg, theme.active_file_fg),
             ("primary", theme.app.primary, theme.app.primary_fg),
             ("secondary", theme.secondary, theme.secondary_fg),
             ("accent", theme.app.accent, theme.app.accent_fg),
@@ -558,6 +652,19 @@ mod tests {
             contrast(theme.app.bg, theme.app.border) >= 1.2,
             "{name}: border invisible"
         );
+    }
+
+    #[test]
+    fn system_follows_os_while_explicit_choices_override_it() {
+        use gpui::WindowAppearance::{Dark, Light, VibrantDark, VibrantLight};
+        for appearance in [Light, VibrantLight, Dark, VibrantDark] {
+            assert!(!AppearancePreference::Light.is_dark(appearance));
+            assert!(AppearancePreference::Dark.is_dark(appearance));
+            assert_eq!(
+                AppearancePreference::System.is_dark(appearance),
+                matches!(appearance, Dark | VibrantDark)
+            );
+        }
     }
 
     #[test]

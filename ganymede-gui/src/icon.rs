@@ -33,6 +33,20 @@ macro_rules! define_icons {
 }
 
 define_icons! {
+    Folder => "regular/folder.svg",
+    File => "regular/file.svg",
+    Cpu => "regular/cpu.svg",
+    Gear => "regular/gear.svg",
+    Server => "regular/hard-drives.svg",
+    Sliders => "regular/sliders-horizontal.svg",
+    Palette => "regular/palette.svg",
+    Desktop => "regular/desktop.svg",
+    Sun => "regular/sun.svg",
+    Moon => "regular/moon.svg",
+    Keyboard => "regular/keyboard.svg",
+    CaretLeft => "regular/caret-left.svg",
+    CaretRight => "regular/caret-right.svg",
+    FolderOpen => "regular/folder-open.svg",
     SquaresFour => "regular/squares-four.svg",
     Clock => "regular/clock.svg",
     SidebarSimple => "regular/sidebar-simple.svg",
@@ -47,6 +61,8 @@ define_icons! {
 
 impl Icon {
     /// Set size and text color on the returned SVG using the view's theme.
+    /// GPUI skips painting SVGs without an explicit text color; parent text colors
+    /// are not inherited by the SVG painter.
     pub fn svg(self) -> Svg {
         svg().path(self.path())
     }

@@ -31,6 +31,8 @@ Use rustfmt defaults, four-space indentation, `snake_case` functions/modules, an
 
 In GPUI render code, obtain colors, fonts, and radii from `cx.theme()`. Consult relevant `.agents/skills/gpui*` instructions and verify APIs against the pinned source.
 
+Prefer compact, information-dense UI: small icons and text, restrained padding, and tight row spacing. Avoid oversized cards and controls. Settings selectors should fit on a single line where practical.
+
 ## Testing Guidelines
 
 Use `#[test]` and `#[tokio::test]`; name tests after observable behavior. Add regression coverage for protocol, persistence, and concurrency changes. Live tests are ignored by default and exercised by the Python runner. No numeric coverage threshold is configured. Visually verify GUI changes and retain theme contrast checks.
