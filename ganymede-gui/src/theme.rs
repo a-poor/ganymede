@@ -275,6 +275,7 @@ pub struct Theme {
     pub input: Hsla,
     pub scrim: Hsla,
     pub body_shadow: BoxShadow,
+    pub toast_shadow: BoxShadow,
     pub segment_track_bg: Hsla,
     pub selected_segment_bg: Hsla,
     pub selected_segment_fg: Hsla,
@@ -442,6 +443,8 @@ impl ThemeSpec {
                 a: 0.5,
             },
             chart: self.chart,
+            toast_shadow: BoxShadow::new(px(0.), px(4.), alpha(gpui::black(), 0.10))
+                .blur_radius(px(14.)),
             body_shadow: BoxShadow::new(
                 px(0.),
                 px(0.5),

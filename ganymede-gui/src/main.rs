@@ -4,6 +4,7 @@ pub mod icon;
 mod notebook;
 mod settings;
 pub mod theme;
+pub mod toast;
 
 use gpui::{
     App, Bounds, Context, Entity, FontWeight, KeyBinding, Menu, MenuItem, TitlebarOptions, Window,
@@ -22,6 +23,7 @@ enum SidebarTab {
 
 struct Ganymede {
     notebook: Entity<notebook::Notebook>,
+    toasts: Entity<toast::ToastHost>,
     sidebar_open: bool,
     sidebar_tab: SidebarTab,
     settings_window: Option<gpui::WindowHandle<settings::Settings>>,
@@ -39,8 +41,10 @@ impl Ganymede {
         .detach();
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         let notebook = cx.new(|cx| notebook::Notebook::new(window, cx));
+        let toasts = cx.new(|cx| toast::ToastHost::new(window, cx));
         Self {
             notebook,
+            toasts,
             sidebar_open: true,
             sidebar_tab: SidebarTab::Files,
             settings_window: None,
@@ -203,13 +207,12 @@ impl Ganymede {
     }
 
     fn open_settings(&mut self, cx: &mut Context<Self>) {
-        if let Some(handle) = self.settings_window {
-            if handle
+        if let Some(handle) = self.settings_window
+            && handle
                 .update(cx, |_, window, _| window.activate_window())
                 .is_ok()
-            {
-                return;
-            }
+        {
+            return;
         }
         // A closed window leaves an invalid handle; replace it on the next request.
         self.settings_window = None;
@@ -227,6 +230,8 @@ impl Render for Ganymede {
         let sidebar = theme.sidebar_content;
         let body = theme.app;
         div()
+            .id("main-window")
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -376,6 +381,7 @@ impl Render for Ganymede {
                             ),
                     ),
             )
+            .child(self.toasts.clone())
     }
 }
 

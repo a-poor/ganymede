@@ -33,6 +33,11 @@ macro_rules! define_icons {
 }
 
 define_icons! {
+    Info => "regular/info.svg",
+    CheckCircle => "regular/check-circle.svg",
+    WarningCircle => "regular/warning-circle.svg",
+    SpinnerGap => "regular/spinner-gap.svg",
+    X => "regular/x.svg",
     Folder => "regular/folder.svg",
     File => "regular/file.svg",
     Cpu => "regular/cpu.svg",
