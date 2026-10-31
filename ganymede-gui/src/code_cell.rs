@@ -855,15 +855,17 @@ impl Render for CodeCell {
                     this.replace_text_in_range(None, "    ", w, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &RunAndAdvance, _, cx| {
-                if !this.filter_input {
+            .on_action(cx.listener(|this, _: &RunAndAdvance, window, cx| {
+                if this.document {
+                    this.replace_text_in_range(None, "\n", window, cx);
+                } else if !this.filter_input {
                     cx.emit(CellEvent::RunAndAdvance);
                 }
             }))
             .on_action(cx.listener(|this, _: &SelectCell, window, cx| {
                 if this.filter_input {
                     cx.emit(CellEvent::DeleteCell);
-                } else {
+                } else if !this.document {
                     this.cell_focus.focus(window, cx);
                 }
             }))

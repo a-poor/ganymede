@@ -6,6 +6,7 @@ mod execution;
 pub mod icon;
 mod notebook;
 mod settings;
+mod text_file;
 pub mod theme;
 pub mod toast;
 mod workspace;

@@ -228,7 +228,7 @@ Closing a tab or the main window, or using ⌘Q / Quit, checks for unsaved work.
 The confirmation offers Cancel, Discard changes, and Save and close/quit.
 Saving must succeed, with no newer unsaved edits, before closing. Autosave pauses
 while the dialog is open. Escape cancels; Tab/arrows choose an action and Enter
-confirms. Text-file drafts cannot yet save, so they offer Cancel or Discard only.
+confirms. The same save and close protection applies to text files.
 OS termination outside the app's Quit action (including force quit) cannot show
 this confirmation with the current GPUI platform hooks.
 
@@ -247,8 +247,19 @@ editor can still save between the check and PUT, and changes that preserve the
 server's modification timestamp cannot be detected. Real-time collaboration is
 not implemented.
 
-Text-file editing and terminal/console launcher items remain demos. General Save As
-and rename are not implemented yet.
+Text files open from the file tree with the plain-text editor, including Markdown,
+Python, TOML, lock files, and extensionless files. The launcher creates real Text,
+Markdown, and Python files using server-allocated names. Save with
+⌘S / Ctrl+S; dirty indicators, autosave, external-change dialogs, and close protection
+work for text files too. Detection uses the returned content rather than an extension
+allowlist: UTF-8 text (including base64-encoded UTF-8 responses) is accepted; binary
+content and unsupported encodings produce an error toast. UTF-8 BOM and uniform CRLF
+line endings returned by the server are preserved on save. Syntax highlighting and
+specialized Markdown/Python behavior are not implemented yet; paths and document kinds
+are retained for that future work.
+
+Terminal/console launcher items remain demos. General Save As and rename are not
+implemented yet.
 
 To exercise the GUI execution adapter against the configured server:
 

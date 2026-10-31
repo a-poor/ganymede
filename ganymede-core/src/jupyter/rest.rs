@@ -201,6 +201,31 @@ impl JupyterRestClient {
             .await?)
     }
 
+    /// Allocate an unused name using the server's normal new-file behavior.
+    pub async fn create_text_file(&self, directory: &str, extension: &str) -> Result<Contents> {
+        Ok(self
+            .request(
+                Method::POST,
+                self.contents_url(directory)?,
+                Some(json!({"type":"file", "ext":extension})),
+            )
+            .await?
+            .json()
+            .await?)
+    }
+
+    pub async fn save_text_file(&self, path: &str, text: &str) -> Result<Contents> {
+        Ok(self
+            .request(
+                Method::PUT,
+                self.contents_url(path)?,
+                Some(json!({"type":"file", "format":"text", "content":text})),
+            )
+            .await?
+            .json()
+            .await?)
+    }
+
     /// Explicitly remove a file through the Contents API.
     pub async fn delete_contents(&self, path: &str) -> Result<()> {
         self.request(Method::DELETE, self.contents_url(path)?, None)

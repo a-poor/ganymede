@@ -15,12 +15,30 @@ pub fn save_conflict(
     window: &mut Window,
     cx: &mut App,
 ) -> impl std::future::Future<Output = usize> + use<> {
+    conflict_prompt(path, "Notebook", "notebook", window, cx)
+}
+
+pub fn file_save_conflict(
+    path: &str,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl std::future::Future<Output = usize> + use<> {
+    conflict_prompt(path, "File", "file", window, cx)
+}
+
+fn conflict_prompt(
+    path: &str,
+    title: &str,
+    kind: &str,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl std::future::Future<Output = usize> + use<> {
     let detail = format!(
-        "{path} has changed on the server. Reload discards your local changes. Save a Copy preserves them in a separate notebook. Overwrite replaces the server version."
+        "{path} has changed on the server. Reload discards your local changes. Save a Copy preserves them in a separate {kind}. Overwrite replaces the server version."
     );
     let response = window.prompt(
         gpui::PromptLevel::Warning,
-        "Notebook changed on the server",
+        &format!("{title} changed on the server"),
         Some(&detail),
         &["Cancel", "Reload", "Save a Copy", "Overwrite"],
         cx,

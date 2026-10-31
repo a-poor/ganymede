@@ -4,6 +4,7 @@ use crate::{
     code_cell::CodeCell,
     icon::Icon,
     notebook::Notebook,
+    text_file::TextFile,
     theme::{ActiveTheme, Theme},
 };
 use ganymede_core::{
@@ -29,6 +30,19 @@ pub enum DocumentKind {
     Console,
 }
 impl DocumentKind {
+    fn for_text_path(path: &str) -> Self {
+        match path
+            .rsplit('.')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "py" | "pyw" | "pyi" => Self::Python,
+            "md" | "markdown" => Self::Markdown,
+            _ => Self::Text,
+        }
+    }
     fn icon(self) -> Icon {
         match self {
             Self::Notebook => Icon::Notebook,
@@ -47,11 +61,49 @@ impl DocumentKind {
         }
     }
 }
+#[derive(Clone)]
 enum Content {
     Notebook(Entity<Notebook>),
-    Text(Entity<CodeCell>),
+    Text(Entity<TextFile>),
     Terminal,
     Console,
+}
+impl Content {
+    fn is_dirty(&self, cx: &App) -> bool {
+        match self {
+            Self::Notebook(view) => view.read(cx).is_dirty(cx),
+            Self::Text(view) => view.read(cx).is_dirty(),
+            _ => false,
+        }
+    }
+    fn is_saving(&self, cx: &App) -> bool {
+        match self {
+            Self::Notebook(view) => view.read(cx).is_saving(),
+            Self::Text(view) => view.read(cx).is_saving(),
+            _ => false,
+        }
+    }
+    fn save_failed(&self, cx: &App) -> bool {
+        match self {
+            Self::Notebook(view) => view.read(cx).save_failed(),
+            Self::Text(view) => view.read(cx).save_failed(),
+            _ => false,
+        }
+    }
+    fn save(&self, window: &mut Window, cx: &mut App) {
+        match self {
+            Self::Notebook(view) => view.update(cx, |view, cx| view.save(window, cx)),
+            Self::Text(view) => view.update(cx, |view, cx| view.save(window, cx)),
+            _ => (),
+        }
+    }
+    fn suspend_autosave(&self, suspended: bool, cx: &mut App) {
+        match self {
+            Self::Notebook(view) => view.update(cx, |view, _| view.suspend_autosave(suspended)),
+            Self::Text(view) => view.update(cx, |view, _| view.suspend_autosave(suspended)),
+            _ => (),
+        }
+    }
 }
 struct Document {
     id: u64,
@@ -251,6 +303,13 @@ impl Workspace {
             self.open_notebook(None, window, cx);
             return;
         }
+        if matches!(
+            kind,
+            DocumentKind::Text | DocumentKind::Markdown | DocumentKind::Python
+        ) {
+            self.open_text(None, kind, window, cx);
+            return;
+        }
         self.next_id += 1;
         let number = self.documents.iter().filter(|doc| doc.kind == kind).count();
         let name = if kind == DocumentKind::Console {
@@ -266,17 +325,7 @@ impl Workspace {
             DocumentKind::Notebook => unreachable!(),
             DocumentKind::Terminal => Content::Terminal,
             DocumentKind::Console => Content::Console,
-            _ => {
-                let editor = cx.new(|cx| CodeCell::new_document(window, cx));
-                cx.subscribe(&editor, |_, _, event, cx| {
-                    if matches!(event, crate::code_cell::CellEvent::Changed) {
-                        cx.notify();
-                    }
-                })
-                .detach();
-                editor.read(cx).focus_handle(cx).focus(window, cx);
-                Content::Text(editor)
-            }
+            _ => unreachable!(),
         };
         self.documents.push(Document {
             id: self.next_id,
@@ -520,6 +569,90 @@ impl Workspace {
         .detach();
         cx.notify();
     }
+    fn open_text(
+        &mut self,
+        path: Option<String>,
+        kind: DocumentKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(path) = &path {
+            if let Some(doc) = self
+                .documents
+                .iter()
+                .find(|doc| doc.path.as_ref() == Some(path))
+            {
+                self.activate(doc.id, window, cx);
+                return;
+            }
+            if !self.opening.insert(path.clone()) {
+                return;
+            }
+        } else {
+            if self.creating {
+                return;
+            }
+            self.creating = true;
+        }
+        let runtime = cx.global::<Runtime>();
+        let config = runtime.config.clone();
+        let requested = path.clone();
+        let task = runtime.handle.spawn(async move {
+            let config = config?;
+            let path = match requested {
+                Some(path) => path,
+                None => {
+                    JupyterRestClient::new(config.clone())
+                        .map_err(|e| e.to_string())?
+                        .create_text_file("", &format!(".{}", kind.extension()))
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .path
+                }
+            };
+            let controller = ganymede_core::text_file::TextFileController::open(config, &path)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>((path, controller))
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            this.update_in(cx, |this, window, cx| {
+                if let Some(path) = path {
+                    this.opening.remove(&path);
+                } else {
+                    this.creating = false;
+                }
+                match result {
+                    Ok(Ok((path, controller))) => {
+                        let editor =
+                            cx.new(|cx| TextFile::new(controller, this.toasts.clone(), window, cx));
+                        cx.observe(&editor, |_, _, cx| cx.notify()).detach();
+                        this.next_id += 1;
+                        this.documents.push(Document {
+                            id: this.next_id,
+                            name: path.rsplit('/').next().unwrap_or(&path).to_owned().into(),
+                            kind: DocumentKind::for_text_path(&path),
+                            path: Some(path),
+                            content: Content::Text(editor),
+                        });
+                        this.tabs.launch(this.next_id);
+                        this.activate(this.next_id, window, cx);
+                        this.refresh_directory(String::new(), cx);
+                    }
+                    Ok(Err(error)) => this.file_toast("Could not open file", Err(error), cx),
+                    Err(_) => this.file_toast(
+                        "Could not open file",
+                        Err("The file request failed".into()),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
     fn open_notebook(&mut self, path: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(path) = &path {
             if let Some(doc) = self
@@ -605,7 +738,7 @@ impl Workspace {
                 Content::Notebook(notebook) => {
                     notebook.update(cx, |notebook, cx| notebook.focus_selected(window, cx))
                 }
-                Content::Text(editor) => editor.read(cx).focus_handle(cx).focus(window, cx),
+                Content::Text(editor) => editor.update(cx, |editor, cx| editor.focus(window, cx)),
                 _ => window.blur(),
             }
         } else {
@@ -630,9 +763,7 @@ impl Workspace {
     }
     fn suspend_autosave(&self, target: CloseTarget, suspended: bool, cx: &mut Context<Self>) {
         for doc in self.affected(target) {
-            if let Content::Notebook(notebook) = &doc.content {
-                notebook.update(cx, |notebook, _| notebook.suspend_autosave(suspended));
-            }
+            doc.content.suspend_autosave(suspended, cx);
         }
     }
     pub fn request_close(
@@ -644,37 +775,29 @@ impl Workspace {
         if self.close_pending || window.has_active_prompt() {
             return;
         }
-        let dirty = self.affected(target).any(|doc| match &doc.content {
-            Content::Notebook(notebook) => {
-                notebook.read(cx).is_dirty(cx) || notebook.read(cx).is_saving()
-            }
-            Content::Text(editor) => !editor.read(cx).text().is_empty(),
-            _ => false,
-        });
+        let dirty = self
+            .affected(target)
+            .any(|doc| doc.content.is_dirty(cx) || doc.content.is_saving(cx));
         if !dirty {
             self.complete_close(target, window, cx);
             return;
         }
-        let unsaved_text = self.affected(target).any(|doc| matches!(&doc.content, Content::Text(editor) if !editor.read(cx).text().is_empty()));
         let quitting = matches!(target, CloseTarget::Quit);
         let title = if quitting {
             "Save changes before quitting?"
         } else {
             "Save changes before closing?"
         };
-        let detail = if unsaved_text {
-            "Text-file saving isn't available yet. Cancel to copy your text. Discarding will lose all unsaved changes."
-        } else {
-            "Your unsaved notebook changes will be lost if you discard them."
-        };
-        let mut choices = vec!["Cancel", "Discard changes"];
-        if !unsaved_text {
-            choices.push(if quitting {
+        let detail = "Your unsaved changes will be lost if you discard them.";
+        let choices = vec![
+            "Cancel",
+            "Discard changes",
+            if quitting {
                 "Save and quit"
             } else {
                 "Save and close"
-            });
-        }
+            },
+        ];
         self.close_pending = true;
         self.suspend_autosave(target, true, cx);
         let response = window.prompt(
@@ -700,35 +823,25 @@ impl Workspace {
         .detach();
     }
     fn save_and_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
-        let notebooks: Vec<_> = self
+        let documents: Vec<_> = self
             .affected(target)
-            .filter_map(|doc| match &doc.content {
-                Content::Notebook(notebook)
-                    if notebook.read(cx).is_dirty(cx) || notebook.read(cx).is_saving() =>
-                {
-                    Some(notebook.clone())
-                }
-                _ => None,
-            })
+            .filter(|doc| doc.content.is_dirty(cx) || doc.content.is_saving(cx))
+            .map(|doc| doc.content.clone())
             .collect();
-        for notebook in &notebooks {
-            notebook.update(cx, |notebook, cx| notebook.save(window, cx));
+        for document in &documents {
+            document.save(window, cx);
         }
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
                 let finished = this.update_in(cx, |this, window, cx| {
-                    if notebooks.iter().any(|notebook| notebook.read(cx).is_saving()) { return false; }
-                    if notebooks.iter().any(|notebook| notebook.read(cx).save_failed()) || this.affected(target).any(|doc| match &doc.content {
-                        Content::Notebook(notebook) => notebook.read(cx).is_dirty(cx) || notebook.read(cx).is_saving(),
-                        Content::Text(editor) => !editor.read(cx).text().is_empty(),
-                        _ => false,
-                    }) {
+                    if documents.iter().any(|document| document.is_saving(cx)) { return false; }
+                    if documents.iter().any(|document| document.save_failed(cx)) || this.affected(target).any(|doc| doc.content.is_dirty(cx) || doc.content.is_saving(cx)) {
                         this.close_pending = false;
                         this.suspend_autosave(target, false, cx);
-                        if !notebooks.iter().any(|notebook| notebook.read(cx).save_failed()) {
+                        if !documents.iter().any(|document| document.save_failed(cx)) {
                             this.toasts.update(cx, |host, cx| { host.push(crate::toast::Toast::new("New changes arrived while saving")
-                                .description("Your notebook is still open. Save again before closing.")
+                                .description("Your document is still open. Save again before closing.")
                                 .kind(crate::toast::ToastKind::Info), cx); });
                         }
                         cx.notify();
@@ -844,9 +957,7 @@ impl Workspace {
                                 notebook.read(cx).is_dirty(cx),
                                 notebook.read(cx).running_spinner(cx),
                             ),
-                            Some(Content::Text(editor)) => {
-                                (!editor.read(cx).text().is_empty(), None)
-                            }
+                            Some(Content::Text(editor)) => (editor.read(cx).is_dirty(), None),
                             _ => (false, None),
                         };
                         let fg = if selected {
@@ -1334,7 +1445,8 @@ impl Workspace {
                     .gap(px(2.))
                     .children(rows.into_iter().map(|(entry, depth)| {
                         let directory = entry.content_type == "directory";
-                        let supported = directory || entry.content_type == "notebook";
+                        let supported =
+                            directory || matches!(entry.content_type.as_str(), "notebook" | "file");
                         let selected = this.documents.iter().any(|doc| {
                             doc.id == this.tabs.active && doc.path.as_ref() == Some(&entry.path)
                         });
@@ -1387,7 +1499,20 @@ impl Workspace {
                                         }
                                         cx.notify();
                                     } else if supported {
-                                        this.open_notebook(Some(entry.path.clone()), window, cx);
+                                        if entry.content_type == "notebook" {
+                                            this.open_notebook(
+                                                Some(entry.path.clone()),
+                                                window,
+                                                cx,
+                                            );
+                                        } else {
+                                            this.open_text(
+                                                Some(entry.path.clone()),
+                                                DocumentKind::for_text_path(&entry.path),
+                                                window,
+                                                cx,
+                                            );
+                                        }
                                     }
                                 });
                             })
@@ -1522,12 +1647,7 @@ impl Render for Workspace {
                 Some(Document {
                     content: Content::Text(editor),
                     ..
-                }) => div()
-                    .flex_1()
-                    .min_h_0()
-                    .p_3()
-                    .child(editor.clone())
-                    .into_any_element(),
+                }) => editor.clone().into_any_element(),
                 Some(Document {
                     content: Content::Terminal | Content::Console,
                     ..
