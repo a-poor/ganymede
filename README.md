@@ -232,8 +232,23 @@ confirms. Text-file drafts cannot yet save, so they offer Cancel or Discard only
 OS termination outside the app's Quit action (including force quit) cannot show
 this confirmation with the current GPUI platform hooks.
 
-Text-file editing and terminal/console launcher items remain demos. Save As,
-rename, and external-change conflict detection are not implemented yet.
+Before each manual or automatic save, Ganymede checks the server's `last_modified`
+against the version returned by the last open, reload, or successful save. External
+changes (including deletion) pause autosave and open the same confirmation dialog:
+Cancel, Reload, Save a Copy, or Overwrite. Cancel keeps local edits; Reload discards
+them and loads the server version; Overwrite explicitly replaces the server file.
+Save a Copy uses a server-allocated unused notebook name in the same directory and
+shows its path in a toast. The original remains open and dirty, with autosave paused,
+until you resolve its conflict or discard it. Toggling autosave does not dismiss a
+conflict. Reload is refused during execution or if edits arrive while fetching.
+
+This is a client-side version check, not an atomic conditional write: a different
+editor can still save between the check and PUT, and changes that preserve the
+server's modification timestamp cannot be detected. Real-time collaboration is
+not implemented.
+
+Text-file editing and terminal/console launcher items remain demos. General Save As
+and rename are not implemented yet.
 
 To exercise the GUI execution adapter against the configured server:
 

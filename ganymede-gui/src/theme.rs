@@ -276,6 +276,10 @@ pub struct Theme {
     pub scrim: Hsla,
     pub dialog_action_bg: Hsla,
     pub dialog_action_fg: Hsla,
+    pub dialog_destructive_bg: Hsla,
+    pub dialog_destructive_fg: Hsla,
+    pub dialog_destructive_hover: Hsla,
+    pub dialog_destructive_active: Hsla,
     pub body_shadow: BoxShadow,
     pub active_tab_edges: [BoxShadow; 2],
     pub toast_shadow: BoxShadow,
@@ -441,6 +445,14 @@ impl ThemeSpec {
             input: self.input,
             dialog_action_bg: app.fg,
             dialog_action_fg: app.bg,
+            dialog_destructive_bg: card.bg.blend(alpha(self.destructive, 0.10)),
+            dialog_destructive_hover: card.bg.blend(alpha(self.destructive, 0.18)),
+            dialog_destructive_active: card.bg.blend(alpha(self.destructive, 0.24)),
+            dialog_destructive_fg: if self.is_dark {
+                oklch(0.780, 0.130, 27.)
+            } else {
+                oklch(0.490, 0.200, 27.)
+            },
             scrim: Hsla {
                 h: 0.0,
                 s: 0.0,
@@ -673,6 +685,21 @@ mod tests {
             ("secondary", theme.secondary, theme.secondary_fg),
             ("accent", theme.app.accent, theme.app.accent_fg),
             ("destructive", theme.destructive, theme.destructive_fg),
+            (
+                "dialog destructive",
+                theme.dialog_destructive_bg,
+                theme.dialog_destructive_fg,
+            ),
+            (
+                "dialog destructive hover",
+                theme.dialog_destructive_hover,
+                theme.dialog_destructive_fg,
+            ),
+            (
+                "dialog destructive active",
+                theme.dialog_destructive_active,
+                theme.dialog_destructive_fg,
+            ),
         ];
         for (label, bg, fg) in pairs {
             let ratio = contrast(*bg, *fg);

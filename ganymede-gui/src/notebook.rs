@@ -65,6 +65,7 @@ pub struct Notebook {
     toasts: Entity<crate::toast::ToastHost>,
     cells: Vec<Entity<CodeCell>>,
     saving: bool,
+    save_conflict: bool,
     autosave: crate::autosave::AutosaveClock,
     autosave_suspended: bool,
     save_error: Option<String>,
@@ -94,6 +95,7 @@ impl Notebook {
             cells: vec![],
             session,
             saving: false,
+            save_conflict: false,
             autosave: Default::default(),
             autosave_suspended: false,
             save_error: None,
@@ -124,16 +126,17 @@ impl Notebook {
             cx.notify();
         })
         .detach();
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(250))
                     .await;
                 if this
-                    .update(cx, |this, cx| {
+                    .update_in(cx, |this, window, cx| {
                         let document = this.session.document();
                         let enabled = cx.global::<crate::autosave::AutosavePreference>().0
-                            && !this.autosave_suspended;
+                            && !this.autosave_suspended
+                            && !this.save_conflict;
                         if this.autosave.due(
                             document.revision(),
                             document.is_dirty(),
@@ -141,7 +144,7 @@ impl Notebook {
                             this.saving,
                             std::time::Instant::now(),
                         ) {
-                            this.save(cx);
+                            this.save(window, cx);
                         }
                     })
                     .is_err()
@@ -341,7 +344,7 @@ impl Notebook {
                     editor.read(cx).text() != cell.source() || editor.read(cx).kind() != cell.kind()
                 })
     }
-    pub fn save(&mut self, cx: &mut Context<Self>) {
+    pub fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.saving {
             return;
         }
@@ -356,25 +359,148 @@ impl Notebook {
         }
         self.saving = true;
         let task = self.session.save();
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
-            this.update(cx, |this, cx| {
-                this.saving = false;
-                this.save_error = match result {
-                    Ok(Ok(())) => None,
-                    Ok(Err(error)) => Some(error),
-                    Err(_) => Some("Could not save notebook".into()),
-                };
-                if this.save_error.is_some() {
+            let conflict = matches!(
+                result,
+                Ok(Err(ganymede_core::notebook::Error::SaveConflict))
+            );
+            this.update_in(cx, |this, _, cx| {
+                if conflict {
+                    this.save_conflict = true;
                     this.autosave.failed();
+                } else {
+                    this.finish_save(
+                        result
+                            .map_err(|_| "Could not save notebook".to_owned())
+                            .and_then(|result| result.map_err(|error| error.to_string())),
+                        cx,
+                    );
                 }
-                this.report_save_error(cx);
                 cx.notify();
+            })
+            .ok();
+            if !conflict {
+                return;
+            }
+            // Serialize prompts across notebooks, including saves requested during quit.
+            loop {
+                let response = this.update_in(cx, |this, window, cx| {
+                    if window.has_active_prompt() {
+                        return None;
+                    }
+                    Some(crate::confirm::save_conflict(
+                        &this.session.path(),
+                        window,
+                        cx,
+                    ))
+                });
+                match response {
+                    Ok(Some(response)) => {
+                        let choice = response.await;
+                        this.update_in(cx, |this, window, cx| {
+                            this.resolve_conflict(choice, window, cx)
+                        })
+                        .ok();
+                        break;
+                    }
+                    Ok(None) => {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(100))
+                            .await
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn finish_save(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
+        self.saving = false;
+        self.save_error = result.err();
+        if self.save_error.is_some() {
+            self.autosave.failed();
+        } else {
+            self.save_conflict = false;
+            self.autosave.resume();
+        }
+        self.report_save_error(cx);
+        cx.notify();
+    }
+
+    fn resolve_conflict(&mut self, choice: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if choice == 0 {
+            self.saving = false;
+            // Keep autosave paused and prevent Save-and-close from discarding local work.
+            self.save_error = Some("Save conflict unresolved".into());
+            cx.notify();
+            return;
+        }
+        if choice == 2 {
+            self.sync(cx);
+            let task = self.session.save_copy();
+            cx.spawn_in(window, async move |this, cx| {
+                let result = task.await;
+                this.update_in(cx, |this, _, cx| {
+                    this.saving = false;
+                    this.save_error = Some("Original notebook still has a save conflict".into());
+                    match result {
+                        Ok(Ok(path)) => { this.toasts.update(cx, |host, cx| {
+                            host.push(crate::toast::Toast::new("Notebook copy saved").description(format!("Saved as {path}. The original is still open; autosave remains paused.")), cx);
+                        }); }
+                        result => {
+                            this.save_error = Some(match result { Ok(Err(error)) => error.to_string(), _ => "Could not save notebook copy".into() });
+                            this.report_save_error(cx);
+                        }
+                    }
+                    cx.notify();
+                }).ok();
+            }).detach();
+            return;
+        }
+        if choice == 1 && (self.runs.active.is_some() || !self.runs.pending.is_empty()) {
+            self.finish_save(
+                Err("Finish or interrupt execution before reloading the notebook".into()),
+                cx,
+            );
+            return;
+        }
+        self.sync(cx);
+        let task = if choice == 1 {
+            self.session.reload()
+        } else {
+            self.session.overwrite()
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|_| "Could not resolve save conflict".to_owned())
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            this.update_in(cx, |this, window, cx| {
+                if choice == 1 && result.is_ok() {
+                    this.cells.clear();
+                    this.session.clear_bindings();
+                    this.runs = RunQueue::default();
+                    this.selected = 0;
+                    for loaded in this.session.document().cells() {
+                        this.append_cell(window, cx);
+                        let cell = this.cells.last().unwrap();
+                        this.session
+                            .bind(cell.entity_id().as_u64(), loaded.id().clone());
+                        cell.update(cx, |cell, cx| cell.load(loaded, cx));
+                    }
+                    if this.cells.is_empty() {
+                        this.append_cell(window, cx);
+                    }
+                    this.select(0, cx);
+                }
+                this.finish_save(result, cx);
             })
             .ok();
         })
         .detach();
-        cx.notify();
     }
     pub fn suspend_autosave(&mut self, suspended: bool) {
         self.autosave_suspended = suspended;
@@ -673,10 +799,10 @@ impl Notebook {
             .text_color(t.app.fg)
             .child(
                 icon_button("save-notebook", "Save notebook (⌘S)", Icon::Save, cx)
-                    .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
-                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                    .on_click(cx.listener(|this, _, window, cx| this.save(window, cx)))
+                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                         if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            this.save(cx);
+                            this.save(window, cx);
                         }
                     })),
             )
@@ -812,7 +938,7 @@ impl Render for Notebook {
             .min_h_0()
             .flex()
             .flex_col()
-            .on_action(cx.listener(|this, _: &crate::Save, _, cx| this.save(cx)))
+            .on_action(cx.listener(|this, _: &crate::Save, window, cx| this.save(window, cx)))
             .child(self.toolbar(cx))
             .when_some(self.execution_error.as_ref(), |view, error| {
                 use crate::theme::ActiveTheme;

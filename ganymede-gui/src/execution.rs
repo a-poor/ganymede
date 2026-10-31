@@ -180,10 +180,29 @@ impl Session {
         }
         Ok(())
     }
-    pub fn save(&self) -> tokio::task::JoinHandle<Result<(), String>> {
-        let controller = self.controller.clone();
+    pub fn save(&self) -> tokio::task::JoinHandle<ganymede_core::notebook::Result<()>> {
+        let controller = self.controller.as_ref().unwrap().clone();
+        self.handle.spawn(async move { controller.save().await })
+    }
+    pub fn overwrite(&self) -> tokio::task::JoinHandle<ganymede_core::notebook::Result<()>> {
+        let controller = self.controller.as_ref().unwrap().clone();
         self.handle
-            .spawn(async move { controller?.save().await.map_err(|e| e.to_string()) })
+            .spawn(async move { controller.overwrite().await })
+    }
+    pub fn reload(&self) -> tokio::task::JoinHandle<ganymede_core::notebook::Result<()>> {
+        let controller = self.controller.as_ref().unwrap().clone();
+        self.handle.spawn(async move { controller.reload().await })
+    }
+    pub fn save_copy(&self) -> tokio::task::JoinHandle<ganymede_core::notebook::Result<String>> {
+        let controller = self.controller.as_ref().unwrap().clone();
+        self.handle
+            .spawn(async move { controller.save_copy().await })
+    }
+    pub fn path(&self) -> String {
+        self.controller.as_ref().unwrap().snapshot().path.clone()
+    }
+    pub fn clear_bindings(&self) {
+        self.cells.lock().unwrap().clear();
     }
     /// Establish the notebook session without submitting any code.
     pub fn connect(&self) -> tokio::task::JoinHandle<Result<(), String>> {

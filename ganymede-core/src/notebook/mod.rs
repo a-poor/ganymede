@@ -12,6 +12,8 @@ pub use state::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("notebook changed on the server since it was opened or saved")]
+    SaveConflict,
     #[error(transparent)]
     Jupyter(#[from] crate::jupyter::Error),
     #[error(transparent)]

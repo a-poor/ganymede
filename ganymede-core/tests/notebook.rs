@@ -138,12 +138,18 @@ async fn save_handles_concurrent_edits_cancellation_and_failure() {
     let (release, released) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
+        read_get(&mut socket).await;
+        respond(&mut socket, "404 Not Found").await;
+        let (mut socket, _) = listener.accept().await.unwrap();
         let body = read_request(&mut socket).await;
         assert_eq!(body["content"]["cells"][0]["source"], "before");
         arrived.send(()).unwrap();
         released.await.unwrap();
         respond(&mut socket, "200 OK").await;
         for status in ["500 Internal Server Error", "200 OK"] {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_get(&mut socket).await;
+            respond(&mut socket, "200 OK").await;
             let (mut socket, _) = listener.accept().await.unwrap();
             assert_eq!(
                 read_request(&mut socket).await["content"]["cells"][0]["source"],
@@ -221,4 +227,170 @@ async fn offline_edits_snapshots_and_event_lag_are_explicit() {
     assert!(controller.snapshot().document.is_dirty());
     controller.remove_cell(&cell).unwrap();
     assert!(controller.snapshot().document.cells().is_empty());
+}
+
+async fn read_get(socket: &mut TcpStream) {
+    let (header, _) = read_http(socket).await;
+    assert!(header.starts_with("GET "));
+}
+
+async fn read_http(socket: &mut TcpStream) -> (String, Value) {
+    let mut bytes = Vec::new();
+    loop {
+        let mut chunk = [0; 4096];
+        let count = socket.read(&mut chunk).await.unwrap();
+        assert!(count > 0);
+        bytes.extend_from_slice(&chunk[..count]);
+        if let Some(start) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+            let header = std::str::from_utf8(&bytes[..start]).unwrap().to_owned();
+            let length = header
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length: ")
+                        .and_then(|s| s.parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            if bytes.len() >= start + 4 + length {
+                let body = if length == 0 {
+                    Value::Null
+                } else {
+                    serde_json::from_slice(&bytes[start + 4..start + 4 + length]).unwrap()
+                };
+                return (header, body);
+            }
+        }
+    }
+}
+async fn reply_json(socket: &mut TcpStream, status: &str, body: Value) {
+    let body = body.to_string();
+    socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+}
+fn contents(version: &str, source: &str) -> Value {
+    json!({"name":"test.ipynb", "path":"test.ipynb", "type":"notebook", "writable":true,
+    "created":"", "last_modified":version, "content":{
+        "nbformat":4,"nbformat_minor":5,"metadata":{},
+        "cells":[{"id":"cell","cell_type":"code","metadata":{},"source":source,"execution_count":null,"outputs":[]}]
+    }})
+}
+
+#[tokio::test]
+async fn conflicts_preserve_local_work_and_support_copy_reload_and_explicit_overwrite() {
+    use ganymede_core::notebook::Error;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = ServerConfig::new(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    let server = tokio::spawn(async move {
+        for (method, version, source, expected_source) in [
+            ("GET", "1", "original", None),      // open
+            ("GET", "2", "external edit", None), // conflict: no PUT allowed
+            ("POST", "3", "", None),             // copy allocates a separate server path
+            ("PUT", "4", "", Some("local edit")),
+            ("GET", "2", "external edit", None), // reload
+            ("GET", "2", "external edit", None), // save after reload
+            ("PUT", "5", "", Some("after reload")),
+            ("GET", "6", "another external edit", None),
+            ("PUT", "7", "", Some("explicit overwrite")),
+            ("GET", "7", "explicit overwrite", None), // own save updated baseline
+            ("PUT", "8", "", Some("next edit")),
+        ] {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let (header, body) = read_http(&mut socket).await;
+            assert!(header.starts_with(method), "{header}");
+            if let Some(source) = expected_source {
+                assert_eq!(body["content"]["cells"][0]["source"], source);
+            }
+            let mut model = contents(version, source);
+            if version == "3" || version == "4" {
+                model["path"] = json!("Untitled.ipynb");
+            }
+            if version == "4" {
+                assert!(header.starts_with("PUT /api/contents/Untitled.ipynb "));
+            }
+            reply_json(&mut socket, "200 OK", model).await;
+        }
+    });
+    let controller = NotebookController::open(config, "test.ipynb")
+        .await
+        .unwrap();
+    let cell = controller.snapshot().document.cells()[0].id().clone();
+    controller.update_source(&cell, "local edit").unwrap();
+    assert!(matches!(controller.save().await, Err(Error::SaveConflict)));
+    assert!(controller.snapshot().document.is_dirty());
+    assert_eq!(controller.save_copy().await.unwrap(), "Untitled.ipynb");
+    assert!(controller.snapshot().document.is_dirty());
+    assert_eq!(controller.snapshot().path, "test.ipynb");
+    controller.reload().await.unwrap();
+    assert_eq!(
+        controller.snapshot().document.cell(&cell).unwrap().source(),
+        "external edit"
+    );
+    assert!(!controller.snapshot().document.is_dirty());
+    controller.update_source(&cell, "after reload").unwrap();
+    controller.save().await.unwrap();
+    controller
+        .update_source(&cell, "explicit overwrite")
+        .unwrap();
+    assert!(matches!(controller.save().await, Err(Error::SaveConflict)));
+    controller.overwrite().await.unwrap();
+    assert!(!controller.snapshot().document.is_dirty());
+    controller.update_source(&cell, "next edit").unwrap();
+    controller.save().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn deleted_files_and_failed_version_checks_never_write() {
+    use ganymede_core::notebook::Error;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = ServerConfig::new(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    let server = tokio::spawn(async move {
+        for status in ["200 OK", "404 Not Found", "500 Internal Server Error"] {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_get(&mut socket).await;
+            reply_json(&mut socket, status, contents("1", "original")).await;
+        }
+    });
+    let controller = NotebookController::open(config, "test.ipynb")
+        .await
+        .unwrap();
+    let cell = controller.snapshot().document.cells()[0].id().clone();
+    controller.update_source(&cell, "local").unwrap();
+    assert!(matches!(controller.save().await, Err(Error::SaveConflict)));
+    assert!(matches!(controller.save().await, Err(Error::Jupyter(_))));
+    assert!(controller.snapshot().document.is_dirty());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn reload_refuses_to_discard_edits_made_during_fetch() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = ServerConfig::new(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    let (arrived, arrival) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        read_get(&mut socket).await;
+        reply_json(&mut socket, "200 OK", contents("1", "original")).await;
+        let (mut socket, _) = listener.accept().await.unwrap();
+        read_get(&mut socket).await;
+        arrived.send(()).unwrap();
+        released.await.unwrap();
+        reply_json(&mut socket, "200 OK", contents("2", "external")).await;
+    });
+    let controller = NotebookController::open(config, "test.ipynb")
+        .await
+        .unwrap();
+    let cell = controller.snapshot().document.cells()[0].id().clone();
+    let reload = controller.clone();
+    let task = tokio::spawn(async move { reload.reload().await });
+    arrival.await.unwrap();
+    controller.update_source(&cell, "new local edit").unwrap();
+    release.send(()).unwrap();
+    assert!(task.await.unwrap().is_err());
+    assert_eq!(
+        controller.snapshot().document.cell(&cell).unwrap().source(),
+        "new local edit"
+    );
+    assert!(controller.snapshot().document.is_dirty());
+    server.await.unwrap();
 }

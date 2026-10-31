@@ -712,7 +712,7 @@ impl Workspace {
             })
             .collect();
         for notebook in &notebooks {
-            notebook.update(cx, |notebook, cx| notebook.save(cx));
+            notebook.update(cx, |notebook, cx| notebook.save(window, cx));
         }
         cx.spawn_in(window, async move |this, cx| {
             loop {

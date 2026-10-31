@@ -23,6 +23,7 @@ struct Data {
     live: Option<Live>,
     epoch: u64,
     published_revision: u64,
+    saved_version: Option<String>,
 }
 struct Inner {
     data: Mutex<Data>,
@@ -90,6 +91,7 @@ impl NotebookController {
                     live: None,
                     epoch: 0,
                     published_revision: revision,
+                    saved_version: None,
                 }),
                 operations: tokio::sync::Mutex::new(()),
                 saves: tokio::sync::Mutex::new(()),
@@ -106,7 +108,9 @@ impl NotebookController {
         if contents.content_type != "notebook" {
             return Err(Error::Invalid("server resource is not a notebook".into()));
         }
-        Self::new(config, path, NotebookDocument::from_json(contents.content)?)
+        let controller = Self::new(config, path, NotebookDocument::from_json(contents.content)?)?;
+        controller.inner.data.lock().unwrap().saved_version = Some(contents.last_modified);
+        Ok(controller)
     }
     pub fn snapshot(&self) -> Arc<NotebookSnapshot> {
         self.inner.snapshots.borrow().clone()
@@ -223,17 +227,31 @@ impl NotebookController {
     /// Saves a captured revision. Later edits and kernel output remain dirty.
     /// Concurrent saves are serialized; cancelling the caller cannot leave a
     /// completed server write unacknowledged in the local save state.
+    /// Checks the last acknowledged server modification time before writing.
+    /// This is not atomic: the standard Contents API has no conditional PUT.
+    /// Controllers constructed with `new` only save to missing paths until an
+    /// explicit overwrite; use `open` to establish a baseline for existing files.
     pub async fn save(&self) -> Result<()> {
+        self.save_inner(false).await
+    }
+
+    /// Explicit user-authorized overwrite after a conflict.
+    pub async fn overwrite(&self) -> Result<()> {
+        self.save_inner(true).await
+    }
+
+    async fn save_inner(&self, overwrite: bool) -> Result<()> {
         let this = self.clone();
         finish(async move {
             let _save = this.inner.saves.lock().await;
-            let (path, revision, json) = {
+            let (path, revision, json, version) = {
                 let mut data = this.inner.data.lock().unwrap();
                 let snapshot = &data.state.snapshot;
                 let values = (
                     snapshot.path.clone(),
                     snapshot.document.revision(),
                     snapshot.document.to_json(),
+                    data.saved_version.clone(),
                 );
                 let saving = SaveState::Saving { revision: values.1 };
                 data.state.snapshot.save = saving.clone();
@@ -241,10 +259,30 @@ impl NotebookController {
                     .publish(&mut data, vec![NotebookEvent::SaveChanged(saving)]);
                 values
             };
-            let result = this.inner.rest.save_notebook(&path, &json).await;
+            let result: Result<_> = async {
+                if !overwrite {
+                    match this.inner.rest.get_contents(&path, false).await {
+                        Ok(contents)
+                            if version.as_ref() == Some(&contents.last_modified)
+                                && contents.content_type == "notebook" => {}
+                        Err(crate::jupyter::Error::Api { status, .. })
+                            if status.as_u16() == 404 && version.is_none() => {}
+                        Ok(_) => return Err(Error::SaveConflict),
+                        Err(crate::jupyter::Error::Api { status, .. })
+                            if status.as_u16() == 404 =>
+                        {
+                            return Err(Error::SaveConflict);
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                Ok(this.inner.rest.save_notebook(&path, &json).await?)
+            }
+            .await;
             let mut data = this.inner.data.lock().unwrap();
             let save = match &result {
-                Ok(_) => {
+                Ok(contents) => {
+                    data.saved_version = Some(contents.last_modified.clone());
                     data.state.snapshot.document.mark_saved(revision);
                     SaveState::Idle
                 }
@@ -255,7 +293,73 @@ impl NotebookController {
             data.state.snapshot.save = save.clone();
             this.inner
                 .publish(&mut data, vec![NotebookEvent::SaveChanged(save)]);
-            result.map(|_| ()).map_err(Into::into)
+            result.map(|_| ())
+        })
+        .await
+    }
+
+    /// Save a separate server-allocated notebook without changing the original's dirty state.
+    pub async fn save_copy(&self) -> Result<String> {
+        let this = self.clone();
+        finish(async move {
+            let _save = this.inner.saves.lock().await;
+            let snapshot = this.snapshot();
+            let parent = snapshot
+                .path
+                .rsplit_once('/')
+                .map_or("", |(parent, _)| parent);
+            let copy = this.inner.rest.create_notebook(parent).await?;
+            this.inner
+                .rest
+                .save_notebook(&copy.path, &snapshot.document.to_json())
+                .await?;
+            Ok(copy.path)
+        })
+        .await
+    }
+
+    /// Reload only if neither editing nor execution changed the document while fetching.
+    pub async fn reload(&self) -> Result<()> {
+        let this = self.clone();
+        finish(async move {
+            let _save = this.inner.saves.lock().await;
+            let before = this.snapshot();
+            let contents = this.inner.rest.get_contents(&before.path, true).await?;
+            if contents.content_type != "notebook" {
+                return Err(Error::Invalid("server resource is not a notebook".into()));
+            }
+            let document = NotebookDocument::from_json(contents.content)?;
+            let mut data = this.inner.data.lock().unwrap();
+            if data.state.snapshot.document.revision() != before.document.revision()
+                || data
+                    .state
+                    .snapshot
+                    .executions
+                    .values()
+                    .any(|run| run.phase.is_active())
+            {
+                return Err(Error::Unavailable(
+                    "notebook changed or is running; try reloading again after execution finishes"
+                        .into(),
+                ));
+            }
+            let ids: Vec<_> = data
+                .state
+                .snapshot
+                .document
+                .cells()
+                .iter()
+                .map(|cell| cell.id().clone())
+                .collect();
+            for id in ids {
+                data.state.forget_cell(&id);
+            }
+            data.state.snapshot.document = document;
+            data.state.snapshot.save = SaveState::Idle;
+            data.saved_version = Some(contents.last_modified);
+            this.inner
+                .publish(&mut data, vec![NotebookEvent::SaveChanged(SaveState::Idle)]);
+            Ok(())
         })
         .await
     }
