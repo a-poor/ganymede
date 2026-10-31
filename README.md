@@ -191,7 +191,11 @@ Restart the app after changing configuration.
 
 Run `cargo run -p ganymede-gui`. The demo starts with a new server notebook, using
 Jupyter’s unused `Untitled` name. The file tree starts at the server root; folders
-load on expansion, and Refresh reloads visible directories. Click a notebook to
+load on expansion. Its toolbar opens the launcher, creates a server-named folder
+at the root, and toggles a notebooks-only filter. The overflow menu offers Upload
+(native multi-file picker, targeting the root) and Refresh. Existing upload names
+are rejected; uploads never intentionally replace an existing file. The tree
+refreshes quietly every 10 seconds, retaining expanded folders and scroll position. Click a notebook to
 open it; an already-open path reuses its tab. Opening a notebook connects automatically,
 without executing code. Run or Shift+Enter executes the selected cell. Subsequent
 cells share its kernel state. Run All executes code cells in order and stops
@@ -210,9 +214,22 @@ remain dirty. Save failures stay visible and retain changes. Closing a dirty
 notebook asks before discarding it; reopening a closed notebook loads the server
 copy. Closing tabs or the app does not delete server sessions or kernels.
 
-Text-file editing and terminal/console launcher items remain demos. Autosave,
-Save As, rename, external-change conflict detection, and app-quit protection are
-not implemented yet; save your work before quitting.
+Autosave is enabled by default and saves after about two seconds without document
+changes (including execution outputs). Toggle it in Settings → Notebooks; this
+preference currently applies for the app session, like appearance settings.
+Saves are silent; failures show an error toast and pause autosave until a manual
+save or toggling autosave off/on. ⌘S / Ctrl+S always remains available.
+
+Closing a tab or the main window, or using ⌘Q / Quit, checks for unsaved work.
+The confirmation offers Cancel, Discard changes, and Save and close/quit.
+Saving must succeed, with no newer unsaved edits, before closing. Autosave pauses
+while the dialog is open. Escape cancels; Tab/arrows choose an action and Enter
+confirms. Text-file drafts cannot yet save, so they offer Cancel or Discard only.
+OS termination outside the app's Quit action (including force quit) cannot show
+this confirmation with the current GPUI platform hooks.
+
+Text-file editing and terminal/console launcher items remain demos. Save As,
+rename, and external-change conflict detection are not implemented yet.
 
 To exercise the GUI execution adapter against the configured server:
 

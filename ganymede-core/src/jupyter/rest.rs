@@ -157,6 +157,50 @@ impl JupyterRestClient {
             .json()
             .await?)
     }
+    /// Create a directory with a server-assigned unused name.
+    pub async fn create_directory(&self, parent: &str) -> Result<Contents> {
+        Ok(self
+            .request(
+                Method::POST,
+                self.contents_url(parent)?,
+                Some(json!({"type": "directory"})),
+            )
+            .await?
+            .json()
+            .await?)
+    }
+
+    /// Upload a file, refusing an existing destination. The Contents API does not
+    /// offer an atomic create-only PUT; this check prevents ordinary accidental replacement.
+    pub async fn upload_file(&self, path: &str, bytes: &[u8]) -> Result<Contents> {
+        match self.get_contents(path, false).await {
+            Ok(_) => return Err(Error::Api {
+                status: reqwest::StatusCode::CONFLICT,
+                message:
+                    "A file with this name already exists. Rename the local file before uploading."
+                        .into(),
+            }),
+            Err(Error::Api { status, .. }) if status == reqwest::StatusCode::NOT_FOUND => (),
+            Err(error) => return Err(error),
+        }
+        if path.ends_with(".ipynb") {
+            return self
+                .save_notebook(path, &serde_json::from_slice(bytes)?)
+                .await;
+        }
+        use base64::Engine;
+        let content = base64::engine::general_purpose::STANDARD.encode(bytes);
+        Ok(self
+            .request(
+                Method::PUT,
+                self.contents_url(path)?,
+                Some(json!({"type":"file", "format":"base64", "content":content})),
+            )
+            .await?
+            .json()
+            .await?)
+    }
+
     /// Explicitly remove a file through the Contents API.
     pub async fn delete_contents(&self, path: &str) -> Result<()> {
         self.request(Method::DELETE, self.contents_url(path)?, None)

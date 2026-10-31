@@ -65,6 +65,8 @@ pub struct Notebook {
     toasts: Entity<crate::toast::ToastHost>,
     cells: Vec<Entity<CodeCell>>,
     saving: bool,
+    autosave: crate::autosave::AutosaveClock,
+    autosave_suspended: bool,
     save_error: Option<String>,
     session: crate::execution::Session,
     control_pending: bool,
@@ -91,6 +93,8 @@ impl Notebook {
             cells: vec![],
             session,
             saving: false,
+            autosave: Default::default(),
+            autosave_suspended: false,
             save_error: None,
             control_pending: false,
             connecting: true,
@@ -113,6 +117,38 @@ impl Notebook {
             })
             .detach();
         }
+        cx.observe_global::<crate::autosave::AutosavePreference>(|this, cx| {
+            this.autosave.resume();
+            cx.notify();
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(250))
+                    .await;
+                if this
+                    .update(cx, |this, cx| {
+                        let document = this.session.document();
+                        let enabled = cx.global::<crate::autosave::AutosavePreference>().0
+                            && !this.autosave_suspended;
+                        if this.autosave.due(
+                            document.revision(),
+                            document.is_dirty(),
+                            enabled,
+                            this.saving,
+                            std::time::Instant::now(),
+                        ) {
+                            this.save(cx);
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
         let connection = notebook.session.connect();
         cx.spawn(async move |this, cx| {
             let result = connection.await;
@@ -307,9 +343,11 @@ impl Notebook {
         if self.saving {
             return;
         }
+        self.autosave.resume();
         self.save_error = None;
         self.sync(cx);
         if self.save_error.is_some() {
+            self.autosave.failed();
             self.report_save_error(cx);
             cx.notify();
             return;
@@ -325,6 +363,9 @@ impl Notebook {
                     Ok(Err(error)) => Some(error),
                     Err(_) => Some("Could not save notebook".into()),
                 };
+                if this.save_error.is_some() {
+                    this.autosave.failed();
+                }
                 this.report_save_error(cx);
                 cx.notify();
             })
@@ -333,6 +374,18 @@ impl Notebook {
         .detach();
         cx.notify();
     }
+    pub fn suspend_autosave(&mut self, suspended: bool) {
+        self.autosave_suspended = suspended;
+    }
+
+    pub fn save_failed(&self) -> bool {
+        self.save_error.is_some()
+    }
+
+    pub fn is_saving(&self) -> bool {
+        self.saving
+    }
+
     fn report_save_error(&self, cx: &mut Context<Self>) {
         if let Some(error) = &self.save_error {
             let toast = crate::toast::Toast::new("Could not save notebook")

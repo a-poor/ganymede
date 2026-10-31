@@ -635,6 +635,47 @@ mod tests {
         result.unwrap();
     }
 
+    #[tokio::test]
+    #[ignore = "requires the Jupyter server configured in .env"]
+    async fn live_folder_and_upload_preserve_binary_and_notebook_content() {
+        use ganymede_core::jupyter::{Error, JupyterRestClient};
+        let runtime = Runtime::new(Handle::current());
+        let client = JupyterRestClient::new(runtime.config.unwrap()).unwrap();
+        let folder = client.create_directory("").await.unwrap();
+        let binary_path = format!("{}/upload.bin", folder.path);
+        let notebook_path = format!("{}/upload.ipynb", folder.path);
+        let test_client = client.clone();
+        let binary = binary_path.clone();
+        let notebook = notebook_path.clone();
+        let result = tokio::spawn(async move {
+            test_client.upload_file(&binary, &[0, 1, 255]).await.unwrap();
+            let contents = test_client.get_contents(&binary, true).await.unwrap();
+            assert_eq!(contents.format.as_deref(), Some("base64"));
+            assert_eq!(contents.content.as_str().unwrap().trim(), "AAH/");
+            assert!(matches!(test_client.upload_file(&binary, &[42]).await, Err(Error::Api { status, .. }) if status.as_u16() == 409));
+            let document = fixture().to_json();
+            test_client.upload_file(&notebook, &serde_json::to_vec(&document).unwrap()).await.unwrap();
+            let contents = test_client.get_contents(&notebook, true).await.unwrap();
+            assert_eq!(contents.content_type, "notebook");
+            // Jupyter adds trust metadata when loading uploaded rich outputs.
+            let mut cells = contents.content["cells"].clone();
+            for cell in cells.as_array_mut().unwrap() {
+                cell["metadata"].as_object_mut().unwrap().remove("trusted");
+            }
+            assert_eq!(cells, document["cells"]);
+            assert_eq!(contents.content["metadata"], document["metadata"]);
+        }).await;
+        for path in [&binary_path, &notebook_path] {
+            match client.delete_contents(path).await {
+                Ok(()) => (),
+                Err(Error::Api { status, .. }) if status.as_u16() == 404 => (),
+                Err(error) => panic!("test cleanup: {error}"),
+            }
+        }
+        client.delete_contents(&folder.path).await.unwrap();
+        result.unwrap();
+    }
+
     #[test]
     fn prints_and_returns_keep_distinct_prompts_and_stream_chunks_join() {
         let outputs: Vec<Output> = serde_json::from_value(serde_json::json!([

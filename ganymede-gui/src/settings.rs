@@ -8,7 +8,14 @@ use crate::{
     theme::{self, ActiveTheme, AppearancePreference, Theme},
 };
 
-pub struct Settings;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Appearance,
+    Notebooks,
+}
+pub struct Settings {
+    section: Section,
+}
 
 pub fn open(cx: &mut App) -> anyhow::Result<WindowHandle<Settings>> {
     let bounds = Bounds::centered(None, size(px(620.), px(400.)), cx);
@@ -32,13 +39,66 @@ pub fn open(cx: &mut App) -> anyhow::Result<WindowHandle<Settings>> {
                     theme::follow_system_appearance(window, cx);
                 })
                 .detach();
-                Settings
+                cx.observe_global::<crate::autosave::AutosavePreference>(|_, cx| cx.notify())
+                    .detach();
+                Settings {
+                    section: Section::Appearance,
+                }
             })
         },
     )
 }
 
 impl Settings {
+    fn autosave_toggle(&self, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.theme();
+        let enabled = cx.global::<crate::autosave::AutosavePreference>().0;
+        div()
+            .id("autosave-toggle")
+            .aria_label(if enabled {
+                "Autosave on"
+            } else {
+                "Autosave off"
+            })
+            .tab_index(0)
+            .w(px(32.))
+            .h(px(20.))
+            .p(px(2.))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .flex_shrink_0()
+            .when(enabled, |s| {
+                s.bg(t.card.primary)
+                    .text_color(t.card.primary_fg)
+                    .justify_end()
+            })
+            .when(!enabled, |s| {
+                s.bg(t.secondary).text_color(t.secondary_fg).justify_start()
+            })
+            .cursor_pointer()
+            .focus(|s| s.border_1().border_color(t.card.ring))
+            .on_click(|_, _, cx| {
+                cx.update_global::<crate::autosave::AutosavePreference, _>(|setting, _| {
+                    setting.0 = !setting.0
+                })
+            })
+            .on_key_down(|event, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    cx.update_global::<crate::autosave::AutosavePreference, _>(|setting, _| {
+                        setting.0 = !setting.0
+                    });
+                    cx.stop_propagation();
+                }
+            })
+            .child(
+                div()
+                    .size(px(16.))
+                    .rounded_full()
+                    .bg(t.selected_segment_bg)
+                    .text_color(t.selected_segment_fg),
+            )
+    }
     fn appearance_selector(&self, cx: &Context<Self>) -> gpui::Div {
         let t = cx.theme();
         let preference = *cx.global::<AppearancePreference>();
@@ -158,24 +218,51 @@ impl Render for Settings {
                             .flex_shrink_0()
                             .window_control_area(WindowControlArea::Drag),
                     )
-                    .child(
-                        div()
-                            .mx_1()
-                            .h(px(28.))
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
-                            .rounded(t.radius.md())
-                            .bg(t.active_file_bg)
-                            .text_color(t.active_file_fg)
-                            .child(
-                                Icon::Palette
-                                    .svg()
-                                    .size(px(14.))
-                                    .text_color(t.active_file_fg),
-                            )
-                            .child("Appearance"),
+                    .children(
+                        [
+                            (Section::Appearance, "Appearance", Icon::Palette),
+                            (Section::Notebooks, "Notebooks", Icon::Notebook),
+                        ]
+                        .into_iter()
+                        .map(|(section, label, icon)| {
+                            let selected = section == self.section;
+                            div()
+                                .id(label)
+                                .mx_1()
+                                .h(px(28.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .rounded(t.radius.md())
+                                .cursor_pointer()
+                                .tab_index(0)
+                                .when(selected, |s| {
+                                    s.bg(t.active_file_bg).text_color(t.active_file_fg)
+                                })
+                                .when(!selected, |s| {
+                                    s.text_color(t.sidebar.fg).hover(|s| s.bg(t.rail_hover_bg))
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.section = section;
+                                    cx.notify();
+                                }))
+                                .on_key_down(cx.listener(
+                                    move |this, event: &gpui::KeyDownEvent, _, cx| {
+                                        if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                        {
+                                            this.section = section;
+                                            cx.notify();
+                                        }
+                                    },
+                                ))
+                                .child(icon.svg().size(px(14.)).text_color(if selected {
+                                    t.active_file_fg
+                                } else {
+                                    t.sidebar.fg
+                                }))
+                                .child(label)
+                        }),
                     ),
             )
             .child(
@@ -193,7 +280,11 @@ impl Render for Settings {
                             .items_center()
                             .window_control_area(WindowControlArea::Drag)
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("Appearance"),
+                            .child(if self.section == Section::Appearance {
+                                "Appearance"
+                            } else {
+                                "Notebooks"
+                            }),
                     )
                     .child(
                         div()
@@ -215,8 +306,27 @@ impl Render for Settings {
                                     .text_color(t.card.fg)
                                     .border_1()
                                     .border_color(t.card.border)
-                                    .child("Theme")
-                                    .child(self.appearance_selector(cx)),
+                                    .when(self.section == Section::Appearance, |view| {
+                                        view.child("Theme").child(self.appearance_selector(cx))
+                                    })
+                                    .when(self.section == Section::Notebooks, |view| {
+                                        view.child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_1()
+                                                .child("Autosave")
+                                                .child(
+                                                    div()
+                                                        .text_size(t.font.xs)
+                                                        .text_color(t.card.muted_fg)
+                                                        .child(
+                                                            "Save after a short pause in editing.",
+                                                        ),
+                                                ),
+                                        )
+                                        .child(self.autosave_toggle(cx))
+                                    }),
                             ),
                     ),
             )

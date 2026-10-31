@@ -274,6 +274,8 @@ pub struct Theme {
     pub destructive_fg: Hsla,
     pub input: Hsla,
     pub scrim: Hsla,
+    pub dialog_action_bg: Hsla,
+    pub dialog_action_fg: Hsla,
     pub body_shadow: BoxShadow,
     pub active_tab_edges: [BoxShadow; 2],
     pub toast_shadow: BoxShadow,
@@ -437,11 +439,13 @@ impl ThemeSpec {
             destructive: self.destructive,
             destructive_fg: self.destructive_foreground,
             input: self.input,
+            dialog_action_bg: app.fg,
+            dialog_action_fg: app.bg,
             scrim: Hsla {
                 h: 0.0,
                 s: 0.0,
                 l: 0.0,
-                a: 0.5,
+                a: 0.16,
             },
             chart: self.chart,
             toast_shadow: BoxShadow::new(px(0.), px(4.), alpha(gpui::black(), 0.10))

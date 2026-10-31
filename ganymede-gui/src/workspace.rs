@@ -97,6 +97,23 @@ impl Tabs {
         }
     }
 }
+#[derive(Clone, Copy)]
+pub enum CloseTarget {
+    Tab(u64),
+    Window,
+    Quit,
+}
+
+#[derive(Clone, Copy)]
+enum FileAction {
+    Launcher,
+    Folder,
+    Filter,
+    Menu,
+    Upload,
+    Refresh,
+}
+
 pub struct Workspace {
     toasts: Entity<crate::toast::ToastHost>,
     documents: Vec<Document>,
@@ -108,7 +125,14 @@ pub struct Workspace {
     loading: HashSet<String>,
     opening: HashSet<String>,
     creating: bool,
+    close_pending: bool,
     file_error: Option<String>,
+    files_menu_open: bool,
+    files_menu_index: Option<usize>,
+    files_menu_focus: gpui::FocusHandle,
+    notebooks_only: bool,
+    creating_folder: bool,
+    uploading: bool,
 }
 impl Workspace {
     pub fn new(
@@ -128,8 +152,26 @@ impl Workspace {
             loading: HashSet::new(),
             opening: HashSet::new(),
             creating: false,
+            close_pending: false,
             file_error: None,
+            files_menu_open: false,
+            files_menu_index: None,
+            files_menu_focus: cx.focus_handle(),
+            notebooks_only: false,
+            creating_folder: false,
+            uploading: false,
         };
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(10))
+                    .await;
+                if this.update(cx, |this, cx| this.refresh_files(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         this.refresh_directory(String::new(), cx);
         this.create(DocumentKind::Notebook, window, cx);
         this
@@ -176,11 +218,158 @@ impl Workspace {
         self.tabs.launch(self.next_id);
         self.activate(self.next_id, window, cx);
     }
+    fn refresh_files(&mut self, cx: &mut Context<Self>) {
+        let paths: Vec<_> = self
+            .expanded
+            .iter()
+            .cloned()
+            .chain(std::iter::once(String::new()))
+            .collect();
+        for path in paths {
+            self.refresh_directory(path, cx);
+        }
+    }
+    fn file_toast(&self, title: &str, result: Result<String, String>, cx: &mut Context<Self>) {
+        let (message, kind) = match result {
+            Ok(message) => (message, crate::toast::ToastKind::Success),
+            Err(message) => (message, crate::toast::ToastKind::Error),
+        };
+        self.toasts.update(cx, |host, cx| {
+            host.push(
+                crate::toast::Toast::new(title.to_owned())
+                    .description(message)
+                    .kind(kind),
+                cx,
+            );
+        });
+    }
+    fn create_folder(&mut self, cx: &mut Context<Self>) {
+        if self.creating_folder {
+            return;
+        }
+        self.creating_folder = true;
+        let runtime = cx.global::<Runtime>();
+        let config = runtime.config.clone();
+        let task = runtime.handle.spawn(async move {
+            let client = JupyterRestClient::new(config?).map_err(|error| error.to_string())?;
+            client
+                .create_directory("")
+                .await
+                .map(|folder| folder.name)
+                .map_err(|error| error.to_string())
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .unwrap_or_else(|_| Err("Could not create folder".into()));
+            this.update(cx, |this, cx| {
+                this.creating_folder = false;
+                this.file_toast(
+                    if result.is_ok() {
+                        "Folder created"
+                    } else {
+                        "Could not create folder"
+                    },
+                    result,
+                    cx,
+                );
+                this.refresh_files(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+    fn upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.uploading {
+            return;
+        }
+        self.uploading = true;
+        let picker = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Upload".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let paths = match picker.await {
+                Ok(Ok(Some(paths))) => paths,
+                result => {
+                    this.update(cx, |this, cx| {
+                        this.uploading = false;
+                        if !matches!(result, Ok(Ok(None))) {
+                            this.file_toast(
+                                "Could not open file picker",
+                                Err("Please try again.".into()),
+                                cx,
+                            );
+                        }
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            let task = this.update(cx, |_, cx| {
+                let runtime = cx.global::<Runtime>();
+                let config = runtime.config.clone();
+                runtime.handle.spawn(async move {
+                    let client =
+                        JupyterRestClient::new(config?).map_err(|error| error.to_string())?;
+                    let mut results = Vec::new();
+                    for path in paths {
+                        let name = path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .map(str::to_owned);
+                        let Some(name) = name else {
+                            results.push(Err("Filename is not valid UTF-8".into()));
+                            continue;
+                        };
+                        let read = tokio::task::spawn_blocking(move || std::fs::read(path)).await;
+                        let result = match read {
+                            Ok(Ok(bytes)) => client
+                                .upload_file(&name, &bytes)
+                                .await
+                                .map(|_| name.clone())
+                                .map_err(|error| format!("{name}: {error}")),
+                            _ => Err(format!("Could not read {name}")),
+                        };
+                        results.push(result);
+                    }
+                    Ok::<_, String>(results)
+                })
+            });
+            let Ok(task) = task else {
+                return;
+            };
+            let result = task.await.unwrap_or_else(|_| Err("Upload failed".into()));
+            this.update(cx, |this, cx| {
+                this.uploading = false;
+                match result {
+                    Ok(results) => {
+                        for result in results {
+                            this.file_toast(
+                                if result.is_ok() {
+                                    "File uploaded"
+                                } else {
+                                    "Upload failed"
+                                },
+                                result,
+                                cx,
+                            );
+                        }
+                    }
+                    Err(error) => this.file_toast("Upload failed", Err(error), cx),
+                }
+                this.refresh_files(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
     fn refresh_directory(&mut self, path: String, cx: &mut Context<Self>) {
         if !self.loading.insert(path.clone()) {
             return;
         }
-        self.file_error = None;
         let runtime = cx.global::<Runtime>();
         let config = runtime.config.clone();
         let request_path = path.clone();
@@ -203,6 +392,7 @@ impl Workspace {
                 this.loading.remove(&path);
                 match result {
                     Ok(Ok(entries)) => {
+                        this.file_error = None;
                         this.directories.insert(path, entries);
                     }
                     Ok(Err(error)) => this.file_error = Some(error),
@@ -316,34 +506,137 @@ impl Workspace {
         self.close(self.tabs.active, window, cx);
     }
     fn close(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let dirty = self
-            .documents
-            .iter()
-            .find(|doc| doc.id == id)
-            .is_some_and(|doc| match &doc.content {
-                Content::Notebook(notebook) => notebook.read(cx).is_dirty(cx),
-                _ => false,
+        self.request_close(CloseTarget::Tab(id), window, cx);
+    }
+    fn affected(&self, target: CloseTarget) -> impl Iterator<Item = &Document> {
+        self.documents.iter().filter(move |doc| match target {
+            CloseTarget::Tab(id) => doc.id == id,
+            _ => true,
+        })
+    }
+    fn suspend_autosave(&self, target: CloseTarget, suspended: bool, cx: &mut Context<Self>) {
+        for doc in self.affected(target) {
+            if let Content::Notebook(notebook) = &doc.content {
+                notebook.update(cx, |notebook, _| notebook.suspend_autosave(suspended));
+            }
+        }
+    }
+    pub fn request_close(
+        &mut self,
+        target: CloseTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.close_pending || window.has_active_prompt() {
+            return;
+        }
+        let dirty = self.affected(target).any(|doc| match &doc.content {
+            Content::Notebook(notebook) => {
+                notebook.read(cx).is_dirty(cx) || notebook.read(cx).is_saving()
+            }
+            Content::Text(editor) => !editor.read(cx).text().is_empty(),
+            _ => false,
+        });
+        if !dirty {
+            self.complete_close(target, window, cx);
+            return;
+        }
+        let unsaved_text = self.affected(target).any(|doc| matches!(&doc.content, Content::Text(editor) if !editor.read(cx).text().is_empty()));
+        let quitting = matches!(target, CloseTarget::Quit);
+        let title = if quitting {
+            "Save changes before quitting?"
+        } else {
+            "Save changes before closing?"
+        };
+        let detail = if unsaved_text {
+            "Text-file saving isn't available yet. Cancel to copy your text. Discarding will lose all unsaved changes."
+        } else {
+            "Your unsaved notebook changes will be lost if you discard them."
+        };
+        let mut choices = vec!["Cancel", "Discard changes"];
+        if !unsaved_text {
+            choices.push(if quitting {
+                "Save and quit"
+            } else {
+                "Save and close"
             });
-        if dirty {
-            let response = window.prompt(gpui::PromptLevel::Warning, "Close notebook without saving?",
-                Some("Unsaved changes will be discarded. Cancel to return to the notebook and save it."),
-                &["Cancel", "Discard changes"], cx);
-            cx.spawn_in(window, async move |this, cx| {
-                if response.await == Ok(1) {
-                    this.update_in(cx, |this, window, cx| this.finish_close(id, window, cx))
-                        .ok();
+        }
+        self.close_pending = true;
+        self.suspend_autosave(target, true, cx);
+        let response = window.prompt(
+            gpui::PromptLevel::Warning,
+            title,
+            Some(detail),
+            &choices,
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let response = response.await;
+            this.update_in(cx, |this, window, cx| match response {
+                Ok(1) => this.complete_close(target, window, cx),
+                Ok(2) => this.save_and_close(target, window, cx),
+                _ => {
+                    this.close_pending = false;
+                    this.suspend_autosave(target, false, cx);
+                    cx.notify();
                 }
             })
-            .detach();
-        } else {
-            self.finish_close(id, window, cx);
+            .ok();
+        })
+        .detach();
+    }
+    fn save_and_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let notebooks: Vec<_> = self
+            .affected(target)
+            .filter_map(|doc| match &doc.content {
+                Content::Notebook(notebook)
+                    if notebook.read(cx).is_dirty(cx) || notebook.read(cx).is_saving() =>
+                {
+                    Some(notebook.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        for notebook in &notebooks {
+            notebook.update(cx, |notebook, cx| notebook.save(cx));
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
+                let finished = this.update_in(cx, |this, window, cx| {
+                    if notebooks.iter().any(|notebook| notebook.read(cx).is_saving()) { return false; }
+                    if notebooks.iter().any(|notebook| notebook.read(cx).save_failed()) || this.affected(target).any(|doc| match &doc.content {
+                        Content::Notebook(notebook) => notebook.read(cx).is_dirty(cx) || notebook.read(cx).is_saving(),
+                        Content::Text(editor) => !editor.read(cx).text().is_empty(),
+                        _ => false,
+                    }) {
+                        this.close_pending = false;
+                        this.suspend_autosave(target, false, cx);
+                        if !notebooks.iter().any(|notebook| notebook.read(cx).save_failed()) {
+                            this.toasts.update(cx, |host, cx| { host.push(crate::toast::Toast::new("New changes arrived while saving")
+                                .description("Your notebook is still open. Save again before closing.")
+                                .kind(crate::toast::ToastKind::Info), cx); });
+                        }
+                        cx.notify();
+                    } else { this.complete_close(target, window, cx); }
+                    true
+                });
+                if finished.unwrap_or(true) { break; }
+            }
+        }).detach();
+    }
+    fn complete_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_pending = false;
+        match target {
+            CloseTarget::Tab(id) => self.finish_close(id, window, cx),
+            CloseTarget::Window => window.remove_window(),
+            CloseTarget::Quit => cx.quit(),
         }
     }
     fn finish_close(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         // Closing a file never shuts down its server kernel.
         self.tabs.close(id);
-        self.documents
-            .retain(|doc| doc.id != id || doc.path.is_none());
+        self.documents.retain(|doc| doc.id != id);
         self.activate(self.tabs.active, window, cx);
     }
     pub fn header(entity: &Entity<Self>, cx: &App) -> gpui::Div {
@@ -514,10 +807,251 @@ impl Workspace {
                     })
             })
     }
+    fn file_action(&mut self, action: FileAction, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            FileAction::Launcher => self.open_launcher(window, cx),
+            FileAction::Folder => self.create_folder(cx),
+            FileAction::Filter => self.notebooks_only = !self.notebooks_only,
+            FileAction::Menu => {
+                self.files_menu_open = !self.files_menu_open;
+                self.files_menu_index = None;
+                self.files_menu_focus.focus(window, cx);
+            }
+            FileAction::Upload => {
+                self.files_menu_open = false;
+                self.upload(window, cx);
+            }
+            FileAction::Refresh => {
+                self.files_menu_open = false;
+                self.refresh_files(cx);
+            }
+        }
+        cx.notify();
+    }
+    fn files_toolbar(entity: &Entity<Self>, cx: &App) -> gpui::Div {
+        let this = entity.read(cx);
+        let t = cx.theme();
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(4.))
+            .flex_shrink_0()
+            .children(
+                [
+                    (
+                        FileAction::Launcher,
+                        "files-launcher",
+                        "New launcher",
+                        Icon::Plus,
+                    ),
+                    (
+                        FileAction::Folder,
+                        "files-folder",
+                        "New folder in server root",
+                        Icon::FolderPlus,
+                    ),
+                    (
+                        FileAction::Filter,
+                        "files-filter",
+                        "Filter: notebooks only",
+                        Icon::Filter,
+                    ),
+                    (
+                        FileAction::Menu,
+                        "files-menu-button",
+                        "More file actions",
+                        Icon::DotsThree,
+                    ),
+                ]
+                .into_iter()
+                .map(|(action, id, label, icon)| {
+                    let click = entity.clone();
+                    let key = entity.clone();
+                    let outside = entity.clone();
+                    let selected = matches!(action, FileAction::Filter) && this.notebooks_only;
+                    let fg = if selected {
+                        t.active_file_fg
+                    } else {
+                        t.sidebar_content.fg
+                    };
+                    let button = div()
+                        .id(id)
+                        .aria_label(label)
+                        .tab_index(0)
+                        .size(px(26.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(t.radius.sm())
+                        .text_color(fg)
+                        .cursor_pointer()
+                        .hover(|view| view.bg(t.rail_hover_bg))
+                        .focus_visible(|view| view.border_1().border_color(t.sidebar_content.ring))
+                        .tooltip(move |_, cx| cx.new(|_| Tip(label)).into())
+                        .child(icon.svg().size(px(14.)).text_color(fg))
+                        .when(selected, |button| {
+                            button.bg(t.active_file_bg).text_color(t.active_file_fg)
+                        })
+                        .when(matches!(action, FileAction::Menu), |button| {
+                            button.track_focus(&this.files_menu_focus)
+                        })
+                        .on_click(move |_, window, cx| {
+                            click.update(cx, |this, cx| this.file_action(action, window, cx))
+                        })
+                        .on_key_down(move |event, window, cx| {
+                            key.update(cx, |this, cx| {
+                                if matches!(action, FileAction::Menu) && this.files_menu_open {
+                                    match event.keystroke.key.as_str() {
+                                        "up" | "down" => {
+                                            this.files_menu_index =
+                                                Some(match this.files_menu_index {
+                                                    Some(index) => 1 - index,
+                                                    None if event.keystroke.key == "up" => 1,
+                                                    None => 0,
+                                                })
+                                        }
+                                        "enter" | "space" => this.file_action(
+                                            if this.files_menu_index.unwrap_or(0) == 0 {
+                                                FileAction::Upload
+                                            } else {
+                                                FileAction::Refresh
+                                            },
+                                            window,
+                                            cx,
+                                        ),
+                                        "escape" | "tab" => this.files_menu_open = false,
+                                        _ => return,
+                                    }
+                                    cx.notify();
+                                } else if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                {
+                                    this.file_action(action, window, cx);
+                                    if matches!(action, FileAction::Menu) {
+                                        this.files_menu_index = Some(0);
+                                    }
+                                }
+                                if event.keystroke.key != "tab" {
+                                    cx.stop_propagation();
+                                }
+                            });
+                        });
+                    div()
+                        .id(SharedString::from(format!("{id}-control")))
+                        .relative()
+                        .when(matches!(action, FileAction::Menu), |view| {
+                            view.on_mouse_down_out(move |_, _, cx| {
+                                outside.update(cx, |this, cx| {
+                                    if this.files_menu_open {
+                                        this.files_menu_open = false;
+                                        cx.notify();
+                                    }
+                                });
+                            })
+                        })
+                        .child(button)
+                        .when(
+                            matches!(action, FileAction::Menu) && this.files_menu_open,
+                            |view| {
+                                view.child(gpui::deferred(
+                                    gpui::anchored()
+                                        .offset(gpui::point(px(0.), px(4.)))
+                                        .snap_to_window_with_margin(px(8.))
+                                        .child(
+                                            div()
+                                                .id("files-menu")
+                                                .occlude()
+                                                .w(px(150.))
+                                                .p_1()
+                                                .flex()
+                                                .flex_col()
+                                                .gap(px(2.))
+                                                .rounded(t.radius.md())
+                                                .bg(t.popover.bg)
+                                                .text_color(t.popover.fg)
+                                                .border_1()
+                                                .border_color(t.popover.border)
+                                                .shadow(vec![t.toast_shadow.clone()])
+                                                .children(
+                                                    [
+                                                        (
+                                                            FileAction::Upload,
+                                                            "Upload…",
+                                                            Icon::Upload,
+                                                        ),
+                                                        (
+                                                            FileAction::Refresh,
+                                                            "Refresh",
+                                                            Icon::Restart,
+                                                        ),
+                                                    ]
+                                                    .into_iter()
+                                                    .enumerate()
+                                                    .map(|(index, (action, label, icon))| {
+                                                        let entity = entity.clone();
+                                                        let hover = entity.clone();
+                                                        div()
+                                                            .id(("files-menu-item", index))
+                                                            .h(px(26.))
+                                                            .px_2()
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap_2()
+                                                            .rounded(t.radius.sm())
+                                                            .text_size(t.font.xs)
+                                                            .cursor_pointer()
+                                                            .when(
+                                                                this.files_menu_index
+                                                                    == Some(index),
+                                                                |view| {
+                                                                    view.bg(t.popover.accent)
+                                                                        .text_color(
+                                                                            t.popover.accent_fg,
+                                                                        )
+                                                                },
+                                                            )
+                                                            .hover(|view| {
+                                                                view.bg(t.popover.accent)
+                                                                    .text_color(t.popover.accent_fg)
+                                                            })
+                                                            .child(
+                                                                icon.svg()
+                                                                    .size(px(14.))
+                                                                    .text_color(t.popover.fg),
+                                                            )
+                                                            .child(label)
+                                                            .on_mouse_move(move |_, _, cx| {
+                                                                hover.update(cx, |this, cx| {
+                                                                    if this
+                                                                        .files_menu_index
+                                                                        .take()
+                                                                        .is_some()
+                                                                    {
+                                                                        cx.notify();
+                                                                    }
+                                                                });
+                                                            })
+                                                            .on_click(move |_, window, cx| {
+                                                                cx.stop_propagation();
+                                                                entity.update(cx, |this, cx| {
+                                                                    this.file_action(
+                                                                        action, window, cx,
+                                                                    )
+                                                                });
+                                                            })
+                                                    }),
+                                                ),
+                                        ),
+                                ))
+                            },
+                        )
+                }),
+            )
+    }
     pub fn files(entity: &Entity<Self>, cx: &App) -> gpui::Div {
         let t = cx.theme();
         let this = entity.read(cx);
-        let refresh = entity.clone();
         let mut rows = Vec::new();
         this.tree_rows("", 0, &mut rows);
         div()
@@ -526,23 +1060,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap(px(2.))
-            .child(
-                icon_button("refresh-files", "Refresh files", Icon::Restart, cx).on_click(
-                    move |_, _, cx| {
-                        refresh.update(cx, |this, cx| {
-                            let paths: Vec<_> = this
-                                .expanded
-                                .iter()
-                                .cloned()
-                                .chain(std::iter::once(String::new()))
-                                .collect();
-                            for path in paths {
-                                this.refresh_directory(path, cx);
-                            }
-                        })
-                    },
-                ),
-            )
+            .child(Self::files_toolbar(entity, cx))
             .when_some(this.file_error.as_ref(), |view, error| {
                 view.child(
                     div()
@@ -623,6 +1141,12 @@ impl Workspace {
     fn tree_rows(&self, path: &str, depth: usize, rows: &mut Vec<(Contents, usize)>) {
         if let Some(entries) = self.directories.get(path) {
             for entry in entries {
+                if self.notebooks_only
+                    && entry.content_type != "directory"
+                    && entry.content_type != "notebook"
+                {
+                    continue;
+                }
                 rows.push((entry.clone(), depth));
                 if self.expanded.contains(&entry.path) {
                     self.tree_rows(&entry.path, depth + 1, rows);

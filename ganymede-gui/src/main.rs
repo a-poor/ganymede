@@ -1,5 +1,7 @@
 mod assets;
+mod autosave;
 mod code_cell;
+mod confirm;
 mod execution;
 pub mod icon;
 mod notebook;
@@ -68,6 +70,32 @@ impl Ganymede {
         let toasts = cx.new(|cx| toast::ToastHost::new(window, cx));
         let workspace = cx.new(|cx| workspace::Workspace::new(toasts.clone(), window, cx));
         cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
+        let closing = workspace.downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            closing
+                .update(cx, |workspace, cx| {
+                    workspace.request_close(workspace::CloseTarget::Window, window, cx)
+                })
+                .ok();
+            false
+        });
+        let quitting = workspace.downgrade();
+        let main_window = window.window_handle();
+        App::on_action(cx, move |_: &Quit, cx: &mut App| {
+            if main_window
+                .update(cx, |_, window, cx| {
+                    window.activate_window();
+                    quitting
+                        .update(cx, |workspace, cx| {
+                            workspace.request_close(workspace::CloseTarget::Quit, window, cx)
+                        })
+                        .ok();
+                })
+                .is_err()
+            {
+                cx.quit();
+            }
+        });
         Self {
             workspace,
             toasts,
@@ -138,14 +166,9 @@ impl Ganymede {
             .gap_2()
             .p_2()
             .text_size(theme.font.sm)
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(match self.sidebar_tab {
-                        SidebarTab::Files => "Files",
-                        SidebarTab::Kernels => "Kernels",
-                    }),
-            );
+            .when(self.sidebar_tab == SidebarTab::Kernels, |panel| {
+                panel.child(div().font_weight(FontWeight::SEMIBOLD).child("Kernels"))
+            });
         match self.sidebar_tab {
             SidebarTab::Files => panel.child(workspace::Workspace::files(&self.workspace, cx)),
             SidebarTab::Kernels => {
@@ -382,9 +405,10 @@ fn main() {
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
             cx.set_global(execution);
+            cx.set_global(autosave::AutosavePreference::default());
+            confirm::init(cx);
             assets::register_fonts(cx).expect("failed to register embedded fonts");
             code_cell::init(cx);
-            cx.on_action(|_: &Quit, cx| cx.quit());
             let quit_key = if cfg!(target_os = "macos") {
                 "cmd-q"
             } else {
