@@ -191,13 +191,13 @@ Restart the app after changing configuration.
 
 Run `cargo run -p ganymede-gui`. The demo starts with a new server notebook, using
 Jupyter’s unused `Untitled` name. The file tree starts at the server root; folders
-load on expansion. Its toolbar opens the launcher, creates a server-named folder
-at the root, and toggles a filename filter input. Filtering is case-insensitive and keeps
+load on expansion. Its toolbar opens the launcher, prompts for a folder name in the selected directory,
+and toggles a filename filter input. Filtering is case-insensitive and keeps
 ancestor folders visible for matching files, including files in collapsed folders.
 Clear/close with the × button or Escape to restore the normal tree. Background
 search is bounded to 1,024 directories and 32 levels; directory requests are limited
 to four at a time. The overflow menu offers Upload
-(native multi-file picker, targeting the root) and Refresh. Existing upload names
+(native multi-file picker, targeting the selected directory or root) and Refresh. Existing upload names
 are rejected; uploads never intentionally replace an existing file. The tree
 refreshes quietly every 10 seconds, retaining expanded folders and scroll position. Click a notebook to
 open it; an already-open path reuses its tab. Opening a notebook connects automatically,
@@ -258,8 +258,34 @@ line endings returned by the server are preserved on save. Syntax highlighting a
 specialized Markdown/Python behavior are not implemented yet; paths and document kinds
 are retained for that future work.
 
-Terminal/console launcher items remain demos. General Save As and rename are not
-implemented yet.
+Right-click a file or folder for its context menu. Files offer Open, Rename, Save As,
+and Delete; folders offer New notebook, New text file, New folder, Upload here,
+Refresh, Rename, and Delete. Right-click the tree background for root-level creation
+and upload actions. Rename and Save As use animated input dialogs; Save As accepts
+a new server-relative path and refuses existing destinations. For an open document,
+it saves current local edits and continues editing the new file, leaving the original
+on the server. For a closed file, it copies server contents and selects the new file.
+
+⌘-click (Ctrl-click on other platforms) toggles individual tree items. Shift-click
+selects a range in the current visible tree order; ⌘/Ctrl+Shift-click adds that range.
+Modifier clicks select without opening files or expanding folders. Right-clicking a
+selected item preserves the selection. Multiple items offer Delete selected; Rename
+and Save As remain single-item actions. Batch moves and deletes process each selected
+folder only once, including its descendants, and report individual failures while
+keeping successful changes.
+
+Drag files or folders onto another folder to move them; dropping on a file targets
+its parent, and dropping on the tree background moves to root. Self/descendant moves
+are ignored and name collisions are rejected. Open tabs and their save paths follow
+renames and moves, including descendants of moved folders. Pending saves finish before
+path changes; unsaved edits remain dirty. Associated open notebook sessions are updated
+without restarting or shutting down their kernels. Delete asks for confirmation and
+closes affected tabs only after server deletion succeeds. Non-empty-folder deletion
+follows the Jupyter server's policy; rejection appears in an error toast.
+
+All mutations use the Jupyter Contents API. Uploads currently use the OS picker;
+Finder-to-sidebar drops are not implemented. Terminal/console launcher items remain
+demos.
 
 To exercise the GUI execution adapter against the configured server:
 

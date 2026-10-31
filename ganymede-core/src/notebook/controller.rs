@@ -298,6 +298,65 @@ impl NotebookController {
         .await
     }
 
+    /// Write captured local work to a new path and continue editing there.
+    pub async fn save_as(&self, path: String) -> Result<()> {
+        let this = self.clone();
+        finish(async move {
+            let _save = this.inner.saves.lock().await;
+            this.inner.rest.ensure_missing(&path).await?;
+            let snapshot = this.snapshot();
+            let saved = this
+                .inner
+                .rest
+                .save_notebook(&path, &snapshot.document.to_json())
+                .await?;
+            let mut data = this.inner.data.lock().unwrap();
+            data.state.snapshot.path = path;
+            data.state
+                .snapshot
+                .document
+                .mark_saved(snapshot.document.revision());
+            data.saved_version = Some(saved.last_modified);
+            data.state.snapshot.save = SaveState::Idle;
+            this.inner
+                .publish(&mut data, vec![NotebookEvent::SaveChanged(SaveState::Idle)]);
+            Ok(())
+        })
+        .await
+    }
+
+    /// Call after a successful server rename, with application saves suspended.
+    pub fn retarget_path(&self, path: String) {
+        let mut data = self.inner.data.lock().unwrap();
+        data.state.snapshot.path = path;
+        self.inner.publish(&mut data, vec![]);
+    }
+
+    /// Keep the server's session association aligned after a rename or Save As.
+    /// Failure does not undo a successful file operation or stop its kernel.
+    pub async fn sync_session_path(&self) -> Result<()> {
+        let snapshot = self.snapshot();
+        if let Some(session) = &snapshot.session {
+            let updated = self
+                .inner
+                .rest
+                .update_session_path(&session.id, &snapshot.path)
+                .await?;
+            let mut data = self.inner.data.lock().unwrap();
+            if data
+                .state
+                .snapshot
+                .session
+                .as_ref()
+                .is_some_and(|current| current.id == updated.id)
+            {
+                data.state.snapshot.session = Some(updated);
+                self.inner.publish(&mut data, vec![]);
+            }
+        }
+        Ok(())
+    }
+
     /// Save a separate server-allocated notebook without changing the original's dirty state.
     pub async fn save_copy(&self) -> Result<String> {
         let this = self.clone();

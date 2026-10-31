@@ -163,6 +163,7 @@ fn from_utf16(text: &str, offset: usize) -> usize {
 
 #[derive(Clone, Copy)]
 pub enum CellEvent {
+    FocusNext,
     Changed,
     Duplicate,
     DeleteCell,
@@ -185,6 +186,7 @@ pub struct CodeCell {
     current: bool,
     document: bool,
     filter_input: bool,
+    name_input: bool,
     count_hint: u64,
     kind: ganymede_core::notebook::CellKind,
     menu_open: bool,
@@ -238,6 +240,7 @@ impl CodeCell {
             current: false,
             document: false,
             filter_input: false,
+            name_input: false,
             count_hint: 0,
             kind: ganymede_core::notebook::CellKind::Code,
             menu_open: false,
@@ -271,6 +274,14 @@ impl CodeCell {
         this
     }
 
+    pub fn new_name_input(value: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut this = Self::new_filter(window, cx);
+        this.name_input = true;
+        this.set_text(value, cx);
+        this.buffer.anchor = 0;
+        this.buffer.head = this.buffer.text.len();
+        this
+    }
     pub fn new_filter(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut this = Self::new(window, cx);
         this.filter_input = true;
@@ -840,6 +851,9 @@ impl Render for CodeCell {
             }))
             .on_action(cx.listener(|this, _: &Enter, w, cx| {
                 if this.filter_input {
+                    if this.name_input {
+                        cx.emit(CellEvent::RunAndAdvance);
+                    }
                     return;
                 }
                 let indent: String = this.buffer.text[this.buffer.line_start()..this.buffer.head]
@@ -849,7 +863,9 @@ impl Render for CodeCell {
                 this.replace_text_in_range(None, &format!("\n{indent}"), w, cx);
             }))
             .on_action(cx.listener(|this, _: &Tab, w, cx| {
-                if this.filter_input {
+                if this.name_input {
+                    cx.emit(CellEvent::FocusNext);
+                } else if this.filter_input {
                     w.focus_next(cx);
                 } else {
                     this.replace_text_in_range(None, "    ", w, cx);
@@ -906,7 +922,7 @@ impl Render for CodeCell {
         if self.filter_input {
             return div()
                 .on_mouse_down_out(cx.listener(|this, _, window, _| {
-                    if this.focus.is_focused(window) {
+                    if !this.name_input && this.focus.is_focused(window) {
                         window.blur();
                     }
                 }))
@@ -921,7 +937,7 @@ impl Render for CodeCell {
                         .font_family(theme.font.sans.clone())
                         .text_size(theme.font.xs),
                 )
-                .when(self.buffer.text.is_empty(), |view| {
+                .when(self.buffer.text.is_empty() && !self.name_input, |view| {
                     view.child(
                         div()
                             .absolute()

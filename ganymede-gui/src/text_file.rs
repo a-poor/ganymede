@@ -27,6 +27,7 @@ pub struct TextFile {
     controller: TextFileController,
     toasts: Entity<ToastHost>,
     saving: bool,
+    file_busy: bool,
     conflict: bool,
     save_error: bool,
     autosave: AutosaveClock,
@@ -67,6 +68,7 @@ impl TextFile {
                         let (revision, dirty) = this.controller.status();
                         let enabled = cx.global::<AutosavePreference>().0
                             && !this.suspended
+                            && !this.file_busy
                             && !this.conflict;
                         if this
                             .autosave
@@ -87,6 +89,7 @@ impl TextFile {
             controller,
             toasts,
             saving: false,
+            file_busy: false,
             conflict: false,
             save_error: false,
             autosave: Default::default(),
@@ -105,11 +108,23 @@ impl TextFile {
     pub fn save_failed(&self) -> bool {
         self.save_error
     }
+    pub fn set_file_busy(&mut self, busy: bool) {
+        self.file_busy = busy;
+    }
+    pub fn file_controller(&self) -> TextFileController {
+        self.controller.clone()
+    }
+    pub fn file_saved_as(&mut self, cx: &mut Context<Self>) {
+        self.conflict = false;
+        self.save_error = false;
+        self.autosave.resume();
+        cx.notify();
+    }
     pub fn suspend_autosave(&mut self, suspended: bool) {
         self.suspended = suspended;
     }
     pub fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.saving {
+        if self.saving || self.file_busy {
             return;
         }
         self.start(Operation::Save, window, cx);

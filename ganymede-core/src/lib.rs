@@ -4,3 +4,5 @@ pub mod jupyter;
 pub mod notebook;
 
 pub mod text_file;
+
+pub mod files;

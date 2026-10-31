@@ -4,6 +4,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("invalid file path: {0}")]
+    InvalidPath(String),
     #[error("invalid server configuration: {0}")]
     Config(String),
     #[error("HTTP transport failed: {0}")]

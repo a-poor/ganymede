@@ -226,6 +226,73 @@ impl JupyterRestClient {
             .await?)
     }
 
+    /// The standard Contents API has no atomic conditional PUT. Check before
+    /// creating a new destination; never deliberately replace an existing file.
+    pub async fn ensure_missing(&self, path: &str) -> Result<()> {
+        crate::files::validate_path(path)?;
+        match self.get_contents(path, false).await {
+            Ok(_) => Err(Error::Api {
+                status: reqwest::StatusCode::CONFLICT,
+                message: "A file or folder with this name already exists".into(),
+            }),
+            Err(Error::Api { status, .. }) if status == reqwest::StatusCode::NOT_FOUND => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+    pub async fn rename_contents(&self, from: &str, to: &str) -> Result<Contents> {
+        crate::files::validate_path(from)?;
+        crate::files::validate_path(to)?;
+        if crate::files::is_within(to, from) {
+            return Err(Error::InvalidPath(
+                "Choose a different location outside the source folder".into(),
+            ));
+        }
+        self.ensure_missing(to).await?;
+        Ok(self
+            .request(
+                Method::PATCH,
+                self.contents_url(from)?,
+                Some(json!({"path":to})),
+            )
+            .await?
+            .json()
+            .await?)
+    }
+    pub async fn create_named_directory(&self, path: &str) -> Result<Contents> {
+        self.ensure_missing(path).await?;
+        Ok(self
+            .request(
+                Method::PUT,
+                self.contents_url(path)?,
+                Some(json!({"type":"directory"})),
+            )
+            .await?
+            .json()
+            .await?)
+    }
+    pub async fn copy_contents(&self, from: &str, to: &str) -> Result<Contents> {
+        self.ensure_missing(to).await?;
+        let contents = self.get_contents(from, true).await?;
+        if !matches!(contents.content_type.as_str(), "file" | "notebook") {
+            return Err(Error::InvalidPath(
+                "Save As is only available for files".into(),
+            ));
+        }
+        Ok(self.request(Method::PUT, self.contents_url(to)?,
+            Some(json!({"type":contents.content_type,"format":contents.format,"content":contents.content}))).await?.json().await?)
+    }
+    pub async fn update_session_path(&self, id: &str, path: &str) -> Result<Session> {
+        Ok(self
+            .request(
+                Method::PATCH,
+                self.config.endpoint(&["api", "sessions", id])?,
+                Some(json!({"path":path,"name":crate::files::name(path)})),
+            )
+            .await?
+            .json()
+            .await?)
+    }
+
     /// Explicitly remove a file through the Contents API.
     pub async fn delete_contents(&self, path: &str) -> Result<()> {
         self.request(Method::DELETE, self.contents_url(path)?, None)

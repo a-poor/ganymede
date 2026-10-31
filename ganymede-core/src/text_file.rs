@@ -160,6 +160,29 @@ impl TextFileController {
         .await
         .map_err(|_| Error::Interrupted)?
     }
+    pub async fn save_as(&self, path: String) -> Result<()> {
+        let this = self.clone();
+        tokio::spawn(async move {
+            let _save = this.saves.lock().await;
+            this.rest.ensure_missing(&path).await?;
+            let (revision, text) = {
+                let data = this.data.lock().unwrap();
+                (data.snapshot.revision, data.encoded())
+            };
+            let saved = this.rest.save_text_file(&path, &text).await?;
+            let mut data = this.data.lock().unwrap();
+            data.snapshot.path = path;
+            data.snapshot.saved_revision = revision;
+            data.version = saved.last_modified;
+            Ok(())
+        })
+        .await
+        .map_err(|_| Error::Interrupted)?
+    }
+    /// Call after a successful server rename, with application saves suspended.
+    pub fn retarget_path(&self, path: String) {
+        self.data.lock().unwrap().snapshot.path = path;
+    }
     pub async fn reload(&self) -> Result<()> {
         let this = self.clone();
         tokio::spawn(async move {

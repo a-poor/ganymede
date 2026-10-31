@@ -1,4 +1,6 @@
 //! Server file browser, notebook tabs, and launcher.
+mod file_management;
+mod selection;
 use crate::execution::{Runtime, Session};
 use crate::{
     code_cell::CodeCell,
@@ -7,6 +9,7 @@ use crate::{
     text_file::TextFile,
     theme::{ActiveTheme, Theme},
 };
+use file_management::{DragFile, FileMenu, Operation};
 use ganymede_core::{
     jupyter::{JupyterRestClient, models::Contents},
     notebook::NotebookController,
@@ -15,6 +18,7 @@ use gpui::{
     App, Context, Entity, Focusable, FontWeight, ScrollHandle, SharedString, Window, div,
     prelude::*, px,
 };
+use selection::{FileSelection, selection_roots};
 use std::{
     collections::{HashMap, HashSet},
     time::{Duration, Instant},
@@ -233,8 +237,14 @@ pub struct Workspace {
     filter_input: Entity<CodeCell>,
     filter_query: String,
     filter_requested: HashSet<String>,
-    creating_folder: bool,
     uploading: bool,
+    file_busy: bool,
+    file_directory: String,
+    file_selection: FileSelection,
+    file_operations: std::collections::VecDeque<Operation>,
+    file_menu: Option<FileMenu>,
+    file_menu_focus: gpui::FocusHandle,
+    tree_generation: u64,
 }
 impl Workspace {
     pub fn new(
@@ -280,8 +290,14 @@ impl Workspace {
             filter_input,
             filter_query: String::new(),
             filter_requested: HashSet::new(),
-            creating_folder: false,
             uploading: false,
+            file_busy: false,
+            file_directory: String::new(),
+            file_selection: FileSelection::default(),
+            file_operations: Default::default(),
+            file_menu: None,
+            file_menu_focus: cx.focus_handle(),
+            tree_generation: 0,
         };
         cx.spawn(async move |this, cx| {
             loop {
@@ -299,6 +315,9 @@ impl Workspace {
         this
     }
     fn create(&mut self, kind: DocumentKind, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_busy {
+            return;
+        }
         if kind == DocumentKind::Notebook {
             self.open_notebook(None, window, cx);
             return;
@@ -373,6 +392,9 @@ impl Workspace {
         }
     }
     fn refresh_files(&mut self, cx: &mut Context<Self>) {
+        if self.file_busy {
+            return;
+        }
         if self.filter_open && !self.filter_query.is_empty() {
             // Let an in-progress scan finish instead of restarting it on every timer tick.
             if !self.loading.is_empty() {
@@ -406,47 +428,18 @@ impl Workspace {
             );
         });
     }
-    fn create_folder(&mut self, cx: &mut Context<Self>) {
-        if self.creating_folder {
+    fn upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_busy {
             return;
         }
-        self.creating_folder = true;
-        let runtime = cx.global::<Runtime>();
-        let config = runtime.config.clone();
-        let task = runtime.handle.spawn(async move {
-            let client = JupyterRestClient::new(config?).map_err(|error| error.to_string())?;
-            client
-                .create_directory("")
-                .await
-                .map(|folder| folder.name)
-                .map_err(|error| error.to_string())
-        });
-        cx.spawn(async move |this, cx| {
-            let result = task
-                .await
-                .unwrap_or_else(|_| Err("Could not create folder".into()));
-            this.update(cx, |this, cx| {
-                this.creating_folder = false;
-                this.file_toast(
-                    if result.is_ok() {
-                        "Folder created"
-                    } else {
-                        "Could not create folder"
-                    },
-                    result,
-                    cx,
-                );
-                this.refresh_files(cx);
-            })
-            .ok();
-        })
-        .detach();
-    }
-    fn upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.uploading {
             return;
         }
         self.uploading = true;
+        if !self.file_directory.is_empty() {
+            self.expanded.insert(self.file_directory.clone());
+        }
+        let directory = self.file_directory.clone();
         let picker = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,
@@ -490,7 +483,11 @@ impl Workspace {
                         let read = tokio::task::spawn_blocking(move || std::fs::read(path)).await;
                         let result = match read {
                             Ok(Ok(bytes)) => client
-                                .upload_file(&name, &bytes)
+                                .upload_file(
+                                    &ganymede_core::files::child_path(&directory, &name)
+                                        .map_err(|e| e.to_string())?,
+                                    &bytes,
+                                )
                                 .await
                                 .map(|_| name.clone())
                                 .map_err(|error| format!("{name}: {error}")),
@@ -533,6 +530,7 @@ impl Workspace {
         if !self.loading.insert(path.clone()) {
             return;
         }
+        let generation = self.tree_generation;
         let runtime = cx.global::<Runtime>();
         let config = runtime.config.clone();
         let request_path = path.clone();
@@ -552,6 +550,9 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| {
+                if this.tree_generation != generation {
+                    return;
+                }
                 this.loading.remove(&path);
                 match result {
                     Ok(Ok(entries)) => {
@@ -576,6 +577,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.file_busy {
+            return;
+        }
         if let Some(path) = &path {
             if let Some(doc) = self
                 .documents
@@ -597,6 +601,7 @@ impl Workspace {
         let runtime = cx.global::<Runtime>();
         let config = runtime.config.clone();
         let requested = path.clone();
+        let directory = self.file_directory.clone();
         let task = runtime.handle.spawn(async move {
             let config = config?;
             let path = match requested {
@@ -604,7 +609,7 @@ impl Workspace {
                 None => {
                     JupyterRestClient::new(config.clone())
                         .map_err(|e| e.to_string())?
-                        .create_text_file("", &format!(".{}", kind.extension()))
+                        .create_text_file(&directory, &format!(".{}", kind.extension()))
                         .await
                         .map_err(|e| e.to_string())?
                         .path
@@ -618,6 +623,7 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             this.update_in(cx, |this, window, cx| {
+                let preserve_selection = path.is_some();
                 if let Some(path) = path {
                     this.opening.remove(&path);
                 } else {
@@ -625,8 +631,10 @@ impl Workspace {
                 }
                 match result {
                     Ok(Ok((path, controller))) => {
+                        this.reveal_file_parent(&path);
                         let editor =
                             cx.new(|cx| TextFile::new(controller, this.toasts.clone(), window, cx));
+                        editor.update(cx, |view, _| view.set_file_busy(this.file_busy));
                         cx.observe(&editor, |_, _, cx| cx.notify()).detach();
                         this.next_id += 1;
                         this.documents.push(Document {
@@ -637,8 +645,14 @@ impl Workspace {
                             content: Content::Text(editor),
                         });
                         this.tabs.launch(this.next_id);
+                        let selection = this.file_selection.clone();
+                        let directory = this.file_directory.clone();
                         this.activate(this.next_id, window, cx);
-                        this.refresh_directory(String::new(), cx);
+                        if preserve_selection {
+                            this.file_selection = selection;
+                            this.file_directory = directory;
+                        }
+                        this.refresh_files(cx);
                     }
                     Ok(Err(error)) => this.file_toast("Could not open file", Err(error), cx),
                     Err(_) => this.file_toast(
@@ -654,6 +668,9 @@ impl Workspace {
         .detach();
     }
     fn open_notebook(&mut self, path: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_busy {
+            return;
+        }
         if let Some(path) = &path {
             if let Some(doc) = self
                 .documents
@@ -676,6 +693,7 @@ impl Workspace {
         let runtime = cx.global::<Runtime>();
         let config = runtime.config.clone();
         let requested = path.clone();
+        let directory = self.file_directory.clone();
         let task = runtime.handle.spawn(async move {
             let config = config?;
             let path = match requested {
@@ -683,7 +701,7 @@ impl Workspace {
                 None => {
                     JupyterRestClient::new(config.clone())
                         .map_err(|e| e.to_string())?
-                        .create_notebook("")
+                        .create_notebook(&directory)
                         .await
                         .map_err(|e| e.to_string())?
                         .path
@@ -697,6 +715,7 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             this.update_in(cx, |this, window, cx| {
+                let preserve_selection = path.is_some();
                 if let Some(path) = path {
                     this.opening.remove(&path);
                 } else {
@@ -704,9 +723,11 @@ impl Workspace {
                 }
                 match result {
                     Ok(Ok((path, controller))) => {
+                        this.reveal_file_parent(&path);
                         let session = Session::from_controller(controller, cx.global::<Runtime>());
                         let notebook =
                             cx.new(|cx| Notebook::new(session, this.toasts.clone(), window, cx));
+                        notebook.update(cx, |view, _| view.set_file_busy(this.file_busy));
                         cx.observe(&notebook, |_, _, cx| cx.notify()).detach();
                         this.next_id += 1;
                         this.documents.push(Document {
@@ -717,8 +738,14 @@ impl Workspace {
                             content: Content::Notebook(notebook),
                         });
                         this.tabs.launch(this.next_id);
+                        let selection = this.file_selection.clone();
+                        let directory = this.file_directory.clone();
                         this.activate(this.next_id, window, cx);
-                        this.refresh_directory(String::new(), cx);
+                        if preserve_selection {
+                            this.file_selection = selection;
+                            this.file_directory = directory;
+                        }
+                        this.refresh_files(cx);
                     }
                     Ok(Err(error)) => this.file_error = Some(error),
                     Err(_) => this.file_error = Some("Could not open notebook".into()),
@@ -734,6 +761,10 @@ impl Workspace {
         self.tabs.activate(id);
         self.reveal_tab = Some(id);
         if let Some(doc) = self.documents.iter().find(|doc| doc.id == id) {
+            if let Some(path) = &doc.path {
+                self.file_selection.single(path);
+                self.file_directory = ganymede_core::files::parent(path).to_owned();
+            }
             match &doc.content {
                 Content::Notebook(notebook) => {
                     notebook.update(cx, |notebook, cx| notebook.focus_selected(window, cx))
@@ -772,7 +803,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.close_pending || window.has_active_prompt() {
+        if self.file_busy || self.close_pending || window.has_active_prompt() {
             return;
         }
         let dirty = self
@@ -1126,7 +1157,7 @@ impl Workspace {
     fn file_action(&mut self, action: FileAction, window: &mut Window, cx: &mut Context<Self>) {
         match action {
             FileAction::Launcher => self.open_launcher(window, cx),
-            FileAction::Folder => self.create_folder(cx),
+            FileAction::Folder => self.prompt_new_folder(window, cx),
             FileAction::Filter => {
                 if self.filter_open {
                     self.close_filter(window, cx);
@@ -1139,6 +1170,7 @@ impl Workspace {
                 }
             }
             FileAction::Menu => {
+                self.file_menu = None;
                 self.files_menu_open = !self.files_menu_open;
                 self.files_menu_index = None;
                 self.files_menu_focus.focus(window, cx);
@@ -1174,7 +1206,7 @@ impl Workspace {
                     (
                         FileAction::Folder,
                         "files-folder",
-                        "New folder in server root",
+                        "New folder",
                         Icon::FolderPlus,
                     ),
                     (
@@ -1380,6 +1412,14 @@ impl Workspace {
         let this = entity.read(cx);
         let mut rows = Vec::new();
         this.tree_rows("", 0, &mut rows);
+        let visible_paths = std::sync::Arc::new(
+            rows.iter()
+                .map(|(entry, _)| entry.path.clone())
+                .collect::<Vec<_>>(),
+        );
+        let root_menu = entity.clone();
+        let root_drop = entity.clone();
+        let root_select = entity.clone();
         div()
             .flex_1()
             .min_h_0()
@@ -1437,6 +1477,24 @@ impl Workspace {
             .child(
                 div()
                     .id("server-file-tree")
+                    .on_mouse_down(gpui::MouseButton::Right, move |event, window, cx| {
+                        cx.stop_propagation();
+                        root_menu.update(cx, |this, cx| {
+                            this.show_file_menu(String::new(), true, event.position, window, cx)
+                        });
+                    })
+                    .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                        root_select.update(cx, |this, cx| {
+                            this.select_file_path("", true);
+                            cx.notify();
+                        });
+                    })
+                    .on_drop(move |drag: &DragFile, window, cx| {
+                        cx.stop_propagation();
+                        root_drop.update(cx, |this, cx| {
+                            this.move_files(drag.paths.clone(), String::new(), window, cx)
+                        });
+                    })
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -1447,9 +1505,7 @@ impl Workspace {
                         let directory = entry.content_type == "directory";
                         let supported =
                             directory || matches!(entry.content_type.as_str(), "notebook" | "file");
-                        let selected = this.documents.iter().any(|doc| {
-                            doc.id == this.tabs.active && doc.path.as_ref() == Some(&entry.path)
-                        });
+                        let selected = this.file_selection.paths.contains(&entry.path);
                         let icon = if directory {
                             if this.expanded.contains(&entry.path)
                                 || (this.filter_open && !this.filter_query.is_empty())
@@ -1462,6 +1518,30 @@ impl Workspace {
                             Icon::FileText
                         };
                         let entity = entity.clone();
+                        let menu_entity = entity.clone();
+                        let drop_entity = entity.clone();
+                        let drag_select = entity.clone();
+                        let menu_path = entry.path.clone();
+                        let visible_paths = visible_paths.clone();
+                        let drop_directory = if directory {
+                            entry.path.clone()
+                        } else {
+                            ganymede_core::files::parent(&entry.path).to_owned()
+                        };
+                        let drop_check = drop_directory.clone();
+                        let drag = DragFile {
+                            paths: if selected {
+                                selection_roots(
+                                    this.file_selection
+                                        .paths
+                                        .iter()
+                                        .filter(|path| visible_paths.contains(path))
+                                        .cloned(),
+                                )
+                            } else {
+                                vec![entry.path.clone()]
+                            },
+                        };
                         div()
                             .id(SharedString::from(format!("file-{}", entry.path)))
                             .h(px(24.))
@@ -1480,6 +1560,58 @@ impl Workspace {
                                 s.text_color(t.sidebar_content.fg)
                                     .hover(|s| s.bg(t.sidebar_content.accent))
                             })
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation()
+                            })
+                            .on_mouse_down(gpui::MouseButton::Right, move |event, window, cx| {
+                                cx.stop_propagation();
+                                menu_entity.update(cx, |this, cx| {
+                                    this.show_file_menu(
+                                        menu_path.clone(),
+                                        directory,
+                                        event.position,
+                                        window,
+                                        cx,
+                                    )
+                                });
+                            })
+                            .when(supported && !this.file_busy, |view| {
+                                view.on_drag(drag, move |drag, _, _, cx| {
+                                    drag_select.update(cx, |this, cx| {
+                                        if drag.paths.len() == 1
+                                            && !this.file_selection.paths.contains(&drag.paths[0])
+                                        {
+                                            this.file_selection.single(&drag.paths[0]);
+                                            cx.notify();
+                                        }
+                                    });
+                                    cx.new(|_| drag.clone())
+                                })
+                                .drag_over::<DragFile>(move |view, drag, _, cx| {
+                                    if !drag.paths.iter().any(|path| {
+                                        ganymede_core::files::is_within(&drop_check, path)
+                                    }) && drag.paths.iter().any(|path| {
+                                        ganymede_core::files::parent(path) != drop_check
+                                    }) {
+                                        view.bg(cx.theme().active_file_bg)
+                                    } else {
+                                        view
+                                    }
+                                })
+                                .on_drop(
+                                    move |drag: &DragFile, window, cx| {
+                                        cx.stop_propagation();
+                                        drop_entity.update(cx, |this, cx| {
+                                            this.move_files(
+                                                drag.paths.clone(),
+                                                drop_directory.clone(),
+                                                window,
+                                                cx,
+                                            )
+                                        });
+                                    },
+                                )
+                            })
                             .when(supported, |s| s.cursor_pointer())
                             .when(!supported, |s| s.opacity(0.5))
                             .child(icon.svg().size(px(14.)).flex_shrink_0().text_color(
@@ -1490,8 +1622,32 @@ impl Workspace {
                                 },
                             ))
                             .child(div().truncate().child(entry.name))
-                            .on_click(move |_, window, cx| {
+                            .on_click(move |event, window, cx| {
                                 entity.update(cx, |this, cx| {
+                                    if this.file_busy {
+                                        return;
+                                    }
+                                    let modifiers = event.modifiers();
+                                    let toggle = if cfg!(target_os = "macos") {
+                                        modifiers.platform
+                                    } else {
+                                        modifiers.control
+                                    };
+                                    this.file_selection.click(
+                                        &entry.path,
+                                        &visible_paths,
+                                        toggle,
+                                        modifiers.shift,
+                                    );
+                                    this.file_directory = if directory {
+                                        entry.path.clone()
+                                    } else {
+                                        ganymede_core::files::parent(&entry.path).to_owned()
+                                    };
+                                    cx.notify();
+                                    if toggle || modifiers.shift {
+                                        return;
+                                    }
                                     if directory {
                                         if !this.expanded.remove(&entry.path) {
                                             this.expanded.insert(entry.path.clone());
@@ -1518,6 +1674,7 @@ impl Workspace {
                             })
                     })),
             )
+            .children(Self::file_context_menu(entity, cx))
     }
     fn tree_rows(&self, path: &str, depth: usize, rows: &mut Vec<(Contents, usize)>) {
         collect_tree_rows(

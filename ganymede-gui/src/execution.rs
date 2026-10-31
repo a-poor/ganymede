@@ -120,6 +120,9 @@ impl Session {
             submission: Default::default(),
         }
     }
+    pub fn controller(&self) -> NotebookController {
+        self.controller.as_ref().unwrap().clone()
+    }
     pub fn document(&self) -> NotebookDocument {
         self.controller
             .as_ref()

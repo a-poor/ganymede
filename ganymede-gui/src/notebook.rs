@@ -65,6 +65,7 @@ pub struct Notebook {
     toasts: Entity<crate::toast::ToastHost>,
     cells: Vec<Entity<CodeCell>>,
     saving: bool,
+    file_busy: bool,
     save_conflict: bool,
     autosave: crate::autosave::AutosaveClock,
     autosave_suspended: bool,
@@ -95,6 +96,7 @@ impl Notebook {
             cells: vec![],
             session,
             saving: false,
+            file_busy: false,
             save_conflict: false,
             autosave: Default::default(),
             autosave_suspended: false,
@@ -136,6 +138,7 @@ impl Notebook {
                         let document = this.session.document();
                         let enabled = cx.global::<crate::autosave::AutosavePreference>().0
                             && !this.autosave_suspended
+                            && !this.file_busy
                             && !this.save_conflict;
                         if this.autosave.due(
                             document.revision(),
@@ -200,6 +203,7 @@ impl Notebook {
                     this.sync(cx);
                     cx.notify();
                 }
+                CellEvent::FocusNext => (),
                 CellEvent::RunProgress => cx.notify(),
                 CellEvent::Selected => this.select(index, cx),
                 CellEvent::DeleteCell => {
@@ -345,7 +349,7 @@ impl Notebook {
                 })
     }
     pub fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.saving {
+        if self.saving || self.file_busy {
             return;
         }
         self.autosave.resume();
@@ -501,6 +505,25 @@ impl Notebook {
             .ok();
         })
         .detach();
+    }
+    pub fn file_operation_pending(&self) -> bool {
+        self.saving || self.connecting || self.control_pending
+    }
+    pub fn set_file_busy(&mut self, busy: bool) {
+        self.file_busy = busy;
+    }
+    pub fn file_controller(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> ganymede_core::notebook::NotebookController {
+        self.sync(cx);
+        self.session.controller()
+    }
+    pub fn file_saved_as(&mut self, cx: &mut Context<Self>) {
+        self.save_conflict = false;
+        self.save_error = None;
+        self.autosave.resume();
+        cx.notify();
     }
     pub fn suspend_autosave(&mut self, suspended: bool) {
         self.autosave_suspended = suspended;
