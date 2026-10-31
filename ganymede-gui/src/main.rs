@@ -24,6 +24,7 @@ actions!(ganymede, [Quit, NewTab, CloseTab, Save]);
 enum SidebarTab {
     Files,
     Kernels,
+    Git,
 }
 
 const SIDEBAR_DURATION: Duration = Duration::from_millis(220);
@@ -166,11 +167,23 @@ impl Ganymede {
             .gap_2()
             .p_2()
             .text_size(theme.font.sm)
-            .when(self.sidebar_tab == SidebarTab::Kernels, |panel| {
-                panel.child(div().font_weight(FontWeight::SEMIBOLD).child("Kernels"))
+            .when(self.sidebar_tab != SidebarTab::Files, |panel| {
+                panel.child(div().font_weight(FontWeight::SEMIBOLD).child(
+                    if self.sidebar_tab == SidebarTab::Git {
+                        "Git"
+                    } else {
+                        "Kernels"
+                    },
+                ))
             });
         match self.sidebar_tab {
             SidebarTab::Files => panel.child(workspace::Workspace::files(&self.workspace, cx)),
+            SidebarTab::Git => panel.child(
+                div()
+                    .text_size(theme.font.xs)
+                    .text_color(surface.muted_fg)
+                    .child("Git integration is coming later."),
+            ),
             SidebarTab::Kernels => {
                 panel
                     .child(div().pt_3().child("Kernel management"))
@@ -213,6 +226,7 @@ impl Render for Ganymede {
             window.request_animation_frame();
         }
         let sidebar_width = 240. * reveal;
+        let header = workspace::Workspace::header(&self.workspace, window, cx);
         let theme = cx.theme();
         let outer = theme.sidebar;
         let sidebar = theme.sidebar_content;
@@ -286,7 +300,7 @@ impl Render for Ganymede {
                             ),
                     )
                     .child(div().w(px((sidebar_width - 80.).max(0.))).flex_shrink_0())
-                    .child(workspace::Workspace::header(&self.workspace, cx)),
+                    .child(header),
             )
             .child(
                 div()
@@ -329,6 +343,20 @@ impl Render for Ganymede {
                                 .on_click(cx.listener(
                                     |this, _, _, cx| {
                                         this.sidebar_tab = SidebarTab::Kernels;
+                                        this.set_sidebar_open(true, cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                self.rail_button(
+                                    "Git",
+                                    Icon::GitBranch,
+                                    self.sidebar_open && self.sidebar_tab == SidebarTab::Git,
+                                    cx,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.sidebar_tab = SidebarTab::Git;
                                         this.set_sidebar_open(true, cx);
                                     },
                                 )),

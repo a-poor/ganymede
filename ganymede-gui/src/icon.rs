@@ -57,6 +57,7 @@ define_icons! {
     Upload => "regular/upload-simple.svg",
     Folder => "regular/folder.svg",
     File => "regular/file.svg",
+    GitBranch => "regular/git-branch.svg",
     Cpu => "regular/cpu.svg",
     Gear => "regular/gear.svg",
     Server => "regular/hard-drives.svg",

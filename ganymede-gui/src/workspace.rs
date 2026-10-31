@@ -14,7 +14,10 @@ use gpui::{
     App, Context, Entity, Focusable, FontWeight, ScrollHandle, SharedString, Window, div,
     prelude::*, px,
 };
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DocumentKind {
@@ -97,6 +100,48 @@ impl Tabs {
         }
     }
 }
+const TAB_MOTION_DURATION: Duration = Duration::from_millis(180);
+
+struct TabMotion {
+    from: f32,
+    to: f32,
+    started: Instant,
+}
+impl TabMotion {
+    fn value(&self, now: Instant) -> f32 {
+        let progress = (now.duration_since(self.started).as_secs_f32()
+            / TAB_MOTION_DURATION.as_secs_f32())
+        .min(1.);
+        let eased = if self.to == 0. {
+            progress * progress
+        } else {
+            1. - (1. - progress).powi(3)
+        };
+        self.from + (self.to - self.from) * eased
+    }
+    fn set_open(&mut self, open: bool, now: Instant) {
+        let target = if open { 1. } else { 0. };
+        if target != self.to {
+            self.from = self.value(now);
+            self.to = target;
+            self.started = now;
+        }
+    }
+    fn active(&self, now: Instant) -> bool {
+        self.from != self.to && now.duration_since(self.started) < TAB_MOTION_DURATION
+    }
+}
+
+// Retain only presentation data while a closed tab leaves the header. Its
+// document and autosave lifecycle end immediately when the close is accepted.
+struct HeaderTab {
+    id: u64,
+    name: SharedString,
+    icon: Icon,
+    selected: bool,
+    motion: TabMotion,
+}
+
 #[derive(Clone, Copy)]
 pub enum CloseTarget {
     Tab(u64),
@@ -118,6 +163,8 @@ pub struct Workspace {
     toasts: Entity<crate::toast::ToastHost>,
     documents: Vec<Document>,
     tabs: Tabs,
+    header_tabs: Vec<HeaderTab>,
+    reveal_tab: Option<u64>,
     tab_scroll: ScrollHandle,
     next_id: u64,
     directories: HashMap<String, Vec<Contents>>,
@@ -130,7 +177,10 @@ pub struct Workspace {
     files_menu_open: bool,
     files_menu_index: Option<usize>,
     files_menu_focus: gpui::FocusHandle,
-    notebooks_only: bool,
+    filter_open: bool,
+    filter_input: Entity<CodeCell>,
+    filter_query: String,
+    filter_requested: HashSet<String>,
     creating_folder: bool,
     uploading: bool,
 }
@@ -141,10 +191,27 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
+        let filter_input = cx.new(|cx| CodeCell::new_filter(window, cx));
+        cx.subscribe_in(
+            &filter_input,
+            window,
+            |this, input, event, window, cx| match event {
+                crate::code_cell::CellEvent::Changed => {
+                    this.filter_query = input.read(cx).text().trim().to_lowercase();
+                    this.scan_filter_folders(cx);
+                    cx.notify();
+                }
+                crate::code_cell::CellEvent::DeleteCell => this.close_filter(window, cx),
+                _ => (),
+            },
+        )
+        .detach();
         let mut this = Self {
             toasts,
             documents: vec![],
             tabs: Tabs::default(),
+            header_tabs: Vec::new(),
+            reveal_tab: None,
             tab_scroll: ScrollHandle::new(),
             next_id: 0,
             directories: HashMap::new(),
@@ -157,7 +224,10 @@ impl Workspace {
             files_menu_open: false,
             files_menu_index: None,
             files_menu_focus: cx.focus_handle(),
-            notebooks_only: false,
+            filter_open: false,
+            filter_input,
+            filter_query: String::new(),
+            filter_requested: HashSet::new(),
             creating_folder: false,
             uploading: false,
         };
@@ -218,7 +288,51 @@ impl Workspace {
         self.tabs.launch(self.next_id);
         self.activate(self.next_id, window, cx);
     }
+    fn close_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter_open = false;
+        self.filter_query.clear();
+        self.filter_requested.clear();
+        self.filter_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        window.blur();
+        cx.notify();
+    }
+    fn scan_filter_folders(&mut self, cx: &mut Context<Self>) {
+        if !self.filter_open || self.filter_query.is_empty() {
+            return;
+        }
+        // Keep remote directory requests bounded. Search also visits collapsed
+        // folders, without modifying the user's normal expanded-folder state.
+        let slots = 4usize.saturating_sub(self.loading.len());
+        let remaining = 1024usize.saturating_sub(self.filter_requested.len());
+        let candidates: Vec<_> = std::iter::once(String::new())
+            .chain(
+                self.directories
+                    .values()
+                    .flat_map(|entries| entries.iter())
+                    .filter(|entry| {
+                        entry.content_type == "directory" && entry.path.split('/').count() < 32
+                    })
+                    .map(|entry| entry.path.clone()),
+            )
+            .filter(|path| !self.filter_requested.contains(path) && !self.loading.contains(path))
+            .take(slots.min(remaining))
+            .collect();
+        for path in candidates {
+            self.filter_requested.insert(path.clone());
+            self.refresh_directory(path, cx);
+        }
+    }
     fn refresh_files(&mut self, cx: &mut Context<Self>) {
+        if self.filter_open && !self.filter_query.is_empty() {
+            // Let an in-progress scan finish instead of restarting it on every timer tick.
+            if !self.loading.is_empty() {
+                return;
+            }
+            self.filter_requested.clear();
+            self.scan_filter_folders(cx);
+            return;
+        }
         let paths: Vec<_> = self
             .expanded
             .iter()
@@ -398,6 +512,7 @@ impl Workspace {
                     Ok(Err(error)) => this.file_error = Some(error),
                     Err(_) => this.file_error = Some("Could not list files".into()),
                 }
+                this.scan_filter_folders(cx);
                 cx.notify();
             })
             .ok();
@@ -484,8 +599,7 @@ impl Workspace {
     }
     fn activate(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.tabs.activate(id);
-        self.tab_scroll
-            .scroll_to_item(self.tabs.open.iter().position(|tab| *tab == id).unwrap());
+        self.reveal_tab = Some(id);
         if let Some(doc) = self.documents.iter().find(|doc| doc.id == id) {
             match &doc.content {
                 Content::Notebook(notebook) => {
@@ -639,8 +753,68 @@ impl Workspace {
         self.documents.retain(|doc| doc.id != id);
         self.activate(self.tabs.active, window, cx);
     }
-    pub fn header(entity: &Entity<Self>, cx: &App) -> gpui::Div {
+    fn sync_header_tabs(&mut self, now: Instant, reduced: bool) {
+        for tab in &mut self.header_tabs {
+            tab.motion.set_open(self.tabs.open.contains(&tab.id), now);
+            if reduced {
+                tab.motion.from = tab.motion.to;
+            }
+        }
+        self.header_tabs
+            .retain(|tab| tab.motion.to != 0. || tab.motion.active(now));
+        for (index, id) in self.tabs.open.iter().copied().enumerate() {
+            if !self.header_tabs.iter().any(|tab| tab.id == id) {
+                let position = self.tabs.open[index + 1..]
+                    .iter()
+                    .find_map(|next| self.header_tabs.iter().position(|tab| tab.id == *next))
+                    .unwrap_or(self.header_tabs.len());
+                self.header_tabs.insert(
+                    position,
+                    HeaderTab {
+                        id,
+                        name: "Launcher".into(),
+                        icon: Icon::SquaresFour,
+                        selected: false,
+                        motion: TabMotion {
+                            from: if reduced { 1. } else { 0. },
+                            to: 1.,
+                            started: now,
+                        },
+                    },
+                );
+            }
+            let tab = self
+                .header_tabs
+                .iter_mut()
+                .find(|tab| tab.id == id)
+                .unwrap();
+            if let Some(doc) = self.documents.iter().find(|doc| doc.id == id) {
+                tab.name = doc.name.clone();
+                tab.icon = doc.kind.icon();
+            }
+            tab.selected = self.tabs.active == id;
+        }
+    }
+    pub fn header(entity: &Entity<Self>, window: &mut Window, cx: &mut App) -> gpui::Div {
+        let now = Instant::now();
+        let reduced = cx.reduce_motion();
+        entity.update(cx, |this, _| {
+            this.sync_header_tabs(now, reduced);
+            if let Some(id) = this.reveal_tab {
+                if let Some(index) = this.header_tabs.iter().position(|tab| tab.id == id) {
+                    this.tab_scroll.scroll_to_item(index);
+                    if !this.header_tabs.iter().any(|tab| tab.motion.active(now)) {
+                        this.reveal_tab = None;
+                    }
+                } else {
+                    this.reveal_tab = None;
+                }
+            }
+        });
         let this = entity.read(cx);
+        if this.header_tabs.iter().any(|tab| tab.motion.active(now)) {
+            window.request_animation_frame();
+        }
         let t = cx.theme();
         div()
             .flex()
@@ -655,17 +829,16 @@ impl Workspace {
                     .id("workspace-tabs")
                     .flex()
                     .min_w_0()
-                    .gap_1()
                     .overflow_x_scroll()
                     .track_scroll(&this.tab_scroll)
-                    .children(this.tabs.open.iter().map(|id| {
-                        let id = *id;
+                    .children(this.header_tabs.iter().map(|tab| {
+                        let id = tab.id;
+                        let leaving = tab.motion.to == 0.;
+                        let visibility = tab.motion.value(now);
                         let doc = this.documents.iter().find(|doc| doc.id == id);
-                        let selected = this.tabs.active == id;
-                        let name = doc
-                            .map(|doc| doc.name.clone())
-                            .unwrap_or_else(|| "Launcher".into());
-                        let icon = doc.map(|doc| doc.kind.icon()).unwrap_or(Icon::SquaresFour);
+                        let selected = tab.selected;
+                        let name = tab.name.clone();
+                        let icon = tab.icon;
                         let (dirty, running) = match doc.map(|doc| &doc.content) {
                             Some(Content::Notebook(notebook)) => (
                                 notebook.read(cx).is_dirty(cx),
@@ -700,93 +873,125 @@ impl Workspace {
                             icon.svg().size(px(14.)).text_color(fg).into_any_element()
                         };
                         div()
-                            .id(("document-tab", id))
-                            .tab_index(0)
+                            .id(("tab-slot", id))
+                            .w(px(180. * visibility))
                             .h(px(28.))
-                            .w(px(180.))
+                            .mr(px(4. * visibility))
                             .flex_shrink_0()
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
-                            .rounded(t.radius.md())
-                            .text_size(t.font.xs)
-                            .cursor_pointer()
-                            .when(selected, |s| {
-                                // Inset shadows use this element's rounded bounds; clipping
-                                // also keeps tab content inside the same silhouette.
-                                s.overflow_hidden()
-                                    .bg(t.app.bg)
-                                    .text_color(t.app.fg)
-                                    .shadow(vec![
-                                        t.body_shadow.clone(),
-                                        t.active_tab_edges[0].clone(),
-                                        t.active_tab_edges[1].clone(),
-                                    ])
-                            })
-                            .when(!selected, |s| {
-                                s.text_color(t.sidebar.muted_fg)
-                                    .hover(|s| s.bg(t.rail_hover_bg))
-                            })
-                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation()
-                            })
-                            .on_click(move |_, window, cx| {
-                                cx.stop_propagation();
-                                select.update(cx, |this, cx| this.activate(id, window, cx));
-                            })
-                            .on_key_down(move |event, window, cx| {
-                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                    select_key.update(cx, |this, cx| this.activate(id, window, cx));
-                                    cx.stop_propagation();
-                                }
-                            })
-                            .child(div().size(px(14.)).flex_shrink_0().child(leading))
-                            .child(div().flex_1().min_w_0().truncate().child(name))
+                            .when(visibility < 1., |slot| slot.overflow_hidden())
                             .child(
                                 div()
-                                    .id(("close-tab", id))
-                                    .group("tab-close")
-                                    .aria_label(if dirty {
-                                        "Close tab — unsaved changes"
-                                    } else {
-                                        "Close tab"
-                                    })
-                                    .tab_index(0)
-                                    .size(px(18.))
+                                    .id(("document-tab", id))
+                                    .relative()
+                                    .top(px(28. * (1. - visibility)))
+                                    .opacity(visibility)
+                                    .tab_index(if leaving { -1 } else { 0 })
+                                    .h(px(28.))
+                                    .w(px(180.))
                                     .flex_shrink_0()
+                                    .px_2()
                                     .flex()
                                     .items_center()
-                                    .justify_center()
-                                    .rounded(t.radius.sm())
+                                    .gap_1p5()
+                                    .rounded(t.radius.md())
+                                    .text_size(t.font.xs)
                                     .cursor_pointer()
-                                    .hover(|s| s.bg(t.rail_hover_bg))
+                                    .when(selected, |s| {
+                                        // Inset shadows use this element's rounded bounds; clipping
+                                        // also keeps tab content inside the same silhouette.
+                                        s.overflow_hidden()
+                                            .bg(t.app.bg)
+                                            .text_color(t.app.fg)
+                                            .shadow(vec![
+                                                t.body_shadow.clone(),
+                                                t.active_tab_edges[0].clone(),
+                                                t.active_tab_edges[1].clone(),
+                                            ])
+                                    })
+                                    .when(!selected, |s| {
+                                        s.text_color(t.sidebar.muted_fg)
+                                            .hover(|s| s.bg(t.rail_hover_bg))
+                                    })
+                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
                                     .on_click(move |_, window, cx| {
                                         cx.stop_propagation();
-                                        close.update(cx, |this, cx| this.close(id, window, cx));
+                                        if leaving {
+                                            return;
+                                        }
+                                        select.update(cx, |this, cx| this.activate(id, window, cx));
                                     })
                                     .on_key_down(move |event, window, cx| {
-                                        if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                        if !leaving
+                                            && matches!(
+                                                event.keystroke.key.as_str(),
+                                                "enter" | "space"
+                                            )
                                         {
-                                            close_key
-                                                .update(cx, |this, cx| this.close(id, window, cx));
+                                            select_key.update(cx, |this, cx| {
+                                                this.activate(id, window, cx)
+                                            });
                                             cx.stop_propagation();
                                         }
                                     })
-                                    .child(if dirty {
+                                    .child(div().size(px(14.)).flex_shrink_0().child(leading))
+                                    .child(div().flex_1().min_w_0().truncate().child(name))
+                                    .child(
                                         div()
-                                            .size(px(6.))
-                                            .rounded_full()
-                                            .bg(fg)
-                                            .text_color(t.app.bg)
-                                            .into_any_element()
-                                    } else {
-                                        Icon::X
-                                            .svg()
-                                            .size(px(12.))
-                                            .text_color(fg)
-                                            .into_any_element()
-                                    }),
+                                            .id(("close-tab", id))
+                                            .group("tab-close")
+                                            .aria_label(if dirty {
+                                                "Close tab — unsaved changes"
+                                            } else {
+                                                "Close tab"
+                                            })
+                                            .tab_index(if leaving { -1 } else { 0 })
+                                            .size(px(18.))
+                                            .flex_shrink_0()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(t.radius.sm())
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(t.rail_hover_bg))
+                                            .on_click(move |_, window, cx| {
+                                                cx.stop_propagation();
+                                                if leaving {
+                                                    return;
+                                                }
+                                                close.update(cx, |this, cx| {
+                                                    this.close(id, window, cx)
+                                                });
+                                            })
+                                            .on_key_down(move |event, window, cx| {
+                                                if !leaving
+                                                    && matches!(
+                                                        event.keystroke.key.as_str(),
+                                                        "enter" | "space"
+                                                    )
+                                                {
+                                                    close_key.update(cx, |this, cx| {
+                                                        this.close(id, window, cx)
+                                                    });
+                                                    cx.stop_propagation();
+                                                }
+                                            })
+                                            .child(if dirty {
+                                                div()
+                                                    .size(px(6.))
+                                                    .rounded_full()
+                                                    .bg(fg)
+                                                    .text_color(t.app.bg)
+                                                    .into_any_element()
+                                            } else {
+                                                Icon::X
+                                                    .svg()
+                                                    .size(px(12.))
+                                                    .text_color(fg)
+                                                    .into_any_element()
+                                            }),
+                                    ),
                             )
                     })),
             )
@@ -811,7 +1016,17 @@ impl Workspace {
         match action {
             FileAction::Launcher => self.open_launcher(window, cx),
             FileAction::Folder => self.create_folder(cx),
-            FileAction::Filter => self.notebooks_only = !self.notebooks_only,
+            FileAction::Filter => {
+                if self.filter_open {
+                    self.close_filter(window, cx);
+                } else {
+                    self.filter_open = true;
+                    self.filter_input
+                        .read(cx)
+                        .focus_handle(cx)
+                        .focus(window, cx);
+                }
+            }
             FileAction::Menu => {
                 self.files_menu_open = !self.files_menu_open;
                 self.files_menu_index = None;
@@ -854,7 +1069,7 @@ impl Workspace {
                     (
                         FileAction::Filter,
                         "files-filter",
-                        "Filter: notebooks only",
+                        "Filter files",
                         Icon::Filter,
                     ),
                     (
@@ -869,7 +1084,7 @@ impl Workspace {
                     let click = entity.clone();
                     let key = entity.clone();
                     let outside = entity.clone();
-                    let selected = matches!(action, FileAction::Filter) && this.notebooks_only;
+                    let selected = matches!(action, FileAction::Filter) && this.filter_open;
                     let fg = if selected {
                         t.active_file_fg
                     } else {
@@ -1061,6 +1276,45 @@ impl Workspace {
             .flex_col()
             .gap(px(2.))
             .child(Self::files_toolbar(entity, cx))
+            .when(this.filter_open, |view| {
+                let close = entity.clone();
+                let close_key = entity.clone();
+                view.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .mt_1()
+                        .mb_1()
+                        .min_w_0()
+                        .child(this.filter_input.clone())
+                        .child(
+                            icon_button("clear-file-filter", "Clear and close filter", Icon::X, cx)
+                                .on_click(move |_, window, cx| {
+                                    close.update(cx, |this, cx| this.close_filter(window, cx))
+                                })
+                                .on_key_down(move |event, window, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        close_key
+                                            .update(cx, |this, cx| this.close_filter(window, cx));
+                                    }
+                                }),
+                        ),
+                )
+            })
+            .when(
+                this.filter_open
+                    && !this.filter_query.is_empty()
+                    && this.filter_requested.len() >= 1024,
+                |view| {
+                    view.child(
+                        div()
+                            .text_size(t.font.xs)
+                            .text_color(t.sidebar_content.muted_fg)
+                            .child("Search limited to 1,024 folders."),
+                    )
+                },
+            )
             .when_some(this.file_error.as_ref(), |view, error| {
                 view.child(
                     div()
@@ -1085,7 +1339,9 @@ impl Workspace {
                             doc.id == this.tabs.active && doc.path.as_ref() == Some(&entry.path)
                         });
                         let icon = if directory {
-                            if this.expanded.contains(&entry.path) {
+                            if this.expanded.contains(&entry.path)
+                                || (this.filter_open && !this.filter_query.is_empty())
+                            {
                                 Icon::FolderOpen
                             } else {
                                 Icon::Folder
@@ -1139,20 +1395,18 @@ impl Workspace {
             )
     }
     fn tree_rows(&self, path: &str, depth: usize, rows: &mut Vec<(Contents, usize)>) {
-        if let Some(entries) = self.directories.get(path) {
-            for entry in entries {
-                if self.notebooks_only
-                    && entry.content_type != "directory"
-                    && entry.content_type != "notebook"
-                {
-                    continue;
-                }
-                rows.push((entry.clone(), depth));
-                if self.expanded.contains(&entry.path) {
-                    self.tree_rows(&entry.path, depth + 1, rows);
-                }
-            }
-        }
+        collect_tree_rows(
+            &self.directories,
+            &self.expanded,
+            path,
+            depth,
+            if self.filter_open {
+                &self.filter_query
+            } else {
+                ""
+            },
+            rows,
+        );
     }
     fn launcher(&self, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
         let t = cx.theme();
@@ -1302,6 +1556,45 @@ impl Render for Workspace {
             })
     }
 }
+fn collect_tree_rows(
+    directories: &HashMap<String, Vec<Contents>>,
+    expanded: &HashSet<String>,
+    path: &str,
+    depth: usize,
+    query: &str,
+    rows: &mut Vec<(Contents, usize)>,
+) {
+    if depth >= 32 {
+        return;
+    }
+    if let Some(entries) = directories.get(path) {
+        for entry in entries {
+            if query.is_empty() {
+                rows.push((entry.clone(), depth));
+                if expanded.contains(&entry.path) {
+                    collect_tree_rows(directories, expanded, &entry.path, depth + 1, query, rows);
+                }
+            } else {
+                let mut descendants = Vec::new();
+                if entry.content_type == "directory" {
+                    collect_tree_rows(
+                        directories,
+                        expanded,
+                        &entry.path,
+                        depth + 1,
+                        query,
+                        &mut descendants,
+                    );
+                }
+                if entry.name.to_lowercase().contains(query) || !descendants.is_empty() {
+                    rows.push((entry.clone(), depth));
+                    rows.extend(descendants);
+                }
+            }
+        }
+    }
+}
+
 pub fn icon_button(
     id: impl Into<gpui::ElementId>,
     label: &'static str,
@@ -1347,6 +1640,99 @@ impl Render for Tip {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn tree_entry(path: &str, kind: &str) -> Contents {
+        serde_json::from_value(serde_json::json!({
+            "name": path.rsplit('/').next().unwrap(), "path": path, "type": kind,
+            "writable": true, "created": "", "last_modified": "", "content": null
+        }))
+        .unwrap()
+    }
+    #[test]
+    fn filename_filter_shows_collapsed_ancestors_and_preserves_normal_expansion() {
+        let directories = HashMap::from([
+            (
+                "".into(),
+                vec![
+                    tree_entry("projects", "directory"),
+                    tree_entry("other.txt", "file"),
+                ],
+            ),
+            (
+                "projects".into(),
+                vec![
+                    tree_entry("projects/nested", "directory"),
+                    tree_entry("projects/skip.py", "file"),
+                ],
+            ),
+            (
+                "projects/nested".into(),
+                vec![
+                    tree_entry("projects/nested/Analysis.ipynb", "notebook"),
+                    tree_entry("projects/nested/analysis.txt", "file"),
+                ],
+            ),
+        ]);
+        let expanded = HashSet::new();
+        let mut rows = Vec::new();
+        collect_tree_rows(&directories, &expanded, "", 0, "analysis", &mut rows);
+        assert_eq!(
+            rows.iter()
+                .map(|(entry, depth)| (entry.path.as_str(), *depth))
+                .collect::<Vec<_>>(),
+            vec![
+                ("projects", 0),
+                ("projects/nested", 1),
+                ("projects/nested/Analysis.ipynb", 2),
+                ("projects/nested/analysis.txt", 2)
+            ]
+        );
+        rows.clear();
+        collect_tree_rows(&directories, &expanded, "", 0, "missing", &mut rows);
+        assert!(rows.is_empty());
+        collect_tree_rows(&directories, &expanded, "", 0, "", &mut rows);
+        assert_eq!(
+            rows.iter()
+                .map(|(entry, _)| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["projects", "other.txt"]
+        );
+        assert!(expanded.is_empty());
+    }
+    #[test]
+    fn tab_motion_reverses_without_jumping_and_finishes_closed() {
+        let start = Instant::now();
+        let mut motion = TabMotion {
+            from: 0.,
+            to: 1.,
+            started: start,
+        };
+        assert_eq!(motion.value(start), 0.);
+        let midway = start + TAB_MOTION_DURATION / 2;
+        let before = motion.value(midway);
+        assert!(before > 0. && before < 1.);
+        motion.set_open(false, midway);
+        assert_eq!(motion.value(midway), before);
+        assert!(motion.active(midway));
+        assert_eq!(motion.value(midway + TAB_MOTION_DURATION), 0.);
+        assert!(!motion.active(midway + TAB_MOTION_DURATION));
+    }
+    #[test]
+    fn reopening_an_exiting_tab_keeps_its_current_position() {
+        let start = Instant::now();
+        let mut motion = TabMotion {
+            from: 1.,
+            to: 0.,
+            started: start,
+        };
+        let midway = start + TAB_MOTION_DURATION / 2;
+        let before = motion.value(midway);
+        motion.set_open(true, midway);
+        assert_eq!(motion.value(midway), before);
+        assert_eq!(motion.value(midway + TAB_MOTION_DURATION), 1.);
+        motion.from = motion.to; // Reduced-motion behavior settles immediately.
+        assert!(!motion.active(midway));
+        assert_eq!(motion.value(midway), 1.);
+    }
     #[test]
     fn launcher_is_singleton_and_remains_open_when_switching_tabs() {
         let mut tabs = Tabs::default();

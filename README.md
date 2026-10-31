@@ -192,7 +192,11 @@ Restart the app after changing configuration.
 Run `cargo run -p ganymede-gui`. The demo starts with a new server notebook, using
 Jupyter’s unused `Untitled` name. The file tree starts at the server root; folders
 load on expansion. Its toolbar opens the launcher, creates a server-named folder
-at the root, and toggles a notebooks-only filter. The overflow menu offers Upload
+at the root, and toggles a filename filter input. Filtering is case-insensitive and keeps
+ancestor folders visible for matching files, including files in collapsed folders.
+Clear/close with the × button or Escape to restore the normal tree. Background
+search is bounded to 1,024 directories and 32 levels; directory requests are limited
+to four at a time. The overflow menu offers Upload
 (native multi-file picker, targeting the root) and Refresh. Existing upload names
 are rejected; uploads never intentionally replace an existing file. The tree
 refreshes quietly every 10 seconds, retaining expanded folders and scroll position. Click a notebook to

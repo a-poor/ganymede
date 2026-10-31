@@ -73,6 +73,7 @@ pub struct Notebook {
     connecting: bool,
     execution_error: Option<String>,
     selected: usize,
+    largest_count: u64,
     type_menu_open: bool,
     type_menu_index: usize,
     type_focus: gpui::FocusHandle,
@@ -100,6 +101,7 @@ impl Notebook {
             connecting: true,
             execution_error: None,
             selected: 0,
+            largest_count: 0,
             type_menu_open: false,
             type_menu_index: 0,
             type_focus: cx.focus_handle(),
@@ -795,6 +797,16 @@ enum ToolbarAction {
 
 impl Render for Notebook {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.largest_count = self.largest_count.max(
+            self.cells
+                .iter()
+                .map(|cell| cell.read(cx).max_execution_count())
+                .max()
+                .unwrap_or(0),
+        );
+        for cell in &self.cells {
+            cell.update(cx, |cell, cx| cell.set_count_hint(self.largest_count, cx));
+        }
         div()
             .size_full()
             .min_h_0()

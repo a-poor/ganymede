@@ -184,6 +184,8 @@ const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '�
 pub struct CodeCell {
     current: bool,
     document: bool,
+    filter_input: bool,
+    count_hint: u64,
     kind: ganymede_core::notebook::CellKind,
     menu_open: bool,
     execution_count: Option<u64>,
@@ -235,6 +237,8 @@ impl CodeCell {
         Self {
             current: false,
             document: false,
+            filter_input: false,
+            count_hint: 0,
             kind: ganymede_core::notebook::CellKind::Code,
             menu_open: false,
             execution_count: None,
@@ -267,8 +271,33 @@ impl CodeCell {
         this
     }
 
+    pub fn new_filter(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut this = Self::new(window, cx);
+        this.filter_input = true;
+        this
+    }
+    pub fn max_execution_count(&self) -> u64 {
+        self.output
+            .iter()
+            .filter_map(|output| output.execution_count)
+            .chain(self.execution_count)
+            .max()
+            .unwrap_or(0)
+    }
+    pub fn set_count_hint(&mut self, count: u64, cx: &mut Context<Self>) {
+        if self.count_hint != count {
+            self.count_hint = count;
+            cx.notify();
+        }
+    }
     pub fn set_text(&mut self, text: String, cx: &mut Context<Self>) {
-        self.buffer.text = text;
+        self.buffer = Buffer {
+            text,
+            ..Default::default()
+        };
+        self.marked = None;
+        self.undo.clear();
+        self.redo.clear();
         cx.emit(CellEvent::Changed);
         cx.notify();
     }
@@ -406,9 +435,18 @@ impl CodeCell {
         let (row, column) = self.buffer.position(self.buffer.head);
         let line = self.buffer.text.split('\n').nth(row).unwrap_or("");
         let theme = cx.theme();
+        let font_size = if self.filter_input {
+            theme.font.xs
+        } else {
+            theme.font.code
+        };
         let run = TextRun {
             len: line.len(),
-            font: gpui::font(theme.font.mono.clone()),
+            font: gpui::font(if self.filter_input {
+                theme.font.sans.clone()
+            } else {
+                theme.font.mono.clone()
+            }),
             color: theme.card.fg,
             background_color: None,
             underline: None,
@@ -417,7 +455,7 @@ impl CodeCell {
         let shaped =
             window
                 .text_system()
-                .shape_line(line.to_owned().into(), theme.font.code, &[run], None);
+                .shape_line(line.to_owned().into(), font_size, &[run], None);
         let x = shaped.x_for_index(column);
         let y = self.line_height * row as f32;
         let viewport = self.scroll.bounds().size;
@@ -607,6 +645,13 @@ impl EntityInputHandler for CodeCell {
             .map(|r| self.buffer.utf16_range(r))
             .or(self.marked.clone())
             .unwrap_or_else(|| self.buffer.selection());
+        let single_line;
+        let text = if self.filter_input {
+            single_line = text.replace(['\r', '\n'], " ");
+            &single_line
+        } else {
+            text
+        };
         self.edit(range, text);
         cx.emit(CellEvent::Changed);
         self.changed(window, cx);
@@ -623,6 +668,13 @@ impl EntityInputHandler for CodeCell {
             .map(|r| self.buffer.utf16_range(r))
             .or(self.marked.clone())
             .unwrap_or_else(|| self.buffer.selection());
+        let single_line;
+        let text = if self.filter_input {
+            single_line = text.replace(['\r', '\n'], " ");
+            &single_line
+        } else {
+            text
+        };
         self.composition_start
             .get_or_insert_with(|| self.buffer.clone());
         self.buffer.replace(range.clone(), text);
@@ -675,6 +727,41 @@ impl Render for CodeCell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let surface = theme.card;
+        let prompt = match self.running_frame {
+            _ if self.kind != ganymede_core::notebook::CellKind::Code => String::new(),
+            Some(frame) => format!("[{}]:", SPINNER[frame]),
+            None if self.queued => "[*]:".to_owned(),
+            None => match self.execution_count {
+                Some(count) => format!("[{count}]:"),
+                None => "[ ]:".to_owned(),
+            },
+        };
+        // Use the widest input/output prompt for this cell so prints and returns
+        // remain aligned even when execution counts gain another digit.
+        let gutter_width = std::iter::once(prompt.clone())
+            .chain(std::iter::once(format!("[{}]:", self.count_hint)))
+            .chain(
+                self.output
+                    .iter()
+                    .filter_map(|output| output.execution_count.map(|count| format!("[{count}]:"))),
+            )
+            .fold(px(32.), |width, text| {
+                let run = TextRun {
+                    len: text.len(),
+                    font: gpui::font(theme.font.mono.clone()),
+                    color: surface.fg,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                width.max(
+                    window
+                        .text_system()
+                        .shape_line(text.into(), theme.font.code, &[run], None)
+                        .width
+                        + px(1.),
+                )
+            });
         let cell_padding = px(4.);
         let height =
             theme.font.line_height_tight * self.buffer.text.split('\n').count().clamp(1, 16) as f32;
@@ -752,20 +839,33 @@ impl Render for CodeCell {
                 this.replace_text_in_range(None, "", w, cx);
             }))
             .on_action(cx.listener(|this, _: &Enter, w, cx| {
+                if this.filter_input {
+                    return;
+                }
                 let indent: String = this.buffer.text[this.buffer.line_start()..this.buffer.head]
                     .chars()
                     .take_while(|c| *c == ' ')
                     .collect();
                 this.replace_text_in_range(None, &format!("\n{indent}"), w, cx);
             }))
-            .on_action(
-                cx.listener(|this, _: &Tab, w, cx| this.replace_text_in_range(None, "    ", w, cx)),
-            )
-            .on_action(cx.listener(|_, _: &RunAndAdvance, _, cx| {
-                cx.emit(CellEvent::RunAndAdvance);
+            .on_action(cx.listener(|this, _: &Tab, w, cx| {
+                if this.filter_input {
+                    w.focus_next(cx);
+                } else {
+                    this.replace_text_in_range(None, "    ", w, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &RunAndAdvance, _, cx| {
+                if !this.filter_input {
+                    cx.emit(CellEvent::RunAndAdvance);
+                }
             }))
             .on_action(cx.listener(|this, _: &SelectCell, window, cx| {
-                this.cell_focus.focus(window, cx);
+                if this.filter_input {
+                    cx.emit(CellEvent::DeleteCell);
+                } else {
+                    this.cell_focus.focus(window, cx);
+                }
             }))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
@@ -801,6 +901,37 @@ impl Render for CodeCell {
                     .child(CellText { cell: cx.entity() }),
             );
 
+        if self.filter_input {
+            return div()
+                .on_mouse_down_out(cx.listener(|this, _, window, _| {
+                    if this.focus.is_focused(window) {
+                        window.blur();
+                    }
+                }))
+                .relative()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    editor
+                        .px_2()
+                        .py(px(4.))
+                        .pr_2()
+                        .font_family(theme.font.sans.clone())
+                        .text_size(theme.font.xs),
+                )
+                .when(self.buffer.text.is_empty(), |view| {
+                    view.child(
+                        div()
+                            .absolute()
+                            .left(px(9.))
+                            .top(px(5.))
+                            .text_size(theme.font.xs)
+                            .text_color(surface.muted_fg)
+                            .child("Filter files…"),
+                    )
+                })
+                .into_any_element();
+        }
         if self.document {
             return editor
                 .h_full()
@@ -952,7 +1083,8 @@ impl Render for CodeCell {
             )
             .child(
                 div()
-                    .w(px(32.))
+                    .w(gutter_width)
+                    .whitespace_nowrap()
                     .ml_3()
                     .mr(px(6.))
                     .flex_shrink_0()
@@ -967,15 +1099,7 @@ impl Render for CodeCell {
                         theme.app.muted_fg
                     })
                     .text_right()
-                    .child(match self.running_frame {
-                        _ if self.kind != ganymede_core::notebook::CellKind::Code => String::new(),
-                        Some(frame) => format!("[{}]:", SPINNER[frame]),
-                        None if self.queued => "[*]:".to_owned(),
-                        None => match self.execution_count {
-                            Some(count) => format!("[{count}]:"),
-                            None => "[ ]:".to_owned(),
-                        },
-                    }),
+                    .child(prompt),
             )
             .child(editor);
 
@@ -1048,7 +1172,8 @@ impl Render for CodeCell {
                                     .line_height(theme.font.line_height_tight)
                                     .child(
                                         div()
-                                            .w(px(32.))
+                                            .w(gutter_width)
+                                            .whitespace_nowrap()
                                             .ml_3()
                                             .mr(px(6.))
                                             .flex_shrink_0()
