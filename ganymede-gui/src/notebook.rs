@@ -72,7 +72,9 @@ pub struct Notebook {
     save_error: Option<String>,
     session: crate::execution::Session,
     control_pending: bool,
+    control_label: &'static str,
     connecting: bool,
+    restart_run_all: bool,
     execution_error: Option<String>,
     selected: usize,
     largest_count: u64,
@@ -102,7 +104,9 @@ impl Notebook {
             autosave_suspended: false,
             save_error: None,
             control_pending: false,
+            control_label: "",
             connecting: true,
+            restart_run_all: false,
             execution_error: None,
             selected: 0,
             largest_count: 0,
@@ -116,7 +120,20 @@ impl Notebook {
         if let Some(mut snapshots) = notebook.session.watch() {
             cx.spawn(async move |this, cx| {
                 while snapshots.changed().await.is_ok() {
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    if this
+                        .update(cx, |this, cx| {
+                            if this.session.activity()
+                                == crate::execution::KernelActivity::Disconnected
+                            {
+                                this.runs.pending.clear();
+                                for cell in &this.cells {
+                                    cell.update(cx, |cell, cx| cell.set_queued(false, cx));
+                                }
+                            }
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -167,6 +184,10 @@ impl Notebook {
                     Ok(Err(error)) => Some(error),
                     Err(_) => Some("Could not connect to the kernel".into()),
                 };
+                if this.execution_error.is_some() {
+                    this.runs.pending.clear();
+                }
+                this.start_next_run(cx);
                 cx.notify();
             })
             .ok();
@@ -285,7 +306,7 @@ impl Notebook {
                     this.start_next_run(cx);
                 }
                 CellEvent::RunAndAdvance => {
-                    if this.control_pending {
+                    if this.control_pending || this.restart_run_all {
                         return;
                     }
                     let source = cell.read(cx).text().to_owned();
@@ -603,15 +624,11 @@ impl Notebook {
                     self.start_next_run(cx);
                 }
             }
-            ToolbarAction::Run | ToolbarAction::RunAll => {
-                if self.control_pending {
+            ToolbarAction::Run => {
+                if self.control_pending || self.restart_run_all {
                     return;
                 }
-                let indices = if matches!(action, ToolbarAction::RunAll) {
-                    0..self.cells.len()
-                } else {
-                    self.selected..self.selected + 1
-                };
+                let indices = self.selected..self.selected + 1;
                 for index in indices {
                     if self.cells[index].read(cx).kind() != CellKind::Code {
                         continue;
@@ -623,31 +640,24 @@ impl Notebook {
                 }
                 self.start_next_run(cx);
             }
-            ToolbarAction::Stop | ToolbarAction::Restart => {
-                if self.control_pending {
+            ToolbarAction::Stop => self.kernel_control(false, false, cx),
+            ToolbarAction::Restart | ToolbarAction::RunAll => {
+                if self.control_pending || self.connecting || window.has_active_prompt() {
                     return;
                 }
-                self.runs.pending.clear();
-                for cell in &self.cells {
-                    cell.update(cx, |cell, cx| cell.set_queued(false, cx));
-                }
-                self.control_pending = true;
-                self.execution_error = None;
-                let task = self
-                    .session
-                    .control(matches!(action, ToolbarAction::Restart));
+                let run_all = matches!(action, ToolbarAction::RunAll);
+                let response = window.prompt(
+                    gpui::PromptLevel::Warning,
+                    if run_all { "Restart kernel and run all cells?" } else { "Restart kernel?" },
+                    Some("All variables in memory will be lost. Any running execution and queued cells will be stopped. Your notebook and saved outputs will be kept."),
+                    &["Cancel", if run_all { "Restart and Run All" } else { "Restart" }],
+                    cx,
+                );
                 cx.spawn(async move |this, cx| {
-                    let result = task.await;
-                    this.update(cx, |this, cx| {
-                        this.control_pending = false;
-                        this.execution_error = match result {
-                            Ok(Ok(())) => None,
-                            Ok(Err(error)) => Some(error),
-                            Err(_) => Some("Kernel operation failed".into()),
-                        };
-                        cx.notify();
-                    })
-                    .ok();
+                    if response.await == Ok(1) {
+                        this.update(cx, |this, cx| this.kernel_control(true, run_all, cx))
+                            .ok();
+                    }
                 })
                 .detach();
             }
@@ -656,6 +666,78 @@ impl Notebook {
         self.sync(cx);
         self.focus_selected(window, cx);
         cx.notify();
+    }
+
+    fn kernel_control(&mut self, restart: bool, run_all: bool, cx: &mut Context<Self>) {
+        if self.control_pending || self.connecting || self.file_busy {
+            return;
+        }
+        self.runs.pending.clear();
+        self.restart_run_all = false;
+        for cell in &self.cells {
+            cell.update(cx, |cell, cx| cell.set_queued(false, cx));
+        }
+        self.control_pending = true;
+        self.control_label = if restart {
+            "Restarting…"
+        } else {
+            "Interrupting…"
+        };
+        self.execution_error = None;
+        let task = self.session.control(restart);
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .unwrap_or_else(|_| Err("Kernel operation failed".into()));
+            this.update(cx, |this, cx| {
+                this.control_pending = false;
+                this.restart_run_all = result.is_ok() && run_all;
+                this.execution_error = result.err();
+                this.report_kernel_error(cx);
+                this.start_next_run(cx);
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn reconnect(&mut self, cx: &mut Context<Self>) {
+        if self.connecting || self.control_pending || self.file_busy {
+            return;
+        }
+        self.connecting = true;
+        self.execution_error = None;
+        let task = self.session.connect();
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .unwrap_or_else(|_| Err("Could not reconnect to the kernel".into()));
+            this.update(cx, |this, cx| {
+                this.connecting = false;
+                this.execution_error = result.err();
+                this.report_kernel_error(cx);
+                if this.execution_error.is_some() {
+                    this.runs.pending.clear();
+                }
+                this.start_next_run(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn report_kernel_error(&self, cx: &mut Context<Self>) {
+        if let Some(error) = &self.execution_error {
+            let toast = crate::toast::Toast::new("Kernel operation failed")
+                .description(error.clone())
+                .kind(crate::toast::ToastKind::Error);
+            self.toasts.update(cx, |host, cx| {
+                host.push(toast, cx);
+            });
+        }
     }
 
     fn choose_cell_type(&mut self, kind: CellKind, window: &mut Window, cx: &mut Context<Self>) {
@@ -843,9 +925,13 @@ impl Notebook {
                     (ToolbarAction::Copy, "Copy cell", Icon::Copy),
                     (ToolbarAction::Paste, "Paste cell", Icon::Clipboard),
                     (ToolbarAction::Run, "Run cell", Icon::Play),
-                    (ToolbarAction::Stop, "Interrupt execution", Icon::Stop),
+                    (ToolbarAction::Stop, "Interrupt kernel", Icon::Stop),
                     (ToolbarAction::Restart, "Restart kernel", Icon::Restart),
-                    (ToolbarAction::RunAll, "Run all cells", Icon::RunAll),
+                    (
+                        ToolbarAction::RunAll,
+                        "Restart kernel and run all cells",
+                        Icon::RunAll,
+                    ),
                 ]
                 .into_iter()
                 .map(|(action, label, icon)| {
@@ -872,6 +958,23 @@ impl Notebook {
             )
             .child(self.cell_type_control(cx))
             .child(div().flex_1())
+            .when(
+                activity == KernelActivity::Disconnected
+                    && !self.connecting
+                    && !self.control_pending,
+                |bar| {
+                    bar.child(
+                        icon_button("reconnect-kernel", "Reconnect kernel", Icon::Restart, cx)
+                            .on_click(cx.listener(|this, _, _, cx| this.reconnect(cx)))
+                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                    this.reconnect(cx);
+                                    cx.stop_propagation();
+                                }
+                            })),
+                    )
+                },
+            )
             .child(
                 div()
                     .text_size(t.font.xs)
@@ -882,8 +985,8 @@ impl Notebook {
                     .gap(gpui::px(6.))
                     .child(if self.connecting {
                         "Connecting…".to_owned()
-                    } else if self.control_pending {
-                        "Updating kernel…".to_owned()
+                    } else if self.control_pending || self.restart_run_all {
+                        self.control_label.to_owned()
                     } else if self.runs.active.is_some()
                         && self.session.status().contains("not connected")
                     {
@@ -908,6 +1011,22 @@ impl Notebook {
 
     fn start_next_run(&mut self, cx: &mut Context<Self>) {
         cx.notify();
+        if self.control_pending || self.connecting {
+            return;
+        }
+        // Let the old execution observer finish before starting the restarted batch.
+        if self.restart_run_all && self.runs.active.is_none() {
+            self.restart_run_all = false;
+            for (index, cell) in self.cells.iter().enumerate() {
+                let cell = cell.read(cx);
+                if cell.kind() == CellKind::Code {
+                    let source = cell.text().to_owned();
+                    if let Some(count) = self.counter.run(&source) {
+                        self.runs.pending.push_back((index, count, source));
+                    }
+                }
+            }
+        }
         if let Some((index, _request, source)) = self.runs.start_next() {
             self.sync(cx);
             self.execution_error = None;

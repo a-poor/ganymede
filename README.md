@@ -202,11 +202,15 @@ are rejected; uploads never intentionally replace an existing file. The tree
 refreshes quietly every 10 seconds, retaining expanded folders and scroll position. Click a notebook to
 open it; an already-open path reuses its tab. Opening a notebook connects automatically,
 without executing code. Run or Shift+Enter executes the selected cell. Subsequent
-cells share its kernel state. Run All executes code cells in order and stops
-on an error; Markdown and Raw cells are skipped. Interrupt clears queued work
-and interrupts the active kernel. Restart clears queued work and restarts the
-kernel without rerunning code. Failed/disconnected executions are never
-automatically replayed; a new explicit Run can reconnect.
+cells share its kernel state. The fast-forward button confirms a kernel restart,
+then runs all nonempty Code cells in order, stopping on an error; Markdown and Raw
+cells are skipped. Interrupt Kernel clears queued work and interrupts the active
+kernel. Restart Kernel confirms that variables will be lost and restarts without
+rerunning code. Neither restart action deletes saved outputs. Kernel operation
+failures appear as error toasts. A reconnect button appears when disconnected;
+it reconnects to the existing session without executing code or resetting variables.
+Failed/disconnected executions are never automatically replayed, and queued work
+is cancelled on disconnect. A new explicit Run can also reconnect.
 
 This first integration displays streaming stdout/stderr, plain-text results,
 and tracebacks. Rich outputs use their plain-text fallback where available.

@@ -263,6 +263,10 @@ impl Session {
             let result = async {
                 let submission = this.submission.lock().await;
                 let controller = this.controller.as_ref().map_err(Clone::clone)?;
+                // Check before reconnecting as well: cancelled submissions must not create a session.
+                if this.generation.load(Ordering::SeqCst) != generation {
+                    return Err("Execution cancelled before submission".into());
+                }
                 // Explicit Run may reconnect. No failed request is automatically replayed.
                 controller.connect(this.kernel.clone()).await.map_err(|e| e.to_string())?;
                 if this.generation.load(Ordering::SeqCst) != generation {
@@ -496,7 +500,49 @@ mod tests {
             assert!(interrupted.failed);
             assert!(interrupted.text().contains("KeyboardInterrupt"));
 
+            // Reconnect to the same kernel without executing or resetting its variables.
+            let before = test_session.controller().snapshot();
+            test_session.controller().disconnect().await.unwrap();
+            assert!(matches!(
+                test_session.activity(),
+                KernelActivity::Disconnected
+            ));
+            test_session.connect().await.unwrap().unwrap();
+            assert_eq!(
+                test_session
+                    .controller()
+                    .snapshot()
+                    .session
+                    .as_ref()
+                    .unwrap()
+                    .id,
+                before.session.as_ref().unwrap().id
+            );
+            assert_eq!(
+                test_session.controller().snapshot().document.to_json(),
+                before.document.to_json()
+            );
+            let retained = completed(test_session.run(4, "x".into())).await;
+            assert_eq!(retained.text(), "40\n");
+
+            let mut active = test_session.run(
+                5,
+                "import time\nprint('restarting', flush=True)\ntime.sleep(30)".into(),
+            );
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if active.borrow_and_update().text().contains("restarting") {
+                        break;
+                    }
+                    active.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
             test_session.control(true).await.unwrap().unwrap();
+            let cancelled = completed(active).await;
+            assert!(cancelled.failed);
+            assert!(cancelled.text().contains("outcome is unknown"));
             let restarted = completed(test_session.run(4, "'x' in globals()".into())).await;
             assert!(!restarted.failed, "{}", restarted.text());
             assert_eq!(restarted.text(), "False\n");
@@ -510,6 +556,29 @@ mod tests {
                 .expect("delete test session");
         }
         result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn interrupt_cancels_waiting_submissions_before_connecting() {
+        let runtime = Runtime::new(Handle::current());
+        let controller = NotebookController::new(
+            ServerConfig::new("http://127.0.0.1:1/").unwrap(),
+            "cancelled.ipynb",
+            NotebookDocument::new(),
+        )
+        .unwrap();
+        let session = Session::from_controller(controller.clone(), &runtime);
+        let submission = session.submission.lock().await;
+        let run = session.run(1, "must_not_execute()".into());
+        let interrupt = session.control(false);
+        drop(submission);
+        let update = completed(run).await;
+        assert!(update.failed);
+        assert_eq!(update.text(), "Execution cancelled before submission");
+        // No session exists to interrupt; cancellation still prevents a connection attempt.
+        assert!(interrupt.await.unwrap().is_err());
+        assert!(controller.snapshot().session.is_none());
+        assert!(controller.snapshot().document.cells().is_empty());
     }
 
     fn fixture() -> NotebookDocument {
