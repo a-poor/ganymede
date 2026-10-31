@@ -145,6 +145,24 @@ impl JupyterRestClient {
             .append_pair("content", if include_content { "1" } else { "0" });
         Ok(self.request(Method::GET, url, None).await?.json().await?)
     }
+    /// Let the server allocate an unused notebook name in this directory.
+    pub async fn create_notebook(&self, directory: &str) -> Result<Contents> {
+        Ok(self
+            .request(
+                Method::POST,
+                self.contents_url(directory)?,
+                Some(json!({"type": "notebook"})),
+            )
+            .await?
+            .json()
+            .await?)
+    }
+    /// Explicitly remove a file through the Contents API.
+    pub async fn delete_contents(&self, path: &str) -> Result<()> {
+        self.request(Method::DELETE, self.contents_url(path)?, None)
+            .await?;
+        Ok(())
+    }
     /// Preserve the entire notebook document, including unknown metadata.
     pub async fn save_notebook(&self, path: &str, notebook: &Value) -> Result<Contents> {
         Ok(self

@@ -318,6 +318,16 @@ impl NotebookDocument {
         }
         Ok(())
     }
+    pub fn set_cell_kind(&mut self, id: &CellId, kind: CellKind) -> Result<()> {
+        let index = self.index(id)?;
+        if self.cells[index].kind != kind {
+            self.cells[index].kind = kind;
+            self.cells[index].outputs.clear();
+            self.cells[index].execution_count = None;
+            self.changed();
+        }
+        Ok(())
+    }
     pub fn set_metadata(&mut self, metadata: Map<String, Value>) {
         if self.metadata != metadata {
             self.metadata = metadata;

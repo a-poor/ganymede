@@ -2148,7 +2148,10 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "rust-embed",
+ "serde_json",
+ "tokio",
  "unicode-segmentation",
+ "uuid",
 ]
 
 [[package]]

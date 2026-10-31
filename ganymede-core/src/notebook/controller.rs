@@ -179,6 +179,28 @@ impl NotebookController {
             Some(id.clone()),
         )
     }
+    pub fn set_cell_kind(&self, id: &CellId, kind: CellKind) -> Result<()> {
+        self.edit(
+            |state| {
+                if state
+                    .snapshot
+                    .executions
+                    .get(id)
+                    .is_some_and(|run| run.phase.is_active())
+                {
+                    return Err(Error::Unavailable(
+                        "finish execution before changing cell type".into(),
+                    ));
+                }
+                if state.snapshot.document.cell(id)?.kind() != kind {
+                    state.snapshot.document.set_cell_kind(id, kind)?;
+                    state.forget_cell(id);
+                }
+                Ok(())
+            },
+            Some(id.clone()),
+        )
+    }
     pub fn set_metadata(&self, metadata: Map<String, Value>) -> Result<()> {
         self.edit(
             |state| {
@@ -457,6 +479,23 @@ impl NotebookController {
         .await
     }
     pub async fn run_cell(&self, cell: &CellId, allow_stdin: bool) -> Result<String> {
+        self.run_cell_inner(cell, allow_stdin, None).await
+    }
+    /// Execute a queued source snapshot without overwriting newer document edits.
+    pub async fn run_cell_source(
+        &self,
+        cell: &CellId,
+        source: String,
+        allow_stdin: bool,
+    ) -> Result<String> {
+        self.run_cell_inner(cell, allow_stdin, Some(source)).await
+    }
+    async fn run_cell_inner(
+        &self,
+        cell: &CellId,
+        allow_stdin: bool,
+        source: Option<String>,
+    ) -> Result<String> {
         let this = self.clone();
         let cell = cell.clone();
         finish(async move {
@@ -469,8 +508,9 @@ impl NotebookController {
                     .ok_or_else(|| Error::Unavailable("kernel is disconnected".into()))?
                     .kernel
                     .clone();
-                let mut execute =
-                    ExecuteRequest::new(data.state.snapshot.document.cell(&cell)?.source());
+                let mut execute = ExecuteRequest::new(
+                    source.unwrap_or(data.state.snapshot.document.cell(&cell)?.source()),
+                );
                 execute.allow_stdin = allow_stdin;
                 let message = KernelMessage::request(
                     kernel.session_id(),

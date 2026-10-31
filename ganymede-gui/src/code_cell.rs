@@ -173,6 +173,7 @@ pub enum CellEvent {
     Selected,
     RunAndAdvance,
     RunFinished,
+    RunFailed,
     RunProgress,
 }
 
@@ -188,8 +189,8 @@ pub struct CodeCell {
     execution_count: Option<u64>,
     running_frame: Option<usize>,
     queued: bool,
-    output: Option<String>,
-    simulation: Task<()>,
+    output: Vec<crate::execution::OutputBlock>,
+    execution_task: Task<()>,
     buffer: Buffer,
     focus: FocusHandle,
     cell_focus: FocusHandle,
@@ -239,8 +240,8 @@ impl CodeCell {
             execution_count: None,
             running_frame: None,
             queued: false,
-            output: None,
-            simulation: Task::ready(()),
+            output: Vec::new(),
+            execution_task: Task::ready(()),
             buffer: Buffer::default(),
             focus,
             cell_focus,
@@ -272,6 +273,14 @@ impl CodeCell {
         cx.notify();
     }
 
+    pub fn load(&mut self, cell: &ganymede_core::notebook::Cell, cx: &mut Context<Self>) {
+        self.buffer.text = cell.source();
+        self.kind = cell.kind();
+        self.execution_count = cell.execution_count();
+        self.output = crate::execution::output_blocks(cell.outputs());
+        cx.notify();
+    }
+
     pub fn text(&self) -> &str {
         &self.buffer.text
     }
@@ -283,7 +292,7 @@ impl CodeCell {
     pub fn set_kind(&mut self, kind: ganymede_core::notebook::CellKind, cx: &mut Context<Self>) {
         if self.kind != kind {
             self.kind = kind;
-            self.simulate_run(None, String::new(), cx);
+            self.clear_execution(cx);
             self.set_queued(false, cx);
             cx.emit(CellEvent::Changed);
             cx.notify();
@@ -306,36 +315,66 @@ impl CodeCell {
         cx.notify();
     }
 
-    pub fn simulate_run(&mut self, count: Option<u64>, source: String, cx: &mut Context<Self>) {
-        // The notebook starts only one simulation at a time.
-        self.simulation = Task::ready(());
-        self.execution_count = count;
-        self.output = None;
-        self.running_frame = count.map(|_| 0);
-        if count.is_some() {
-            self.simulation = cx.spawn(async move |this, cx| {
-                for tick in 1..=15 {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(100))
-                        .await;
-                    if this
-                        .update(cx, |this, cx| {
-                            this.running_frame = (tick < 15).then_some(tick % SPINNER.len());
-                            if tick == 15 {
-                                this.output = Some(source.clone());
-                                cx.emit(CellEvent::RunFinished);
-                            } else {
-                                cx.emit(CellEvent::RunProgress);
-                            }
-                            cx.notify();
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
+    pub fn clear_execution(&mut self, cx: &mut Context<Self>) {
+        self.execution_task = Task::ready(());
+        self.execution_count = None;
+        self.output.clear();
+        self.running_frame = None;
+        self.queued = false;
+        cx.notify();
+    }
+
+    pub fn run(
+        &mut self,
+        session: crate::execution::Session,
+        source: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_execution(cx);
+        self.running_frame = Some(0);
+        let mut updates = session.run(cx.entity_id().as_u64(), source);
+        self.execution_task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(50))
+                    .await;
+                let mut update = updates.borrow_and_update().clone();
+                if updates.has_changed().is_err() && !update.done {
+                    update.done = true;
+                    update.failed = true;
+                    update.blocks.push(crate::execution::OutputBlock {
+                        text: "Execution connection ended unexpectedly.".into(),
+                        execution_count: None,
+                    });
                 }
-            });
-        }
+                let done = update.done;
+                if this
+                    .update(cx, |this, cx| {
+                        this.execution_count = update.count;
+                        this.output = update.blocks;
+                        this.running_frame = if done {
+                            None
+                        } else {
+                            Some((this.running_frame.unwrap_or(0) + 1) % SPINNER.len())
+                        };
+                        if done {
+                            cx.emit(if update.failed {
+                                CellEvent::RunFailed
+                            } else {
+                                CellEvent::RunFinished
+                            });
+                        } else {
+                            cx.emit(CellEvent::RunProgress);
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                    || done
+                {
+                    break;
+                }
+            }
+        });
         cx.notify();
     }
 
@@ -979,9 +1018,9 @@ impl Render for CodeCell {
             .on_action(cx.listener(|_, _: &RunAndAdvance, _, cx| {
                 cx.emit(CellEvent::RunAndAdvance);
             }))
-            .gap_2()
+            .gap(px(6.))
             .child(input)
-            .when_some(self.output.as_ref(), |cell, output| {
+            .when(!self.output.is_empty(), |cell| {
                 cell.child(
                     div()
                         .w_full()
@@ -997,22 +1036,51 @@ impl Render for CodeCell {
                                     bar.bg(surface.primary).text_color(surface.primary_fg)
                                 }),
                         )
-                        // Match the input's execution-prompt gutter.
-                        .child(div().w(px(50.)).flex_shrink_0())
-                        .child(
-                            div()
-                                .id("cell-output")
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_x_scroll()
-                                .px(px(13.))
-                                .py_2()
-                                .font_family(theme.font.mono.clone())
-                                .text_size(theme.font.code)
-                                .line_height(theme.font.line_height_tight)
-                                .text_color(theme.app.fg)
-                                .child(output.clone()),
-                        ),
+                        .child(div().flex_1().min_w_0().flex().flex_col().children(
+                            self.output.iter().enumerate().map(|(index, output)| {
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_start()
+                                    .font_family(theme.font.mono.clone())
+                                    .text_size(theme.font.code)
+                                    .line_height(theme.font.line_height_tight)
+                                    .child(
+                                        div()
+                                            .w(px(32.))
+                                            .ml_3()
+                                            .mr(px(6.))
+                                            .flex_shrink_0()
+                                            .text_right()
+                                            .text_color(theme.app.muted_fg)
+                                            .child(
+                                                output
+                                                    .execution_count
+                                                    .map(|count| format!("[{count}]:"))
+                                                    .unwrap_or_default(),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("cell-output", index))
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_x_scroll()
+                                            .px(px(13.))
+                                            .text_color(theme.app.fg)
+                                            // A stream's final newline terminates its last line;
+                                            // it should not introduce an extra blank UI row.
+                                            .child(
+                                                output
+                                                    .text
+                                                    .strip_suffix('\n')
+                                                    .unwrap_or(&output.text)
+                                                    .to_owned(),
+                                            ),
+                                    )
+                            }),
+                        )),
                 )
             })
             .into_any_element()

@@ -1,14 +1,20 @@
-//! In-memory tabs and launcher; server-backed terminals and persistence come later.
+//! Server file browser, notebook tabs, and launcher.
+use crate::execution::{Runtime, Session};
 use crate::{
     code_cell::CodeCell,
     icon::Icon,
     notebook::Notebook,
     theme::{ActiveTheme, Theme},
 };
+use ganymede_core::{
+    jupyter::{JupyterRestClient, models::Contents},
+    notebook::NotebookController,
+};
 use gpui::{
     App, Context, Entity, Focusable, FontWeight, ScrollHandle, SharedString, Window, div,
     prelude::*, px,
 };
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DocumentKind {
@@ -47,6 +53,7 @@ enum Content {
 struct Document {
     id: u64,
     name: SharedString,
+    path: Option<String>,
     kind: DocumentKind,
     content: Content,
 }
@@ -91,24 +98,47 @@ impl Tabs {
     }
 }
 pub struct Workspace {
+    toasts: Entity<crate::toast::ToastHost>,
     documents: Vec<Document>,
     tabs: Tabs,
     tab_scroll: ScrollHandle,
     next_id: u64,
+    directories: HashMap<String, Vec<Contents>>,
+    expanded: HashSet<String>,
+    loading: HashSet<String>,
+    opening: HashSet<String>,
+    creating: bool,
+    file_error: Option<String>,
 }
 impl Workspace {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        toasts: Entity<crate::toast::ToastHost>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         let mut this = Self {
+            toasts,
             documents: vec![],
             tabs: Tabs::default(),
             tab_scroll: ScrollHandle::new(),
             next_id: 0,
+            directories: HashMap::new(),
+            expanded: HashSet::new(),
+            loading: HashSet::new(),
+            opening: HashSet::new(),
+            creating: false,
+            file_error: None,
         };
+        this.refresh_directory(String::new(), cx);
         this.create(DocumentKind::Notebook, window, cx);
         this
     }
     fn create(&mut self, kind: DocumentKind, window: &mut Window, cx: &mut Context<Self>) {
+        if kind == DocumentKind::Notebook {
+            self.open_notebook(None, window, cx);
+            return;
+        }
         self.next_id += 1;
         let number = self.documents.iter().filter(|doc| doc.kind == kind).count();
         let name = if kind == DocumentKind::Console {
@@ -121,11 +151,7 @@ impl Workspace {
             format!("Untitled-{}.{}", number + 1, kind.extension())
         };
         let content = match kind {
-            DocumentKind::Notebook => {
-                let notebook = cx.new(|cx| Notebook::new(window, cx));
-                cx.observe(&notebook, |_, _, cx| cx.notify()).detach();
-                Content::Notebook(notebook)
-            }
+            DocumentKind::Notebook => unreachable!(),
             DocumentKind::Terminal => Content::Terminal,
             DocumentKind::Console => Content::Console,
             _ => {
@@ -143,11 +169,128 @@ impl Workspace {
         self.documents.push(Document {
             id: self.next_id,
             name: name.into(),
+            path: None,
             kind,
             content,
         });
         self.tabs.launch(self.next_id);
         self.activate(self.next_id, window, cx);
+    }
+    fn refresh_directory(&mut self, path: String, cx: &mut Context<Self>) {
+        if !self.loading.insert(path.clone()) {
+            return;
+        }
+        self.file_error = None;
+        let runtime = cx.global::<Runtime>();
+        let config = runtime.config.clone();
+        let request_path = path.clone();
+        let task = runtime.handle.spawn(async move {
+            let client = JupyterRestClient::new(config?).map_err(|e| e.to_string())?;
+            let listing = client
+                .get_contents(&request_path, true)
+                .await
+                .map_err(|e| e.to_string())?;
+            let mut entries: Vec<Contents> =
+                serde_json::from_value(listing.content).map_err(|e| e.to_string())?;
+            entries.sort_by_key(|entry| {
+                (entry.content_type != "directory", entry.name.to_lowercase())
+            });
+            Ok::<_, String>(entries)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                this.loading.remove(&path);
+                match result {
+                    Ok(Ok(entries)) => {
+                        this.directories.insert(path, entries);
+                    }
+                    Ok(Err(error)) => this.file_error = Some(error),
+                    Err(_) => this.file_error = Some("Could not list files".into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+    fn open_notebook(&mut self, path: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(path) = &path {
+            if let Some(doc) = self
+                .documents
+                .iter()
+                .find(|doc| doc.path.as_ref() == Some(path))
+            {
+                self.activate(doc.id, window, cx);
+                return;
+            }
+            if !self.opening.insert(path.clone()) {
+                return;
+            }
+        } else {
+            if self.creating {
+                return;
+            }
+            self.creating = true;
+        }
+        self.file_error = None;
+        let runtime = cx.global::<Runtime>();
+        let config = runtime.config.clone();
+        let requested = path.clone();
+        let task = runtime.handle.spawn(async move {
+            let config = config?;
+            let path = match requested {
+                Some(path) => path,
+                None => {
+                    JupyterRestClient::new(config.clone())
+                        .map_err(|e| e.to_string())?
+                        .create_notebook("")
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .path
+                }
+            };
+            let controller = NotebookController::open(config, &path)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>((path, controller))
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            this.update_in(cx, |this, window, cx| {
+                if let Some(path) = path {
+                    this.opening.remove(&path);
+                } else {
+                    this.creating = false;
+                }
+                match result {
+                    Ok(Ok((path, controller))) => {
+                        let session = Session::from_controller(controller, cx.global::<Runtime>());
+                        let notebook =
+                            cx.new(|cx| Notebook::new(session, this.toasts.clone(), window, cx));
+                        cx.observe(&notebook, |_, _, cx| cx.notify()).detach();
+                        this.next_id += 1;
+                        this.documents.push(Document {
+                            id: this.next_id,
+                            name: path.rsplit('/').next().unwrap_or(&path).to_owned().into(),
+                            path: Some(path),
+                            kind: DocumentKind::Notebook,
+                            content: Content::Notebook(notebook),
+                        });
+                        this.tabs.launch(this.next_id);
+                        this.activate(this.next_id, window, cx);
+                        this.refresh_directory(String::new(), cx);
+                    }
+                    Ok(Err(error)) => this.file_error = Some(error),
+                    Err(_) => this.file_error = Some("Could not open notebook".into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
     }
     fn activate(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.tabs.activate(id);
@@ -173,9 +316,35 @@ impl Workspace {
         self.close(self.tabs.active, window, cx);
     }
     fn close(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let dirty = self
+            .documents
+            .iter()
+            .find(|doc| doc.id == id)
+            .is_some_and(|doc| match &doc.content {
+                Content::Notebook(notebook) => notebook.read(cx).is_dirty(cx),
+                _ => false,
+            });
+        if dirty {
+            let response = window.prompt(gpui::PromptLevel::Warning, "Close notebook without saving?",
+                Some("Unsaved changes will be discarded. Cancel to return to the notebook and save it."),
+                &["Cancel", "Discard changes"], cx);
+            cx.spawn_in(window, async move |this, cx| {
+                if response.await == Ok(1) {
+                    this.update_in(cx, |this, window, cx| this.finish_close(id, window, cx))
+                        .ok();
+                }
+            })
+            .detach();
+        } else {
+            self.finish_close(id, window, cx);
+        }
+    }
+    fn finish_close(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        // Closing a file never shuts down its server kernel.
         self.tabs.close(id);
+        self.documents
+            .retain(|doc| doc.id != id || doc.path.is_none());
         self.activate(self.tabs.active, window, cx);
-        // Drafts are retained in Files even after closing their tabs.
     }
     pub fn header(entity: &Entity<Self>, cx: &App) -> gpui::Div {
         let this = entity.read(cx);
@@ -345,49 +514,121 @@ impl Workspace {
                     })
             })
     }
-    pub fn files(entity: &Entity<Self>, cx: &App, notebooks: bool) -> gpui::Div {
+    pub fn files(entity: &Entity<Self>, cx: &App) -> gpui::Div {
         let t = cx.theme();
         let this = entity.read(cx);
-        div().flex().flex_col().gap(px(2.)).children(
-            this.documents
-                .iter()
-                .filter(|doc| {
-                    !matches!(doc.kind, DocumentKind::Terminal | DocumentKind::Console)
-                        && (doc.kind == DocumentKind::Notebook) == notebooks
-                })
-                .map(|doc| {
-                    let selected = this.tabs.active == doc.id;
-                    let id = doc.id;
-                    let entity = entity.clone();
+        let refresh = entity.clone();
+        let mut rows = Vec::new();
+        this.tree_rows("", 0, &mut rows);
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(
+                icon_button("refresh-files", "Refresh files", Icon::Restart, cx).on_click(
+                    move |_, _, cx| {
+                        refresh.update(cx, |this, cx| {
+                            let paths: Vec<_> = this
+                                .expanded
+                                .iter()
+                                .cloned()
+                                .chain(std::iter::once(String::new()))
+                                .collect();
+                            for path in paths {
+                                this.refresh_directory(path, cx);
+                            }
+                        })
+                    },
+                ),
+            )
+            .when_some(this.file_error.as_ref(), |view, error| {
+                view.child(
                     div()
-                        .id(("workspace-file", id))
-                        .h(px(24.))
-                        .pl(px(if notebooks { 16. } else { 4. }))
-                        .pr_2()
-                        .flex()
-                        .items_center()
-                        .gap_1p5()
-                        .rounded(t.radius.md())
-                        .cursor_pointer()
                         .text_size(t.font.xs)
-                        .when(selected, |s| {
-                            s.bg(t.active_file_bg).text_color(t.active_file_fg)
-                        })
-                        .when(!selected, |s| {
-                            s.text_color(t.sidebar_content.fg)
-                                .hover(|s| s.bg(t.sidebar_content.accent))
-                        })
-                        .child(doc.kind.icon().svg().size(px(14.)).text_color(if selected {
-                            t.active_file_fg
+                        .text_color(t.destructive)
+                        .child(error.clone()),
+                )
+            })
+            .child(
+                div()
+                    .id("server-file-tree")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .children(rows.into_iter().map(|(entry, depth)| {
+                        let directory = entry.content_type == "directory";
+                        let supported = directory || entry.content_type == "notebook";
+                        let selected = this.documents.iter().any(|doc| {
+                            doc.id == this.tabs.active && doc.path.as_ref() == Some(&entry.path)
+                        });
+                        let icon = if directory {
+                            if this.expanded.contains(&entry.path) {
+                                Icon::FolderOpen
+                            } else {
+                                Icon::Folder
+                            }
                         } else {
-                            t.sidebar_content.fg
-                        }))
-                        .child(div().truncate().child(doc.name.clone()))
-                        .on_click(move |_, window, cx| {
-                            entity.update(cx, |this, cx| this.activate(id, window, cx))
-                        })
-                }),
-        )
+                            Icon::FileText
+                        };
+                        let entity = entity.clone();
+                        div()
+                            .id(SharedString::from(format!("file-{}", entry.path)))
+                            .h(px(24.))
+                            .flex_shrink_0()
+                            .pl(px(4. + depth as f32 * 10.))
+                            .pr_2()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .rounded(t.radius.md())
+                            .text_size(t.font.xs)
+                            .when(selected, |s| {
+                                s.bg(t.active_file_bg).text_color(t.active_file_fg)
+                            })
+                            .when(!selected, |s| {
+                                s.text_color(t.sidebar_content.fg)
+                                    .hover(|s| s.bg(t.sidebar_content.accent))
+                            })
+                            .when(supported, |s| s.cursor_pointer())
+                            .when(!supported, |s| s.opacity(0.5))
+                            .child(icon.svg().size(px(14.)).flex_shrink_0().text_color(
+                                if selected {
+                                    t.active_file_fg
+                                } else {
+                                    t.sidebar_content.fg
+                                },
+                            ))
+                            .child(div().truncate().child(entry.name))
+                            .on_click(move |_, window, cx| {
+                                entity.update(cx, |this, cx| {
+                                    if directory {
+                                        if !this.expanded.remove(&entry.path) {
+                                            this.expanded.insert(entry.path.clone());
+                                            this.refresh_directory(entry.path.clone(), cx);
+                                        }
+                                        cx.notify();
+                                    } else if supported {
+                                        this.open_notebook(Some(entry.path.clone()), window, cx);
+                                    }
+                                });
+                            })
+                    })),
+            )
+    }
+    fn tree_rows(&self, path: &str, depth: usize, rows: &mut Vec<(Contents, usize)>) {
+        if let Some(entries) = self.directories.get(path) {
+            for entry in entries {
+                rows.push((entry.clone(), depth));
+                if self.expanded.contains(&entry.path) {
+                    self.tree_rows(&entry.path, depth + 1, rows);
+                }
+            }
+        }
     }
     fn launcher(&self, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
         let t = cx.theme();

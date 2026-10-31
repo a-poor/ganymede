@@ -1,5 +1,6 @@
 mod assets;
 mod code_cell;
+mod execution;
 pub mod icon;
 mod notebook;
 mod settings;
@@ -15,7 +16,7 @@ use icon::Icon;
 use std::time::{Duration, Instant};
 use theme::{ActiveTheme, Theme};
 
-actions!(ganymede, [Quit, NewTab, CloseTab]);
+actions!(ganymede, [Quit, NewTab, CloseTab, Save]);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SidebarTab {
@@ -54,8 +55,6 @@ struct Ganymede {
     sidebar_motion: SidebarMotion,
     sidebar_tab: SidebarTab,
     settings_window: Option<gpui::WindowHandle<settings::Settings>>,
-    notebooks_expanded: bool,
-    folder_focus: gpui::FocusHandle,
 }
 
 impl Ganymede {
@@ -66,9 +65,9 @@ impl Ganymede {
         })
         .detach();
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
-        let workspace = cx.new(|cx| workspace::Workspace::new(window, cx));
-        cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
         let toasts = cx.new(|cx| toast::ToastHost::new(window, cx));
+        let workspace = cx.new(|cx| workspace::Workspace::new(toasts.clone(), window, cx));
+        cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
         Self {
             workspace,
             toasts,
@@ -80,8 +79,6 @@ impl Ganymede {
             },
             sidebar_tab: SidebarTab::Files,
             settings_window: None,
-            notebooks_expanded: true,
-            folder_focus: cx.focus_handle(),
         }
     }
 
@@ -134,6 +131,8 @@ impl Ganymede {
         let theme = cx.theme();
         let surface = theme.sidebar_content;
         let panel = div()
+            .h_full()
+            .min_h_0()
             .flex()
             .flex_col()
             .gap_2()
@@ -148,66 +147,14 @@ impl Ganymede {
                     }),
             );
         match self.sidebar_tab {
-            // The tree starts at the server root; Notebooks is an example child folder,
-            // not a mandatory container for server files.
-            SidebarTab::Files => panel.child(
-                div()
-                    .id("file-tree")
-                    .p(px(4.))
-                    .gap(px(2.))
-                    .text_size(theme.font.xs)
-                    .flex()
-                    .flex_col()
-                    .overflow_y_scroll()
-                    .child(
-                        div()
-                            .id("notebooks-folder")
-                            .track_focus(&self.folder_focus)
-                            .on_mouse_down_out(cx.listener(|this, _, window, cx| {
-                                if this.folder_focus.is_focused(window) {
-                                    window.blur();
-                                    cx.notify();
-                                }
-                            }))
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
-                            .h(px(24.))
-                            .px_1()
-                            .rounded(theme.radius.md())
-                            .cursor_pointer()
-                            .tab_index(0)
-                            .hover(|s| s.bg(surface.accent).text_color(surface.accent_fg))
-                            .active(|s| s.bg(surface.accent).text_color(surface.accent_fg))
-                            .focus(|s| s.border_1().border_color(surface.ring))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.notebooks_expanded = !this.notebooks_expanded;
-                                cx.notify();
-                            }))
-                            .child(
-                                if self.notebooks_expanded {
-                                    Icon::FolderOpen
-                                } else {
-                                    Icon::Folder
-                                }
-                                .svg()
-                                .size(px(14.))
-                                .text_color(surface.fg),
-                            )
-                            .child("Notebooks"),
-                    )
-                    .when(self.notebooks_expanded, |tree| {
-                        tree.child(workspace::Workspace::files(&self.workspace, cx, true))
-                    })
-                    .child(workspace::Workspace::files(&self.workspace, cx, false)),
-            ),
-            SidebarTab::Kernels => panel
-                .child(div().pt_3().child("No connected kernels"))
-                .child(
-                    div()
-                        .text_color(surface.muted_fg)
-                        .child("Connect to a Jupyter server to see its kernels here."),
-                ),
+            SidebarTab::Files => panel.child(workspace::Workspace::files(&self.workspace, cx)),
+            SidebarTab::Kernels => {
+                panel
+                    .child(div().pt_3().child("Kernel management"))
+                    .child(div().text_color(surface.muted_fg).child(
+                    "Notebooks connect automatically. Kernel management will be added here later.",
+                ))
+            }
         }
     }
 
@@ -426,9 +373,15 @@ impl Render for Ganymede {
 }
 
 fn main() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("create network runtime");
+    let execution = execution::Runtime::new(runtime.handle().clone());
     gpui_platform::application()
         .with_assets(assets::Assets)
-        .run(|cx: &mut App| {
+        .run(move |cx: &mut App| {
+            cx.set_global(execution);
             assets::register_fonts(cx).expect("failed to register embedded fonts");
             code_cell::init(cx);
             cx.on_action(|_: &Quit, cx| cx.quit());
@@ -438,6 +391,15 @@ fn main() {
                 "ctrl-q"
             };
             cx.bind_keys([
+                KeyBinding::new(
+                    if cfg!(target_os = "macos") {
+                        "cmd-s"
+                    } else {
+                        "ctrl-s"
+                    },
+                    Save,
+                    None,
+                ),
                 KeyBinding::new(quit_key, Quit, None),
                 KeyBinding::new(
                     if cfg!(target_os = "macos") {

@@ -176,3 +176,50 @@ cargo run -p ganymede-core --example notebook
 It creates a uniquely named notebook, runs a cell, saves outputs, and shuts down
 its session. Passing a path as the first argument selects the save destination.
 The disposable integration runner tests both API layers and both examples.
+
+
+## GUI notebooks on a local Jupyter server
+
+Copy `.env.example` to `.env` in the repository root and set
+`GANYMEDE_JUPYTER_URL` to the server root (for example,
+`http://127.0.0.1:8888/`, without `/lab` or a token query). Set
+`GANYMEDE_JUPYTER_TOKEN` separately and optionally
+`GANYMEDE_JUPYTER_KERNEL` (defaults to `python3`). The local file is ignored
+by Git; process environment variables override its values. The development
+build reads this file from the repository root even when launched elsewhere.
+Restart the app after changing configuration.
+
+Run `cargo run -p ganymede-gui`. The demo starts with a new server notebook, using
+Jupyter’s unused `Untitled` name. The file tree starts at the server root; folders
+load on expansion, and Refresh reloads visible directories. Click a notebook to
+open it; an already-open path reuses its tab. Opening a notebook connects automatically,
+without executing code. Run or Shift+Enter executes the selected cell. Subsequent
+cells share its kernel state. Run All executes code cells in order and stops
+on an error; Markdown and Raw cells are skipped. Interrupt clears queued work
+and interrupts the active kernel. Restart clears queued work and restarts the
+kernel without rerunning code. Failed/disconnected executions are never
+automatically replayed; a new explicit Run can reconnect.
+
+This first integration displays streaming stdout/stderr, plain-text results,
+and tracebacks. Rich outputs use their plain-text fallback where available.
+Interactive stdin is disabled. Save with the toolbar or ⌘S (Ctrl+S elsewhere).
+Saving preserves notebook/cell metadata, attachments, unknown fields, cell order,
+cell types, and full output payloads, including rich outputs not yet rendered.
+The unsaved dot tracks document revisions; edits or output received during a save
+remain dirty. Save failures stay visible and retain changes. Closing a dirty
+notebook asks before discarding it; reopening a closed notebook loads the server
+copy. Closing tabs or the app does not delete server sessions or kernels.
+
+Text-file editing and terminal/console launcher items remain demos. Autosave,
+Save As, rename, external-change conflict detection, and app-quit protection are
+not implemented yet; save your work before quitting.
+
+To exercise the GUI execution adapter against the configured server:
+
+```sh
+cargo test -p ganymede-gui execution::tests::live_execution -- --ignored
+```
+
+This test creates its own unique scratch session, verifies streaming output,
+shared state, errors, interrupt, and restart, and deletes that test session
+afterward.
