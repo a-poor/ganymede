@@ -5,6 +5,7 @@ mod confirm;
 mod execution;
 pub mod icon;
 mod notebook;
+mod rich;
 mod settings;
 mod text_file;
 pub mod theme;

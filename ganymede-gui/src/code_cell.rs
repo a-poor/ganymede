@@ -1,6 +1,6 @@
 //! A standalone, in-memory code cell. Notebook persistence and execution can be
 //! connected later without coupling the text-input machinery to a kernel.
-use std::{ops::Range, time::Duration};
+use std::{cell::RefCell, ops::Range, rc::Rc, time::Duration};
 
 use crate::theme::ActiveTheme;
 use gpui::{
@@ -194,6 +194,9 @@ pub struct CodeCell {
     running_frame: Option<usize>,
     queued: bool,
     output: Vec<crate::execution::OutputBlock>,
+    rich_output: Vec<crate::rich::Rich>,
+    markdown_preview: Option<crate::rich::Rich>,
+    attachments: serde_json::Map<String, serde_json::Value>,
     execution_task: Task<()>,
     buffer: Buffer,
     focus: FocusHandle,
@@ -203,6 +206,7 @@ pub struct CodeCell {
     redo: Vec<Buffer>,
     composition_start: Option<Buffer>,
     lines: Vec<ShapedLine>,
+    starts: Vec<usize>,
     bounds: Option<Bounds<Pixels>>,
     line_height: Pixels,
     goal_x: Option<Pixels>,
@@ -248,6 +252,9 @@ impl CodeCell {
             running_frame: None,
             queued: false,
             output: Vec::new(),
+            rich_output: Vec::new(),
+            markdown_preview: None,
+            attachments: Default::default(),
             execution_task: Task::ready(()),
             buffer: Buffer::default(),
             focus,
@@ -257,6 +264,7 @@ impl CodeCell {
             redo: vec![],
             composition_start: None,
             lines: vec![],
+            starts: vec![],
             bounds: None,
             line_height: cx.theme().font.line_height_tight,
             goal_x: None,
@@ -317,8 +325,41 @@ impl CodeCell {
         self.buffer.text = cell.source();
         self.kind = cell.kind();
         self.execution_count = cell.execution_count();
-        self.output = crate::execution::output_blocks(cell.outputs());
+        self.set_output(crate::execution::output_blocks(cell.outputs()));
+        self.attachments = cell
+            .extra()
+            .get("attachments")
+            .and_then(serde_json::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        if self.kind == ganymede_core::notebook::CellKind::Markdown {
+            self.preview_markdown(cx);
+        }
         cx.notify();
+    }
+
+    fn set_output(&mut self, outputs: Vec<crate::execution::OutputBlock>) {
+        self.rich_output = outputs
+            .iter()
+            .enumerate()
+            .map(|(i, output)| {
+                if self.output.get(i) == Some(output) {
+                    self.rich_output[i].clone()
+                } else {
+                    crate::rich::Rich::output(output.data.as_ref(), &output.text)
+                }
+            })
+            .collect();
+        self.output = outputs;
+    }
+    pub fn preview_markdown(&mut self, cx: &mut Context<Self>) {
+        if self.kind == ganymede_core::notebook::CellKind::Markdown {
+            self.markdown_preview = Some(crate::rich::Rich::markdown(
+                &self.buffer.text,
+                Some(&self.attachments),
+            ));
+            cx.notify();
+        }
     }
 
     pub fn text(&self) -> &str {
@@ -332,6 +373,7 @@ impl CodeCell {
     pub fn set_kind(&mut self, kind: ganymede_core::notebook::CellKind, cx: &mut Context<Self>) {
         if self.kind != kind {
             self.kind = kind;
+            self.markdown_preview = None;
             self.clear_execution(cx);
             self.set_queued(false, cx);
             cx.emit(CellEvent::Changed);
@@ -359,6 +401,7 @@ impl CodeCell {
         self.execution_task = Task::ready(());
         self.execution_count = None;
         self.output.clear();
+        self.rich_output.clear();
         self.running_frame = None;
         self.queued = false;
         cx.notify();
@@ -385,13 +428,14 @@ impl CodeCell {
                     update.blocks.push(crate::execution::OutputBlock {
                         text: "Execution connection ended unexpectedly.".into(),
                         execution_count: None,
+                        data: None,
                     });
                 }
                 let done = update.done;
                 if this
                     .update(cx, |this, cx| {
                         this.execution_count = update.count;
-                        this.output = update.blocks;
+                        this.set_output(update.blocks);
                         this.running_frame = if done {
                             None
                         } else {
@@ -442,6 +486,12 @@ impl CodeCell {
     fn changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.goal_x = None;
         self.reset_blink(cx);
+        // Notebook cells wrap and grow; only single-line inputs and full document
+        // editors own a scrolling viewport.
+        if !self.filter_input && !self.document {
+            self.scroll.set_offset(point(px(0.), px(0.)));
+            return;
+        }
         // Resolve scrolling in the input handler, before the next layout pass.
         let (row, column) = self.buffer.position(self.buffer.head);
         let line = self.buffer.text.split('\n').nth(row).unwrap_or("");
@@ -478,11 +528,16 @@ impl CodeCell {
             if x + offset.x + px(4.) > viewport.width {
                 offset.x = viewport.width - x - px(4.);
             }
-            if y + offset.y < px(0.) {
-                offset.y = -y;
-            }
-            if y + offset.y + self.line_height > viewport.height {
-                offset.y = viewport.height - y - self.line_height;
+            if self.document {
+                if y + offset.y < px(0.) {
+                    offset.y = -y;
+                }
+                if y + offset.y + self.line_height > viewport.height {
+                    offset.y = viewport.height - y - self.line_height;
+                }
+            } else {
+                // Notebook cells grow with their source, including newly inserted lines.
+                offset.y = px(0.);
             }
             self.scroll.set_offset(offset);
         }
@@ -501,7 +556,7 @@ impl CodeCell {
     }
 
     fn vertical(&mut self, down: bool, extend: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let (row, col) = self.buffer.position(self.buffer.head);
+        let (row, col) = visual_position(&self.starts, self.buffer.head);
         let Some(line) = self.lines.get(row) else {
             return;
         };
@@ -514,13 +569,7 @@ impl CodeCell {
         let offset = if row == target {
             if down { self.buffer.text.len() } else { 0 }
         } else {
-            self.buffer
-                .text
-                .split('\n')
-                .take(target)
-                .map(|s| s.len() + 1)
-                .sum::<usize>()
-                + self.lines[target].closest_index_for_x(goal)
+            self.starts[target] + self.lines[target].closest_index_for_x(goal)
         };
         self.move_cursor(offset, extend, window, cx);
         self.goal_x = Some(goal);
@@ -554,13 +603,7 @@ impl CodeCell {
         }
         let row = (((position.y - bounds.top()) / self.line_height).floor() as usize)
             .min(self.lines.len() - 1);
-        let start: usize = self
-            .buffer
-            .text
-            .split('\n')
-            .take(row)
-            .map(|s| s.len() + 1)
-            .sum();
+        let start = self.starts[row];
         (start + self.lines[row].closest_index_for_x(position.x - bounds.left()))
             .min(self.buffer.text.len())
     }
@@ -611,7 +654,11 @@ impl CodeCell {
 
 impl Focusable for CodeCell {
     fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
+        if self.markdown_preview.is_some() {
+            self.cell_focus.clone()
+        } else {
+            self.focus.clone()
+        }
     }
 }
 
@@ -705,8 +752,8 @@ impl EntityInputHandler for CodeCell {
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let range = self.buffer.utf16_range(range);
-        let (row, col) = self.buffer.position(range.start);
-        let (end_row, end_col) = self.buffer.position(range.end);
+        let (row, col) = visual_position(&self.starts, range.start);
+        let (end_row, end_col) = visual_position(&self.starts, range.end);
         let line = self.lines.get(row)?;
         let bounds = self.bounds?;
         let left = line.x_for_index(col);
@@ -774,8 +821,6 @@ impl Render for CodeCell {
                 )
             });
         let cell_padding = px(4.);
-        let height =
-            theme.font.line_height_tight * self.buffer.text.split('\n').count().clamp(1, 16) as f32;
         let editor = div()
             .id("code-cell")
             .flex_1()
@@ -912,9 +957,12 @@ impl Render for CodeCell {
                 div()
                     .id("code-scroll")
                     .w_full()
-                    .h(height)
+                    .min_h(theme.font.line_height_tight)
                     .when(self.document, |s| s.h_full())
-                    .overflow_scroll()
+                    .when(self.document || self.filter_input, |s| {
+                        s.overflow_x_scroll()
+                    })
+                    .when(self.document, |s| s.overflow_y_scroll())
                     .track_scroll(&self.scroll)
                     .child(CellText { cell: cx.entity() }),
             );
@@ -1119,7 +1167,28 @@ impl Render for CodeCell {
                     .text_right()
                     .child(prompt),
             )
-            .child(editor);
+            .child(if let Some(preview) = &self.markdown_preview {
+                div()
+                    .id("markdown-preview")
+                    .flex_1()
+                    .min_w_0()
+                    .px_3()
+                    .py_2()
+                    .font_family(theme.font.sans.clone())
+                    .text_size(theme.font.base)
+                    .child(preview.render(window, cx))
+                    .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
+                        cx.emit(CellEvent::Selected);
+                        if event.click_count() == 2 {
+                            this.markdown_preview = None;
+                            this.focus.focus(window, cx);
+                            cx.notify();
+                        }
+                    }))
+                    .into_any_element()
+            } else {
+                editor.into_any_element()
+            });
 
         div()
             .id("notebook-cell")
@@ -1155,7 +1224,9 @@ impl Render for CodeCell {
                 }),
             )
             .on_action(cx.listener(|this, _: &EditCell, window, cx| {
+                this.markdown_preview = None;
                 this.focus.focus(window, cx);
+                cx.notify();
             }))
             .on_action(cx.listener(|_, _: &RunAndAdvance, _, cx| {
                 cx.emit(CellEvent::RunAndAdvance);
@@ -1212,15 +1283,7 @@ impl Render for CodeCell {
                                             .overflow_x_scroll()
                                             .px(px(13.))
                                             .text_color(theme.app.fg)
-                                            // A stream's final newline terminates its last line;
-                                            // it should not introduce an extra blank UI row.
-                                            .child(
-                                                output
-                                                    .text
-                                                    .strip_suffix('\n')
-                                                    .unwrap_or(&output.text)
-                                                    .to_owned(),
-                                            ),
+                                            .child(self.rich_output[index].render(window, cx)),
                                     )
                             }),
                         )),
@@ -1228,6 +1291,17 @@ impl Render for CodeCell {
             })
             .into_any_element()
     }
+}
+
+// Soft boundaries belong to the following visual row; source bytes are unchanged.
+fn visual_position(starts: &[usize], offset: usize) -> (usize, usize) {
+    let row = starts
+        .partition_point(|start| *start <= offset)
+        .saturating_sub(1);
+    (
+        row,
+        offset.saturating_sub(starts.get(row).copied().unwrap_or(0)),
+    )
 }
 
 struct CellText {
@@ -1252,7 +1326,7 @@ impl IntoElement for CellText {
 }
 
 impl Element for CellText {
-    type RequestLayoutState = Layout;
+    type RequestLayoutState = Rc<RefCell<Layout>>;
     type PrepaintState = Prepaint;
     fn id(&self) -> Option<ElementId> {
         None
@@ -1266,86 +1340,128 @@ impl Element for CellText {
         _: Option<&gpui::InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
-    ) -> (LayoutId, Layout) {
+    ) -> (LayoutId, Rc<RefCell<Layout>>) {
         let cell = self.cell.read(cx);
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line_height = window.line_height();
         let font_id = window.text_system().resolve_font(&style.font());
         let cap_height = window.text_system().cap_height(font_id, font_size);
-        let mut starts = vec![];
-        let mut start = 0;
-        let lines: Vec<_> = cell
-            .buffer
-            .text
-            .split('\n')
-            .map(|text| {
-                starts.push(start);
-                let base = TextRun {
-                    len: text.len(),
-                    font: style.font(),
-                    color: style.color,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                };
-                let mut runs = vec![base.clone()];
-                if let Some(marked) = &cell.marked {
-                    let left = marked.start.saturating_sub(start).min(text.len());
-                    let right = marked.end.saturating_sub(start).min(text.len());
-                    if left < right {
-                        runs = vec![
-                            TextRun {
-                                len: left,
-                                ..base.clone()
-                            },
-                            TextRun {
-                                len: right - left,
-                                underline: Some(UnderlineStyle {
-                                    color: Some(style.color),
-                                    thickness: px(1.),
-                                    wavy: false,
-                                }),
-                                ..base.clone()
-                            },
-                            TextRun {
-                                len: text.len() - right,
-                                ..base
-                            },
-                        ];
-                        runs.retain(|r| r.len > 0);
-                    }
-                }
-                start += text.len() + 1;
-                window
-                    .text_system()
-                    .shape_line(text.to_owned().into(), font_size, &runs, None)
-            })
-            .collect();
+        let text = cell.buffer.text.clone();
+        let marked = cell.marked.clone();
+        let wrap = !cell.document && !cell.filter_input;
+        let state = Rc::new(RefCell::new(Layout {
+            lines: vec![],
+            starts: vec![],
+            line_height,
+            cap_height,
+        }));
+        let measured = state.clone();
         let mut layout_style = Style::default();
-        layout_style.size.width =
-            (lines.iter().map(|l| l.width).fold(px(0.), Pixels::max) + px(4.)).into();
         layout_style.min_size.width = gpui::relative(1.).into();
-        layout_style.size.height = (line_height * lines.len().max(1) as f32).into();
-        (
-            window.request_layout(layout_style, [], cx),
-            Layout {
-                lines,
-                starts,
-                line_height,
-                cap_height,
-            },
-        )
+        let id =
+            window.request_measured_layout(layout_style, move |known, available, window, _| {
+                let wrap_width = if wrap {
+                    known.width.or(match available.width {
+                        gpui::AvailableSpace::Definite(width) => Some(width),
+                        _ => None,
+                    })
+                } else {
+                    None
+                };
+                let mut starts = vec![];
+                let mut start = 0;
+                let mut lines = vec![];
+                for logical in text.split('\n') {
+                    let mut ends = vec![];
+                    if let Some(width) = wrap_width {
+                        let mut wrapper =
+                            window.text_system().line_wrapper(style.font(), font_size);
+                        ends.extend(
+                            wrapper
+                                .wrap_line(
+                                    &[gpui::LineFragment::text(logical)],
+                                    (width - px(4.)).max(px(1.)),
+                                )
+                                .map(|boundary| boundary.ix),
+                        );
+                    }
+                    ends.push(logical.len());
+                    let mut previous = 0;
+                    for end in ends {
+                        let text = &logical[previous..end];
+                        starts.push(start);
+                        let base = TextRun {
+                            len: text.len(),
+                            font: style.font(),
+                            color: style.color,
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        };
+                        let mut runs = vec![base.clone()];
+                        if let Some(marked) = &marked {
+                            let left = marked.start.saturating_sub(start).min(text.len());
+                            let right = marked.end.saturating_sub(start).min(text.len());
+                            if left < right {
+                                runs = vec![
+                                    TextRun {
+                                        len: left,
+                                        ..base.clone()
+                                    },
+                                    TextRun {
+                                        len: right - left,
+                                        underline: Some(UnderlineStyle {
+                                            color: Some(style.color),
+                                            thickness: px(1.),
+                                            wavy: false,
+                                        }),
+                                        ..base.clone()
+                                    },
+                                    TextRun {
+                                        len: text.len() - right,
+                                        ..base
+                                    },
+                                ];
+                                runs.retain(|r| r.len > 0);
+                            }
+                        }
+
+                        lines.push(window.text_system().shape_line(
+                            text.to_owned().into(),
+                            font_size,
+                            &runs,
+                            None,
+                        ));
+                        start += text.len();
+                        previous = end;
+                    }
+                    start += 1;
+                }
+                let width = wrap_width.unwrap_or_else(|| {
+                    lines.iter().map(|l| l.width).fold(px(0.), Pixels::max) + px(4.)
+                });
+                let height = line_height * lines.len().max(1) as f32;
+                *measured.borrow_mut() = Layout {
+                    lines,
+                    starts,
+                    line_height,
+                    cap_height,
+                };
+                size(width, height)
+            });
+        (id, state)
     }
     fn prepaint(
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
-        layout: &mut Layout,
+        state: &mut Rc<RefCell<Layout>>,
         _: &mut Window,
         cx: &mut App,
     ) -> Prepaint {
+        let layout = state.borrow();
         let cell = self.cell.read(cx);
         let selected = cell.buffer.selection();
         let theme = cx.theme();
@@ -1356,7 +1472,7 @@ impl Element for CellText {
             if selected.start <= end && selected.end > start && !selected.is_empty() {
                 let left = line.x_for_index(selected.start.saturating_sub(start).min(line.len()));
                 let right = if selected.end > end {
-                    line.width + px(8.)
+                    (line.width + px(8.)).min(bounds.size.width)
                 } else {
                     line.x_for_index(selected.end - start)
                 };
@@ -1372,7 +1488,7 @@ impl Element for CellText {
                 ));
             }
         }
-        let (row, col) = cell.buffer.position(cell.buffer.head);
+        let (row, col) = visual_position(&layout.starts, cell.buffer.head);
         let cursor = (cell.cursor_visible && selected.is_empty()).then(|| {
             let line = &layout.lines[row];
             // Match the baseline used by ShapedLine::paint, excluding line leading.
@@ -1398,11 +1514,12 @@ impl Element for CellText {
         _: Option<&GlobalElementId>,
         _: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
-        layout: &mut Layout,
+        state: &mut Rc<RefCell<Layout>>,
         prepaint: &mut Prepaint,
         window: &mut Window,
         cx: &mut App,
     ) {
+        let mut layout = state.borrow_mut();
         let focus = self.cell.read(cx).focus.clone();
         window.handle_input(
             &focus,
@@ -1433,6 +1550,7 @@ impl Element for CellText {
         }
         self.cell.update(cx, |cell, _| {
             cell.lines = std::mem::take(&mut layout.lines);
+            cell.starts = std::mem::take(&mut layout.starts);
             cell.bounds = Some(bounds);
             cell.line_height = layout.line_height;
         });
@@ -1442,6 +1560,18 @@ impl Element for CellText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visual_rows_map_soft_boundaries_and_newlines_without_changing_source_offsets() {
+        // "abé" wraps before "😀z", followed by a newline and an empty row.
+        let starts = [0, 4, 10];
+        assert_eq!(visual_position(&starts, 2), (0, 2));
+        assert_eq!(visual_position(&starts, 4), (1, 0));
+        assert_eq!(visual_position(&starts, 8), (1, 4));
+        assert_eq!(visual_position(&starts, 9), (1, 5));
+        assert_eq!(visual_position(&starts, 10), (2, 0));
+        assert_eq!(visual_position(&[0], 0), (0, 0));
+    }
 
     #[test]
     fn multiline_selection_replaces_across_lines_and_keeps_trailing_line() {

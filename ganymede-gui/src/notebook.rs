@@ -306,6 +306,7 @@ impl Notebook {
                     this.start_next_run(cx);
                 }
                 CellEvent::RunAndAdvance => {
+                    cell.update(cx, |cell, cx| cell.preview_markdown(cx));
                     if this.control_pending || this.restart_run_all {
                         return;
                     }
@@ -625,6 +626,7 @@ impl Notebook {
                 }
             }
             ToolbarAction::Run => {
+                self.cells[self.selected].update(cx, |cell, cx| cell.preview_markdown(cx));
                 if self.control_pending || self.restart_run_all {
                     return;
                 }

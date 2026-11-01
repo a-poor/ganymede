@@ -90,6 +90,7 @@ pub struct Session {
 pub struct OutputBlock {
     pub text: String,
     pub execution_count: Option<u64>,
+    pub data: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Clone, Default)]
@@ -294,7 +295,7 @@ impl Session {
                     let mut blocks = output_blocks(cell.outputs());
                     if phase == Some(&ExecutionPhase::Unknown) {
                         let message = "Connection lost or kernel restarted. Execution outcome is unknown; code was not retried.";
-                        blocks.push(OutputBlock { text: message.into(), execution_count: None });
+                        blocks.push(OutputBlock { text: message.into(), execution_count: None, data: None });
                     }
                     tx.send_replace(Update { count: cell.execution_count(), blocks, done, failed });
                     if done || tx.is_closed() { break; }
@@ -303,7 +304,7 @@ impl Session {
                 Ok::<(), String>(())
             }.await;
             if let Err(error) = result {
-                tx.send_replace(Update { blocks: vec![OutputBlock { text: error.clone(), execution_count: None }], done: true, failed: true, ..Default::default() });
+                tx.send_replace(Update { blocks: vec![OutputBlock { text: error.clone(), execution_count: None, data: None }], done: true, failed: true, ..Default::default() });
             }
         });
         rx
@@ -334,7 +335,13 @@ pub fn output_blocks(outputs: &[Output]) -> Vec<OutputBlock> {
             _ => None,
         };
         let text = output_text(std::slice::from_ref(output));
-        if text.is_empty() {
+        let data = match output {
+            Output::Known(
+                KnownOutput::ExecuteResult { data, .. } | KnownOutput::DisplayData { data, .. },
+            ) => Some(data.clone()),
+            _ => None,
+        };
+        if text.is_empty() && data.is_none() {
             continue;
         }
         // Stream messages can split a line arbitrarily; do not add row breaks.
@@ -350,6 +357,7 @@ pub fn output_blocks(outputs: &[Output]) -> Vec<OutputBlock> {
             blocks.push(OutputBlock {
                 text,
                 execution_count,
+                data,
             });
         }
         previous_stream = stream.filter(|_| !blocks.is_empty());
@@ -382,7 +390,7 @@ fn output_text(outputs: &[Output]) -> String {
                     }
                     text.push('\n');
                 } else {
-                    text.push_str("[Rich output — rendering not yet supported]\n");
+                    text.push_str("[Unsupported rich output]\n");
                 }
             }
             Output::Known(KnownOutput::Error {
@@ -397,15 +405,16 @@ fn output_text(outputs: &[Output]) -> String {
                 if traceback.is_empty() {
                     text.push_str(&format!("{ename}: {evalue}\n"));
                 } else {
-                    text.push_str(&strip_ansi(&traceback.join("\n")));
+                    text.push_str(&traceback.join("\n"));
                     text.push('\n');
                 }
             }
             Output::Unknown(_) => text.push_str("[Unsupported output]\n"),
         }
     }
-    strip_ansi(&text)
+    text
 }
+#[cfg(test)]
 fn strip_ansi(text: &str) -> String {
     let mut chars = text.chars().peekable();
     let mut result = String::new();
@@ -477,7 +486,7 @@ mod tests {
             let error =
                 completed(test_session.run(2, "raise ValueError('test error')".into())).await;
             assert!(error.failed);
-            assert!(error.text().contains("ValueError: test error"));
+            assert!(strip_ansi(&error.text()).contains("ValueError: test error"));
 
             let mut streaming = test_session.run(
                 3,
@@ -547,6 +556,11 @@ mod tests {
             assert!(!restarted.failed, "{}", restarted.text());
             assert_eq!(restarted.text(), "False\n");
             assert_eq!(restarted.count, Some(1));
+            let rich = completed(test_session.run(6, "from IPython.display import display, HTML\nh = display(HTML('<b>before</b>'), display_id=True)\nh.update(HTML('<b>after</b>'))\nprint('\\033[31mred\\033[0m')\n42".into())).await;
+            assert!(!rich.failed, "{}", rich.text());
+            assert!(rich.blocks.iter().any(|block| block.data.as_ref().and_then(|data| data.get("text/html")) == Some(&serde_json::json!("<b>after</b>"))));
+            assert!(rich.blocks.iter().any(|block| block.text.contains("\x1b[31mred")));
+            assert!(rich.blocks.iter().any(|block| block.execution_count == Some(2) && block.text == "42\n"));
         })
         .await;
         if controller.snapshot().session.is_some() {
@@ -781,15 +795,23 @@ mod tests {
             vec![
                 OutputBlock {
                     text: "foo\n".into(),
-                    execution_count: None
+                    execution_count: None,
+                    data: None
                 },
                 OutputBlock {
                     text: "42\n".into(),
-                    execution_count: Some(3)
+                    execution_count: Some(3),
+                    data: Some(
+                        serde_json::from_value(serde_json::json!({"text/plain":"42"})).unwrap()
+                    )
                 },
                 OutputBlock {
                     text: "displayed\n".into(),
-                    execution_count: None
+                    execution_count: None,
+                    data: Some(
+                        serde_json::from_value(serde_json::json!({"text/plain":"displayed"}))
+                            .unwrap()
+                    )
                 },
             ]
         );
@@ -808,6 +830,9 @@ mod tests {
             {"output_type":"execute_result","data":{"text/plain":"42"},"metadata":{},"execution_count":1},
             {"output_type":"error","ename":"ValueError","evalue":"bad","traceback":["\u{1b}[31mValueError: bad\u{1b}[0m"]}
         ])).unwrap();
-        assert_eq!(output_text(&outputs), "hello world\n42\nValueError: bad\n");
+        assert_eq!(
+            strip_ansi(&output_text(&outputs)),
+            "hello world\n42\nValueError: bad\n"
+        );
     }
 }

@@ -212,9 +212,23 @@ it reconnects to the existing session without executing code or resetting variab
 Failed/disconnected executions are never automatically replayed, and queued work
 is cancelled on disconnect. A new explicit Run can also reconnect.
 
-This first integration displays streaming stdout/stderr, plain-text results,
-and tracebacks. Rich outputs use their plain-text fallback where available.
-Interactive stdin is disabled. Save with the toolbar or ⌘S (Ctrl+S elsewhere).
+Notebook outputs render PNG/JPEG/GIF/WebP images (including plots), inert HTML
+and DataFrame tables, Markdown, LaTeX equations, and ANSI-styled streams/tracebacks.
+MIME selection prefers raster images, then HTML, LaTeX, Markdown, and plain text.
+Unsupported representations retain their text fallback; malformed images fall back
+where possible. Images are bounded to 32 MiB encoded content and 32 million pixels.
+HTML preview is bounded to 2 MiB, 2,048 blocks, and tables to 500 rows/64 columns;
+limited table/block previews show a notice. Original notebook MIME data is preserved
+when saving, including unsupported representations.
+
+Markdown cells open in preview. Double-click or select and press Enter to edit;
+Run or Shift+Enter renders the source again. Headings, emphasis, links, nested lists,
+fenced code, tables, embedded raster attachments, and LaTeX formulas are supported.
+Formulas currently occupy separate lines, including inline math; unsupported LaTeX
+shows its source. HTML is parsed into native controls: scripts, CSS, widgets, and
+remote images are not executed or fetched. Links open only on an explicit click
+and only for HTTP(S)/mailto destinations. This is a native subset rather than a
+browser-compatible HTML renderer. Interactive stdin is disabled. Save with the toolbar or ⌘S (Ctrl+S elsewhere).
 Saving preserves notebook/cell metadata, attachments, unknown fields, cell order,
 cell types, and full output payloads, including rich outputs not yet rendered.
 The unsaved dot tracks document revisions; edits or output received during a save
