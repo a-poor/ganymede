@@ -1367,25 +1367,32 @@ impl Workspace {
                                                                         )
                                                                 },
                                                             )
-                                                            .hover(|view| {
-                                                                view.bg(t.popover.accent)
-                                                                    .text_color(t.popover.accent_fg)
-                                                            })
                                                             .child(
                                                                 icon.svg()
                                                                     .size(px(14.))
-                                                                    .text_color(t.popover.fg),
+                                                                    .text_color(
+                                                                        if this.files_menu_index
+                                                                            == Some(index)
+                                                                        {
+                                                                            t.popover.accent_fg
+                                                                        } else {
+                                                                            t.popover.fg
+                                                                        },
+                                                                    ),
                                                             )
                                                             .child(label)
-                                                            .on_mouse_move(move |_, _, cx| {
+                                                            .on_hover(move |hovered, _, cx| {
                                                                 hover.update(cx, |this, cx| {
-                                                                    if this
-                                                                        .files_menu_index
-                                                                        .take()
-                                                                        .is_some()
+                                                                    if *hovered {
+                                                                        this.files_menu_index =
+                                                                            Some(index);
+                                                                    } else if this.files_menu_index
+                                                                        == Some(index)
                                                                     {
-                                                                        cx.notify();
+                                                                        this.files_menu_index =
+                                                                            None;
                                                                     }
+                                                                    cx.notify();
                                                                 });
                                                             })
                                                             .on_click(move |_, window, cx| {

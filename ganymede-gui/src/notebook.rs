@@ -286,6 +286,10 @@ impl Notebook {
                 return;
             };
             match event {
+                CellEvent::InputRequested => {
+                    this.reveal_cell = Some(index);
+                    this.select(index, cx);
+                }
                 CellEvent::Changed => {
                     this.find_dirty = true;
                     this.sync(cx);
@@ -1199,9 +1203,12 @@ impl Notebook {
                                         .when(index == self.type_menu_index, |s| {
                                             s.bg(t.popover.accent).text_color(t.popover.accent_fg)
                                         })
-                                        .hover(|s| {
-                                            s.bg(t.popover.accent).text_color(t.popover.accent_fg)
-                                        })
+                                        .on_hover(cx.listener(move |this, hovered, _, cx| {
+                                            if *hovered && this.type_menu_index != index {
+                                                this.type_menu_index = index;
+                                                cx.notify();
+                                            }
+                                        }))
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             cx.stop_propagation();
                                             this.choose_cell_type(kind, window, cx);

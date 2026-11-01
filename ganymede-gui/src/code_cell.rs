@@ -1,5 +1,6 @@
 //! A standalone, in-memory code cell. Notebook persistence and execution can be
 //! connected later without coupling the text-input machinery to a kernel.
+mod stdin_prompt;
 use std::{cell::RefCell, ops::Range, rc::Rc, time::Duration};
 
 use crate::theme::ActiveTheme;
@@ -206,6 +207,7 @@ fn from_utf16(text: &str, offset: usize) -> usize {
 
 #[derive(Clone, Copy)]
 pub enum CellEvent {
+    InputRequested,
     FocusNext,
     Changed,
     Duplicate,
@@ -238,12 +240,15 @@ pub struct CodeCell {
     count_hint: u64,
     kind: ganymede_core::notebook::CellKind,
     menu_open: bool,
+    menu_hovered: Option<usize>,
     execution_count: Option<u64>,
     running_frame: Option<usize>,
     queued: bool,
     output: Vec<crate::execution::OutputBlock>,
     rich_output: Vec<crate::rich::Rich>,
     markdown_preview: Option<crate::rich::Rich>,
+    input_prompt: Option<Entity<stdin_prompt::StdinPrompt>>,
+    input_return_focus: Option<FocusHandle>,
     image_session: Option<crate::execution::Session>,
     image_path: String,
     images: crate::image_loader::Images,
@@ -307,12 +312,15 @@ impl CodeCell {
             count_hint: 0,
             kind: ganymede_core::notebook::CellKind::Code,
             menu_open: false,
+            menu_hovered: None,
             execution_count: None,
             running_frame: None,
             queued: false,
             output: Vec::new(),
             rich_output: Vec::new(),
             markdown_preview: None,
+            input_prompt: None,
+            input_return_focus: None,
             image_session: None,
             image_path: String::new(),
             images: Default::default(),
@@ -578,8 +586,36 @@ impl CodeCell {
         cx.notify();
     }
 
+    fn set_pending_input(
+        &mut self,
+        input: Option<ganymede_core::notebook::PendingInput>,
+        session: &crate::execution::Session,
+        cx: &mut Context<Self>,
+    ) {
+        if self.input_prompt.as_ref().map(|p| p.read(cx).id.as_str())
+            == input.as_ref().map(|p| p.id.as_str())
+        {
+            return;
+        }
+        if let Some(previous) = self.input_prompt.take() {
+            self.input_return_focus = Some(previous.read(cx).focus_handle(cx));
+        }
+        if let Some(input) = input {
+            let prompt = cx.new(|cx| {
+                stdin_prompt::StdinPrompt::new(input, session.clone(), self.cell_focus.clone(), cx)
+            });
+            cx.observe(&prompt, |_, _, cx| cx.notify()).detach();
+            self.input_prompt = Some(prompt);
+            cx.emit(CellEvent::InputRequested);
+        }
+        cx.notify();
+    }
+
     pub fn clear_execution(&mut self, cx: &mut Context<Self>) {
         self.execution_task = Task::ready(());
+        if let Some(prompt) = self.input_prompt.take() {
+            self.input_return_focus = Some(prompt.read(cx).focus_handle(cx));
+        }
         self.execution_count = None;
         self.output.clear();
         self.rich_output.clear();
@@ -615,6 +651,11 @@ impl CodeCell {
                 let done = update.done;
                 if this
                     .update(cx, |this, cx| {
+                        this.set_pending_input(
+                            if done { None } else { update.input },
+                            &session,
+                            cx,
+                        );
                         this.execution_count = update.count;
                         this.set_output(update.blocks);
                         this.running_frame = if done {
@@ -981,6 +1022,11 @@ impl EntityInputHandler for CodeCell {
 
 impl Render for CodeCell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(focus) = self.input_return_focus.take()
+            && focus.is_focused(window)
+        {
+            self.cell_focus.focus(window, cx);
+        }
         self.load_images(cx);
         let theme = cx.theme();
         let surface = theme.card;
@@ -1296,10 +1342,16 @@ impl Render for CodeCell {
                     ("Delete", crate::icon::Icon::Trash, CellEvent::DeleteCell),
                 ]
                 .into_iter()
-                .map(|(label, icon, event)| {
+                .enumerate()
+                .map(|(index, (label, icon, event))| {
+                    let hovered = self.menu_hovered == Some(index);
+                    let fg = if hovered {
+                        popover.primary_fg
+                    } else {
+                        popover.fg
+                    };
                     div()
                         .id(label)
-                        .group(label)
                         .flex()
                         .items_center()
                         .gap_2()
@@ -1309,19 +1361,23 @@ impl Render for CodeCell {
                         .cursor_pointer()
                         .font_family(theme.font.sans.clone())
                         .text_size(theme.font.sm)
-                        .hover(|s| s.bg(surface.primary).text_color(surface.primary_fg))
+                        .text_color(fg)
+                        .when(hovered, |s| s.bg(popover.primary))
+                        .on_hover(cx.listener(move |this, hovered, _, cx| {
+                            if *hovered {
+                                this.menu_hovered = Some(index);
+                            } else if this.menu_hovered == Some(index) {
+                                this.menu_hovered = None;
+                            }
+                            cx.notify();
+                        }))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.menu_open = false;
                             cx.notify();
                             cx.emit(event);
                         }))
-                        .child(
-                            icon.svg()
-                                .size(px(16.))
-                                .text_color(popover.fg)
-                                .group_hover(label, |s| s.text_color(surface.primary_fg)),
-                        )
+                        .child(icon.svg().size(px(16.)).text_color(fg))
                         .child(label)
                 }),
             );
@@ -1350,6 +1406,7 @@ impl Render for CodeCell {
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     cx.stop_propagation();
+                                    this.menu_hovered = None;
                                     this.menu_open = true;
                                     cx.notify();
                                 }))
@@ -1539,6 +1596,14 @@ impl Render for CodeCell {
                                     )
                             }),
                         )),
+                )
+            })
+            .when_some(self.input_prompt.as_ref(), |cell, prompt| {
+                cell.child(
+                    div()
+                        .ml(gutter_width + px(39.))
+                        .mr(px(13.))
+                        .child(prompt.clone()),
                 )
             })
             .into_any_element()

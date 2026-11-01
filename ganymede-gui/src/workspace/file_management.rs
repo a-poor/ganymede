@@ -733,6 +733,8 @@ impl Workspace {
                                     let destructive = matches!(action, MenuAction::Delete);
                                     let fg = if destructive {
                                         t.dialog_destructive_fg
+                                    } else if menu.selected == Some(index) {
+                                        t.popover.accent_fg
                                     } else {
                                         t.popover.fg
                                     };
@@ -750,14 +752,16 @@ impl Workspace {
                                         .when(menu.selected == Some(index), |view| {
                                             view.bg(t.popover.accent)
                                         })
-                                        .hover(|view| view.bg(t.popover.accent))
                                         .child(icon.svg().size(px(14.)).text_color(fg))
                                         .child(label)
-                                        .on_mouse_move(move |_, _, cx| {
+                                        .on_hover(move |hovered, _, cx| {
                                             hover.update(cx, |this, cx| {
-                                                if let Some(menu) = &mut this.file_menu
-                                                    && menu.selected.take().is_some()
-                                                {
+                                                if let Some(menu) = &mut this.file_menu {
+                                                    if *hovered {
+                                                        menu.selected = Some(index);
+                                                    } else if menu.selected == Some(index) {
+                                                        menu.selected = None;
+                                                    }
                                                     cx.notify();
                                                 }
                                             });

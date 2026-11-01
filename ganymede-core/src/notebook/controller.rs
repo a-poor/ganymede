@@ -637,7 +637,12 @@ impl NotebookController {
                 .session
                 .clone()
                 .ok_or_else(|| Error::Unavailable("no session".into()))?;
-            Ok(this.inner.rest.interrupt_kernel(&session.kernel.id).await?)
+            this.inner.rest.interrupt_kernel(&session.kernel.id).await?;
+            let mut data = this.inner.data.lock().unwrap();
+            data.state.snapshot.pending_inputs.clear();
+            data.state.input_messages.clear();
+            this.inner.publish(&mut data, vec![]);
+            Ok(())
         })
         .await
     }

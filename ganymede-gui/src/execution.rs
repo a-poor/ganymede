@@ -99,6 +99,7 @@ pub struct Update {
     pub blocks: Vec<OutputBlock>,
     pub done: bool,
     pub failed: bool,
+    pub input: Option<ganymede_core::notebook::PendingInput>,
 }
 #[cfg(test)]
 impl Update {
@@ -284,7 +285,7 @@ impl Session {
                     }
                 };
                 let mut snapshots = controller.watch();
-                controller.run_cell_source(&id, source, false).await.map_err(|e| e.to_string())?;
+                controller.run_cell_source(&id, source, true).await.map_err(|e| e.to_string())?;
                 drop(submission);
                 loop {
                     let snapshot = snapshots.borrow_and_update().clone();
@@ -297,7 +298,8 @@ impl Session {
                         let message = "Connection lost or kernel restarted. Execution outcome is unknown; code was not retried.";
                         blocks.push(OutputBlock { text: message.into(), execution_count: None, data: None });
                     }
-                    tx.send_replace(Update { count: cell.execution_count(), blocks, done, failed });
+                    let input = snapshot.pending_inputs.values().find(|input| input.cell_id == id).cloned();
+                    tx.send_replace(Update { count: cell.execution_count(), blocks, done, failed, input });
                     if done || tx.is_closed() { break; }
                     snapshots.changed().await.map_err(|_| "Kernel connection ended".to_owned())?;
                 }
@@ -308,6 +310,29 @@ impl Session {
             }
         });
         rx
+    }
+    pub fn input_generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+    pub fn reply_input(
+        &self,
+        id: String,
+        value: String,
+        generation: u64,
+    ) -> tokio::task::JoinHandle<Result<(), String>> {
+        let this = self.clone();
+        self.handle.spawn(async move {
+            let _submission = this.submission.lock().await;
+            if this.input_generation() != generation {
+                return Err("Input request was cancelled".into());
+            }
+            this.controller
+                .as_ref()
+                .map_err(Clone::clone)?
+                .reply_input(id, value)
+                .await
+                .map_err(|_| "Could not send input; the request may no longer be active".into())
+        })
     }
     pub fn control(&self, restart: bool) -> tokio::task::JoinHandle<Result<(), String>> {
         self.generation.fetch_add(1, Ordering::SeqCst);
@@ -568,6 +593,76 @@ mod tests {
                 .shutdown_session()
                 .await
                 .expect("delete test session");
+        }
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the Jupyter server configured in .env"]
+    async fn live_stdin_repeated_password_interrupt_restart_and_disconnect() {
+        async fn prompt(
+            updates: &mut watch::Receiver<Update>,
+        ) -> ganymede_core::notebook::PendingInput {
+            tokio::time::timeout(std::time::Duration::from_secs(20), async {
+                loop {
+                    let update = updates.borrow_and_update().clone();
+                    assert!(!update.done, "execution ended before prompt");
+                    if let Some(input) = update.input {
+                        return input;
+                    }
+                    updates.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap()
+        }
+        let runtime = Runtime::new(Handle::current());
+        let controller = NotebookController::new(
+            runtime.config.clone().unwrap(),
+            format!("ganymede-stdin-test-{}.ipynb", uuid::Uuid::new_v4()),
+            NotebookDocument::new(),
+        )
+        .unwrap();
+        let session = Session::from_controller(controller.clone(), &runtime);
+        let result = tokio::spawn(async move {
+            let mut run = session.run(1, "name = input('Name: ')\nimport getpass\nsecret = getpass.getpass('Password: ')\nempty = input('Empty: ')\nprint(name, len(secret), len(empty))".into());
+            let first = prompt(&mut run).await;
+            assert!(!first.password);
+            let epoch = session.input_generation();
+            session.reply_input(first.id.clone(), "Renée".into(), epoch).await.unwrap().unwrap();
+            assert!(session.reply_input(first.id, "duplicate".into(), epoch).await.unwrap().is_err());
+            // The watch channel may still contain the previous request until its next update.
+            run.changed().await.unwrap();
+            let password = prompt(&mut run).await;
+            assert!(password.password);
+            session.reply_input(password.id, "private-😀".into(), epoch).await.unwrap().unwrap();
+            run.changed().await.unwrap();
+            let empty = prompt(&mut run).await;
+            assert!(!empty.password);
+            session.reply_input(empty.id, String::new(), epoch).await.unwrap().unwrap();
+            let done = completed(run).await;
+            assert!(!done.failed);
+            assert!(done.text().contains("Renée 9 0"));
+            assert!(done.input.is_none());
+            assert!(!session.document().to_json().to_string().contains("private-"));
+            for restart in [false, true] {
+                let mut run = session.run(2, "input('Wait: ')".into());
+                let pending = prompt(&mut run).await;
+                let epoch = session.input_generation();
+                session.control(restart).await.unwrap().unwrap();
+                assert!(session.controller().snapshot().pending_inputs.is_empty());
+                assert!(session.reply_input(pending.id, "stale".into(), epoch).await.unwrap().is_err());
+                assert!(completed(run).await.input.is_none());
+            }
+            let mut run = session.run(3, "input('Disconnect: ')".into());
+            prompt(&mut run).await;
+            session.controller().disconnect().await.unwrap();
+            let done = completed(run).await;
+            assert!(done.failed);
+            assert!(done.input.is_none());
+        }).await;
+        if controller.snapshot().session.is_some() {
+            controller.shutdown_session().await.unwrap();
         }
         result.unwrap();
     }

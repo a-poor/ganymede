@@ -260,7 +260,16 @@ loads show an inline placeholder. SVG and data URLs are not supported.
 Formulas currently occupy separate lines, including inline math; unsupported LaTeX
 shows its source. HTML is parsed into native controls; scripts, CSS, and widgets are not executed. Links open only on an explicit click
 and only for HTTP(S)/mailto destinations. This is a native subset rather than a
-browser-compatible HTML renderer. Interactive stdin is disabled. Save with the toolbar or ⌘S (Ctrl+S elsewhere).
+browser-compatible HTML renderer.
+
+Interactive `input()` and password requests appear beneath the executing cell.
+Enter submits the value; repeated prompts reuse that area. Passwords are masked,
+excluded from copying, and kept out of notebook content and output history by the
+UI (kernel code can still print any value it receives). Replies are sent once for
+the matching request; stale requests after interruption/restart are rejected.
+Prompts disappear on completion, interruption, restart, or disconnect. Escape
+returns focus to the cell without answering; use Interrupt Kernel to cancel.
+Save with the toolbar or ⌘S (Ctrl+S elsewhere).
 Saving preserves notebook/cell metadata, attachments, unknown fields, cell order,
 cell types, and full output payloads, including rich outputs not yet rendered.
 The unsaved dot tracks document revisions; edits or output received during a save
