@@ -35,6 +35,7 @@ actions!(
         SelectCell,
         EditCell,
         Tab,
+        Outdent,
         Copy,
         Cut,
         Paste,
@@ -68,6 +69,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("enter", Enter, context),
         KeyBinding::new("shift-enter", RunAndAdvance, context),
         KeyBinding::new("tab", Tab, context),
+        KeyBinding::new("shift-tab", Outdent, context),
     ]);
     let modifier = if cfg!(target_os = "macos") {
         "cmd"
@@ -100,6 +102,47 @@ struct Buffer {
 }
 
 impl Buffer {
+    fn indented(&self, outdent: bool) -> Self {
+        let mut result = self.clone();
+        let selection = self.selection();
+        let first = self.text[..selection.start]
+            .rfind('\n')
+            .map_or(0, |i| i + 1);
+        let mut edits = vec![];
+        let mut start = first;
+        loop {
+            let line = &self.text[start..];
+            let remove = if outdent {
+                if line.starts_with('\t') {
+                    1
+                } else {
+                    line.bytes().take(4).take_while(|b| *b == b' ').count()
+                }
+            } else {
+                0
+            };
+            edits.push((start, remove));
+            let Some(next) = line.find('\n').map(|i| start + i + 1) else {
+                break;
+            };
+            // A selection ending at the next line's start excludes that line.
+            if next >= selection.end {
+                break;
+            }
+            start = next;
+        }
+        for (start, remove) in edits.into_iter().rev() {
+            let insert = if outdent { "" } else { "    " };
+            result.text.replace_range(start..start + remove, insert);
+            for position in [&mut result.anchor, &mut result.head] {
+                if *position >= start {
+                    *position = start + (*position - start).saturating_sub(remove) + insert.len();
+                }
+            }
+        }
+        result
+    }
+
     fn selection(&self) -> Range<usize> {
         self.anchor.min(self.head)..self.anchor.max(self.head)
     }
@@ -199,6 +242,7 @@ pub struct CodeCell {
     attachments: serde_json::Map<String, serde_json::Value>,
     execution_task: Task<()>,
     buffer: Buffer,
+    syntax: RefCell<crate::syntax::Cache>,
     focus: FocusHandle,
     cell_focus: FocusHandle,
     marked: Option<Range<usize>>,
@@ -257,6 +301,7 @@ impl CodeCell {
             attachments: Default::default(),
             execution_task: Task::ready(()),
             buffer: Buffer::default(),
+            syntax: RefCell::default(),
             focus,
             cell_focus,
             marked: None,
@@ -481,6 +526,23 @@ impl CodeCell {
             }
         });
         cx.notify();
+    }
+
+    fn python_code(&self) -> bool {
+        !self.document && !self.filter_input && self.kind == ganymede_core::notebook::CellKind::Code
+    }
+
+    fn indent(&mut self, outdent: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_composition();
+        let next = self.buffer.indented(outdent);
+        if next == self.buffer {
+            return;
+        }
+        self.edit(0..self.buffer.text.len(), &next.text);
+        self.buffer.anchor = next.anchor;
+        self.buffer.head = next.head;
+        cx.emit(CellEvent::Changed);
+        self.changed(window, cx);
     }
 
     fn changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -884,7 +946,15 @@ impl Render for CodeCell {
             }))
             .on_action(cx.listener(|this, _: &Backspace, w, cx| {
                 if this.buffer.selection().is_empty() {
-                    this.buffer.anchor = this.buffer.previous();
+                    let prefix = &this.buffer.text[this.buffer.line_start()..this.buffer.head];
+                    this.buffer.anchor = if !this.filter_input
+                        && !prefix.is_empty()
+                        && prefix.bytes().all(|b| b == b' ')
+                    {
+                        this.buffer.head - ((prefix.len() - 1) % 4 + 1)
+                    } else {
+                        this.buffer.previous()
+                    };
                 }
                 this.replace_text_in_range(None, "", w, cx);
             }))
@@ -901,11 +971,9 @@ impl Render for CodeCell {
                     }
                     return;
                 }
-                let indent: String = this.buffer.text[this.buffer.line_start()..this.buffer.head]
-                    .chars()
-                    .take_while(|c| *c == ' ')
-                    .collect();
-                this.replace_text_in_range(None, &format!("\n{indent}"), w, cx);
+                let offset = this.buffer.selection().start;
+                let newline = crate::syntax::newline(&this.buffer.text, offset, this.python_code());
+                this.replace_text_in_range(None, &newline, w, cx);
             }))
             .on_action(cx.listener(|this, _: &Tab, w, cx| {
                 if this.name_input {
@@ -913,7 +981,27 @@ impl Render for CodeCell {
                 } else if this.filter_input {
                     w.focus_next(cx);
                 } else {
-                    this.replace_text_in_range(None, "    ", w, cx);
+                    if this.buffer.selection().is_empty() {
+                        let column = this.buffer.text[this.buffer.line_start()..this.buffer.head]
+                            .chars()
+                            .fold(0, |col, ch| {
+                                if ch == '\t' {
+                                    col + 4 - col % 4
+                                } else {
+                                    col + 1
+                                }
+                            });
+                        this.replace_text_in_range(None, &" ".repeat(4 - column % 4), w, cx);
+                    } else {
+                        this.indent(false, w, cx);
+                    }
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Outdent, w, cx| {
+                if this.filter_input {
+                    w.focus_prev(cx);
+                } else {
+                    this.indent(true, w, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &RunAndAdvance, window, cx| {
@@ -1347,6 +1435,12 @@ impl Element for CellText {
         let line_height = window.line_height();
         let font_id = window.text_system().resolve_font(&style.font());
         let cap_height = window.text_system().cap_height(font_id, font_size);
+        let highlights = if cell.python_code() {
+            cell.syntax.borrow_mut().get(&cell.buffer.text)
+        } else {
+            Rc::new(vec![])
+        };
+        let colors = cx.theme().syntax;
         let text = cell.buffer.text.clone();
         let marked = cell.marked.clone();
         let wrap = !cell.document && !cell.filter_input;
@@ -1399,33 +1493,23 @@ impl Element for CellText {
                             underline: None,
                             strikethrough: None,
                         };
-                        let mut runs = vec![base.clone()];
-                        if let Some(marked) = &marked {
-                            let left = marked.start.saturating_sub(start).min(text.len());
-                            let right = marked.end.saturating_sub(start).min(text.len());
-                            if left < right {
-                                runs = vec![
-                                    TextRun {
-                                        len: left,
-                                        ..base.clone()
-                                    },
-                                    TextRun {
-                                        len: right - left,
-                                        underline: Some(UnderlineStyle {
-                                            color: Some(style.color),
-                                            thickness: px(1.),
-                                            wavy: false,
-                                        }),
-                                        ..base.clone()
-                                    },
-                                    TextRun {
-                                        len: text.len() - right,
-                                        ..base
-                                    },
-                                ];
-                                runs.retain(|r| r.len > 0);
-                            }
-                        }
+                        let runs: Vec<_> = crate::syntax::segments(
+                            start..start + text.len(),
+                            &highlights,
+                            marked.as_ref(),
+                        )
+                        .into_iter()
+                        .map(|(range, syntax, composing)| TextRun {
+                            len: range.len(),
+                            color: syntax.map_or(base.color, |index| colors[index]),
+                            underline: composing.then_some(UnderlineStyle {
+                                color: Some(base.color),
+                                thickness: px(1.),
+                                wavy: false,
+                            }),
+                            ..base.clone()
+                        })
+                        .collect();
 
                         lines.push(window.text_system().shape_line(
                             text.to_owned().into(),
@@ -1560,6 +1644,42 @@ impl Element for CellText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indentation_preserves_reversed_selection_and_excludes_next_line() {
+        let buffer = Buffer {
+            text: "é = 1\nprint(é)\nlast".into(),
+            anchor: 17,
+            head: 0,
+        };
+        // Use the exact byte start of the third line.
+        let buffer = Buffer {
+            anchor: buffer.text.find("last").unwrap(),
+            ..buffer
+        };
+        let indented = buffer.indented(false);
+        assert_eq!(indented.text, "    é = 1\n    print(é)\nlast");
+        assert!(indented.anchor > indented.head);
+        assert_eq!(indented.indented(true), buffer);
+    }
+
+    #[test]
+    fn outdent_removes_one_tab_or_up_to_four_spaces() {
+        let buffer = Buffer {
+            text: "\tx\n  y\n    z".into(),
+            anchor: 0,
+            head: 13,
+        };
+        let buffer = Buffer {
+            head: buffer.text.len(),
+            ..buffer
+        };
+        let result = buffer.indented(true);
+        assert_eq!(result.text, "x\ny\nz");
+        assert_eq!(result.head, result.text.len());
+        assert_eq!(result.anchor, 0);
+        assert_eq!(result.indented(true), result);
+    }
 
     #[test]
     fn visual_rows_map_soft_boundaries_and_newlines_without_changing_source_offsets() {

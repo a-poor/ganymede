@@ -212,6 +212,15 @@ it reconnects to the existing session without executing code or resetting variab
 Failed/disconnected executions are never automatically replayed, and queued work
 is cancelled on disconnect. A new explicit Run can also reconnect.
 
+Notebook cell editors soft-wrap and grow vertically with their source. Code cells
+use Python Tree-sitter syntax highlighting, cached until their source changes;
+cells over 256 KiB fall back to plain text. Markdown/Raw cells and standalone text
+files remain unhighlighted. Tab inserts spaces to the next four-column stop, or
+indents selected lines; Shift+Tab outdents. Enter preserves leading whitespace
+and, in Code cells, indents Python block headers and bracket continuations.
+Backspace in leading spaces removes one indentation step. Block indentation is
+one undoable edit and retains the selection direction.
+
 Notebook outputs render PNG/JPEG/GIF/WebP images (including plots), inert HTML
 and DataFrame tables, Markdown, LaTeX equations, and ANSI-styled streams/tracebacks.
 MIME selection prefers raster images, then HTML, LaTeX, Markdown, and plain text.

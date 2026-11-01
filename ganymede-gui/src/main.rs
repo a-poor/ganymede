@@ -7,6 +7,7 @@ pub mod icon;
 mod notebook;
 mod rich;
 mod settings;
+mod syntax;
 mod text_file;
 pub mod theme;
 pub mod toast;

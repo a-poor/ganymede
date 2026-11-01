@@ -259,6 +259,7 @@ impl Default for Derivation {
 #[derive(Clone, Debug)]
 pub struct Theme {
     pub is_dark: bool,
+    pub syntax: [Hsla; 8],
 
     pub app: Surface,
     pub card: Surface,
@@ -416,6 +417,18 @@ impl ThemeSpec {
 
         Theme {
             is_dark: self.is_dark,
+            // keyword, string, comment, number, function, type, constant, operator
+            syntax: if self.is_dark {
+                [
+                    0xc4a7e7, 0xa6da95, 0x9aa5b5, 0xf5a97f, 0x8aadf4, 0x8bd5ca, 0xf5a97f, 0xc4a7e7,
+                ]
+                .map(|c| gpui::rgb(c).into())
+            } else {
+                [
+                    0x7533a5, 0x27632e, 0x626b78, 0x985000, 0x2355a0, 0x006b68, 0x985000, 0x7533a5,
+                ]
+                .map(|c| gpui::rgb(c).into())
+            },
 
             primary_hover: state_shift(self.primary, app.bg, d.hover_shift),
             primary_active: state_shift(self.primary, app.bg, d.active_shift),
@@ -704,6 +717,12 @@ mod tests {
         for (label, bg, fg) in pairs {
             let ratio = contrast(*bg, *fg);
             assert!(ratio >= 4.5, "{name}: {label} contrast {ratio:.2} < 4.5");
+        }
+        for color in theme.syntax {
+            assert!(
+                contrast(theme.card.bg, color) >= 4.5,
+                "{name}: syntax contrast"
+            );
         }
         // Borders need to be visible, not readable.
         assert!(
