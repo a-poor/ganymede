@@ -3,6 +3,7 @@ mod autosave;
 mod code_cell;
 mod confirm;
 mod execution;
+mod find;
 pub mod icon;
 mod notebook;
 mod rich;
@@ -440,6 +441,7 @@ fn main() {
             confirm::init(cx);
             assets::register_fonts(cx).expect("failed to register embedded fonts");
             code_cell::init(cx);
+            notebook::init(cx);
             let quit_key = if cfg!(target_os = "macos") {
                 "cmd-q"
             } else {

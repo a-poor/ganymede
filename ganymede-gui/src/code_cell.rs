@@ -230,6 +230,11 @@ pub struct CodeCell {
     document: bool,
     filter_input: bool,
     name_input: bool,
+    search_input: bool,
+    search_matches: Vec<Range<usize>>,
+    search_active: Option<Range<usize>>,
+    search_preview: bool,
+    reveal_search: bool,
     count_hint: u64,
     kind: ganymede_core::notebook::CellKind,
     menu_open: bool,
@@ -290,6 +295,11 @@ impl CodeCell {
             document: false,
             filter_input: false,
             name_input: false,
+            search_input: false,
+            search_matches: vec![],
+            search_active: None,
+            search_preview: false,
+            reveal_search: false,
             count_hint: 0,
             kind: ganymede_core::notebook::CellKind::Code,
             menu_open: false,
@@ -337,6 +347,56 @@ impl CodeCell {
         this.buffer.head = this.buffer.text.len();
         this
     }
+    pub fn new_search(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut this = Self::new_name_input(String::new(), window, cx);
+        this.search_input = true;
+        this
+    }
+
+    pub fn select_all_input(&mut self, cx: &mut Context<Self>) {
+        self.buffer.anchor = 0;
+        self.buffer.head = self.buffer.text.len();
+        cx.notify();
+    }
+
+    pub fn selected_text(&self) -> &str {
+        &self.buffer.text[self.buffer.selection()]
+    }
+
+    pub fn finish_find(&mut self, range: &Range<usize>, cx: &mut Context<Self>) {
+        if range.end <= self.buffer.text.len()
+            && self.buffer.text.is_char_boundary(range.start)
+            && self.buffer.text.is_char_boundary(range.end)
+        {
+            self.buffer.anchor = range.start;
+            self.buffer.head = range.end;
+            cx.notify();
+        }
+    }
+
+    pub fn set_search(
+        &mut self,
+        matches: Vec<Range<usize>>,
+        active: Option<Range<usize>>,
+        reveal: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.search_matches == matches && self.search_active == active && !reveal {
+            return;
+        }
+        self.search_matches = matches;
+        self.search_active = active;
+        self.reveal_search = reveal;
+        if self.search_active.is_some() && self.markdown_preview.is_some() {
+            self.search_preview = true;
+            self.markdown_preview = None;
+        } else if self.search_active.is_none() && self.search_preview {
+            self.search_preview = false;
+            self.preview_markdown(cx);
+        }
+        cx.notify();
+    }
+
     pub fn new_filter(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut this = Self::new(window, cx);
         this.filter_input = true;
@@ -891,6 +951,9 @@ impl Render for CodeCell {
         let cell_padding = px(4.);
         let editor = div()
             .id("code-cell")
+            .when(self.search_input, |view| {
+                view.aria_label("Find in notebook source")
+            })
             .flex_1()
             .min_w_0()
             .flex_shrink_0()
@@ -972,7 +1035,9 @@ impl Render for CodeCell {
             }))
             .on_action(cx.listener(|this, _: &Enter, w, cx| {
                 if this.filter_input {
-                    if this.name_input {
+                    if this.search_input {
+                        cx.emit(CellEvent::MoveDown);
+                    } else if this.name_input {
                         cx.emit(CellEvent::RunAndAdvance);
                     }
                     return;
@@ -1011,7 +1076,9 @@ impl Render for CodeCell {
                 }
             }))
             .on_action(cx.listener(|this, _: &RunAndAdvance, window, cx| {
-                if this.document {
+                if this.search_input {
+                    cx.emit(CellEvent::MoveUp);
+                } else if this.document {
                     this.replace_text_in_range(None, "\n", window, cx);
                 } else if !this.filter_input {
                     cx.emit(CellEvent::RunAndAdvance);
@@ -1077,19 +1144,35 @@ impl Render for CodeCell {
                         .py(px(4.))
                         .pr_2()
                         .font_family(theme.font.sans.clone())
-                        .text_size(theme.font.xs),
+                        .text_size(theme.font.xs)
+                        .when(self.search_input, |view| {
+                            view.border_0()
+                                .bg(theme.popover.bg)
+                                .text_color(theme.popover.fg)
+                        }),
                 )
-                .when(self.buffer.text.is_empty() && !self.name_input, |view| {
-                    view.child(
-                        div()
-                            .absolute()
-                            .left(px(9.))
-                            .top(px(5.))
-                            .text_size(theme.font.xs)
-                            .text_color(surface.muted_fg)
-                            .child("Filter files…"),
-                    )
-                })
+                .when(
+                    self.buffer.text.is_empty() && (!self.name_input || self.search_input),
+                    |view| {
+                        view.child(
+                            div()
+                                .absolute()
+                                // Match the editor's padding, border, font, and
+                                // line box so placeholder and caret share a baseline.
+                                .left(px(if self.search_input { 8. } else { 9. }))
+                                .top(px(if self.search_input { 4. } else { 5. }))
+                                .font_family(theme.font.sans.clone())
+                                .text_size(theme.font.xs)
+                                .line_height(theme.font.line_height_tight)
+                                .text_color(surface.muted_fg)
+                                .child(if self.search_input {
+                                    "Find in cell source…"
+                                } else {
+                                    "Filter files…"
+                                }),
+                        )
+                    },
+                )
                 .into_any_element();
         }
         if self.document {
@@ -1451,6 +1534,7 @@ struct Layout {
     size: gpui::Size<Pixels>,
     line_height: Pixels,
     cap_height: Pixels,
+    empty_baseline: Pixels,
 }
 struct Prepaint {
     visible: Range<usize>,
@@ -1487,6 +1571,14 @@ impl Element for CellText {
         let line_height = window.line_height();
         let font_id = window.text_system().resolve_font(&style.font());
         let cap_height = window.text_system().cap_height(font_id, font_size);
+        // Native font metrics and shaped-line metrics can use different descent
+        // conventions. Measure a glyph through the same path as typed text.
+        let caret_metrics =
+            window
+                .text_system()
+                .shape_line("M".into(), font_size, &[style.to_run(1)], None);
+        let empty_baseline = (line_height - caret_metrics.ascent - caret_metrics.descent) / 2.
+            + caret_metrics.ascent;
         let highlights = if cell.python_code() {
             cell.syntax.borrow_mut().get(&cell.buffer.text)
         } else {
@@ -1519,6 +1611,7 @@ impl Element for CellText {
             size: size(px(0.), px(0.)),
             line_height,
             cap_height,
+            empty_baseline,
         })));
         let measured = state.clone();
         let mut layout_style = Style::default();
@@ -1609,6 +1702,7 @@ impl Element for CellText {
                     size: size(width, height),
                     line_height,
                     cap_height,
+                    empty_baseline,
                 });
                 layouts.borrow_mut().insert(key, layout.clone());
                 *measured.borrow_mut() = layout;
@@ -1642,6 +1736,31 @@ impl Element for CellText {
             let line = &layout.lines[row];
             let start = layout.starts[row];
             let end = start + line.len();
+            let first = cell
+                .search_matches
+                .partition_point(|range| range.end <= start);
+            for range in cell.search_matches[first..]
+                .iter()
+                .take_while(|range| range.start < end)
+            {
+                let left = line.x_for_index(range.start.saturating_sub(start));
+                let right = line.x_for_index(range.end.min(end) - start);
+                let active = cell.search_active.as_ref() == Some(range);
+                selection.push(fill(
+                    Bounds::new(
+                        point(
+                            bounds.left() + left,
+                            bounds.top() + layout.line_height * row as f32,
+                        ),
+                        size(right - left, layout.line_height),
+                    ),
+                    if active {
+                        theme.find_active
+                    } else {
+                        theme.find_match
+                    },
+                ));
+            }
             if selected.start <= end && selected.end > start && !selected.is_empty() {
                 let left = line.x_for_index(selected.start.saturating_sub(start).min(line.len()));
                 let right = if selected.end > end {
@@ -1661,12 +1780,32 @@ impl Element for CellText {
                 ));
             }
         }
+        if cell.reveal_search
+            && let Some(range) = &cell.search_active
+        {
+            let (row, col) = visual_position(&layout.starts, range.start);
+            if let Some(line) = layout.lines.get(row) {
+                window.request_autoscroll(Bounds::new(
+                    point(
+                        bounds.left() + line.x_for_index(col),
+                        bounds.top() + layout.line_height * row as f32,
+                    ),
+                    size(gpui::px(2.), layout.line_height),
+                ));
+            }
+        }
         let (row, col) = visual_position(&layout.starts, cell.buffer.head);
         let cursor =
             (cell.cursor_visible && selected.is_empty() && visible.contains(&row)).then(|| {
                 let line = &layout.lines[row];
                 // Match the baseline used by ShapedLine::paint, excluding line leading.
-                let baseline = (layout.line_height - line.ascent - line.descent) / 2. + line.ascent;
+                // An empty line has no styled runs, so its shaped ascent and
+                // descent are zero. Use the shaped reference glyph in that case.
+                let baseline = if line.len() == 0 {
+                    layout.empty_baseline
+                } else {
+                    (layout.line_height - line.ascent - line.descent) / 2. + line.ascent
+                };
                 let caret_overhang = px(2.);
                 fill(
                     Bounds::new(
@@ -1728,6 +1867,7 @@ impl Element for CellText {
             window.paint_quad(cursor);
         }
         self.cell.update(cx, |cell, _| {
+            cell.reveal_search = false;
             cell.lines = layout.lines.clone();
             cell.starts = layout.starts.clone();
             cell.bounds = Some(bounds);
@@ -1739,6 +1879,112 @@ impl Element for CellText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn empty_search_input_uses_the_same_baseline_as_typed_text(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let cell = cx.update(|window, cx| {
+            cx.set_global(
+                crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+            );
+            crate::assets::register_fonts(cx).unwrap();
+            cx.new(|cx| CodeCell::new_search(window, cx))
+        });
+        cx.draw(point(px(0.), px(0.)), size(px(240.), px(30.)), |_, _| {
+            cell.clone().into_any_element()
+        });
+        let empty_baseline = cx.update(|_, cx| {
+            let cell = cell.read(cx);
+            let cache = cell.text_layouts.borrow();
+            let layout = &cache.entries.last().unwrap().1;
+            assert_eq!(layout.lines[0].len(), 0);
+            layout.empty_baseline
+        });
+        cx.update(|_, cx| cell.update(cx, |cell, cx| cell.set_text("Search".into(), cx)));
+        cx.draw(point(px(0.), px(0.)), size(px(240.), px(30.)), |_, _| {
+            cell.clone().into_any_element()
+        });
+        cx.update(|_, cx| {
+            let cell = cell.read(cx);
+            let cache = cell.text_layouts.borrow();
+            let layout = &cache.entries.last().unwrap().1;
+            let line = &layout.lines[0];
+            let baseline = (layout.line_height - line.ascent - line.descent) / 2. + line.ascent;
+            assert!((baseline - empty_baseline).abs() < px(0.01));
+        });
+    }
+
+    #[gpui::test]
+    fn find_reveals_a_match_deep_inside_a_virtualized_cell_without_editing_source(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let source = format!("{}needle", "value = 1\n".repeat(200));
+        let start = source.find("needle").unwrap();
+        let cell = cx.update(|window, cx| {
+            cx.set_global(
+                crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+            );
+            crate::assets::register_fonts(cx).unwrap();
+            cx.new(|cx| {
+                let mut cell = CodeCell::new(window, cx);
+                cell.set_text(source.clone(), cx);
+                cell.set_search(
+                    std::iter::once(start..start + 6).collect(),
+                    Some(start..start + 6),
+                    true,
+                    cx,
+                );
+                cell
+            })
+        });
+        let state = gpui::ListState::new(1, gpui::ListAlignment::Top, px(0.));
+        struct TestView {
+            cell: Entity<CodeCell>,
+            state: gpui::ListState,
+        }
+        impl Render for TestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let cell = self.cell.clone();
+                gpui::list(self.state.clone(), move |_, _, _| {
+                    cell.clone().into_any_element()
+                })
+                .w_full()
+                .h_full()
+            }
+        }
+        cx.draw(point(px(0.), px(0.)), size(px(600.), px(300.)), |_, cx| {
+            cx.new(|_| TestView {
+                cell: cell.clone(),
+                state: state.clone(),
+            })
+            .into_any_element()
+        });
+        assert!(state.logical_scroll_top().offset_in_item > px(1000.));
+        cx.update(|_, cx| {
+            cell.update(cx, |cell, cx| {
+                assert_eq!(cell.text(), source);
+                assert!(cell.undo.is_empty());
+                cell.finish_find(&(start..start + 6), cx);
+                cell.set_search(vec![], None, false, cx);
+                assert_eq!(cell.selected_text(), "needle");
+                assert!(cell.search_matches.is_empty());
+                cell.set_kind(ganymede_core::notebook::CellKind::Markdown, cx);
+                cell.preview_markdown(cx);
+                assert!(cell.markdown_preview.is_some());
+                cell.set_search(
+                    std::iter::once(start..start + 6).collect(),
+                    Some(start..start + 6),
+                    true,
+                    cx,
+                );
+                assert!(cell.markdown_preview.is_none());
+                cell.set_search(vec![], None, false, cx);
+                assert!(cell.markdown_preview.is_some());
+                assert_eq!(cell.text(), source);
+            });
+        });
+    }
 
     #[test]
     fn scroll_layout_cache_reuses_geometry_and_invalidates_visual_inputs() {
@@ -1757,6 +2003,7 @@ mod tests {
             size: size(px(500.), px(20.)),
             line_height: px(20.),
             cap_height: px(10.),
+            empty_baseline: px(15.),
         });
         let mut cache = TextLayouts::default();
         cache.insert(key.clone(), layout.clone());

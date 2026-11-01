@@ -212,6 +212,14 @@ it reconnects to the existing session without executing code or resetting variab
 Failed/disconnected executions are never automatically replayed, and queued work
 is cancelled on disconnect. A new explicit Run can also reconnect.
 
+Find within a notebook with ⌘F (Ctrl+F elsewhere). The compact find bar searches
+Code, Markdown, and Raw cell source using case-insensitive literal matching;
+outputs are excluded. Enter/Shift+Enter navigate with wraparound, and Escape closes
+the bar and returns focus to the current cell. Matches are highlighted across soft
+wraps, including in offscreen cells. Markdown temporarily shows source for the
+active match and returns to preview afterward. Query changes are debounced and
+matched in the background; edits update results without jumping the scroll position.
+
 Notebook scrolling uses a variable-height virtual list: only viewport cells, a
 small overscan region, and an offscreen focused cell are rendered. Cell entities
 and their edit/execution state stay alive. Edits and streaming outputs invalidate

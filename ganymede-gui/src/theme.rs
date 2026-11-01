@@ -260,6 +260,8 @@ impl Default for Derivation {
 pub struct Theme {
     pub is_dark: bool,
     pub syntax: [Hsla; 8],
+    pub find_match: Hsla,
+    pub find_active: Hsla,
 
     pub app: Surface,
     pub card: Surface,
@@ -417,6 +419,8 @@ impl ThemeSpec {
 
         Theme {
             is_dark: self.is_dark,
+            find_match: alpha(self.ring, 0.18),
+            find_active: alpha(self.ring, 0.38),
             // keyword, string, comment, number, function, type, constant, operator
             syntax: if self.is_dark {
                 [

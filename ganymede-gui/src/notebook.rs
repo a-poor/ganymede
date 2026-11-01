@@ -7,6 +7,19 @@ use ganymede_core::notebook::CellKind;
 
 use crate::code_cell::{CellEvent, CodeCell};
 
+gpui::actions!(notebook, [FindNotebook, CloseFind]);
+pub fn init(cx: &mut gpui::App) {
+    let key = if cfg!(target_os = "macos") {
+        "cmd-f"
+    } else {
+        "ctrl-f"
+    };
+    cx.bind_keys([
+        gpui::KeyBinding::new(key, FindNotebook, Some("Notebook")),
+        gpui::KeyBinding::new("escape", CloseFind, Some("Notebook && !CodeCell")),
+    ]);
+}
+
 #[derive(Default)]
 struct SubmissionCounter(u64);
 
@@ -87,6 +100,14 @@ pub struct Notebook {
     scroll: ListState,
     listed_cells: Vec<gpui::EntityId>,
     reveal_cell: Option<usize>,
+    find_open: bool,
+    find_input: Entity<CodeCell>,
+    find_hits: Vec<crate::find::Hit>,
+    find_current: Option<usize>,
+    find_dirty: bool,
+    find_reveal: bool,
+    find_pending: bool,
+    find_task: gpui::Task<()>,
 }
 
 impl Notebook {
@@ -96,6 +117,24 @@ impl Notebook {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let find_input = cx.new(|cx| CodeCell::new_search(window, cx));
+        cx.subscribe_in(
+            &find_input,
+            window,
+            |this, _, event, window, cx| match event {
+                CellEvent::Changed => {
+                    this.find_reveal = true;
+                    this.find_dirty = true;
+                    cx.notify();
+                }
+                CellEvent::MoveDown => this.navigate_find(false, cx),
+                CellEvent::MoveUp => this.navigate_find(true, cx),
+                CellEvent::DeleteCell => this.close_find(window, cx),
+                CellEvent::FocusNext => window.focus_next(cx),
+                _ => (),
+            },
+        )
+        .detach();
         let mut notebook = Self {
             toasts,
             cells: vec![],
@@ -122,6 +161,14 @@ impl Notebook {
             scroll: ListState::new(0, ListAlignment::Top, gpui::px(200.)),
             listed_cells: vec![],
             reveal_cell: None,
+            find_open: false,
+            find_input,
+            find_hits: vec![],
+            find_current: None,
+            find_dirty: false,
+            find_reveal: false,
+            find_pending: false,
+            find_task: gpui::Task::ready(()),
         };
         cx.observe_global::<crate::theme::Theme>(|this, cx| {
             this.scroll.remeasure();
@@ -236,6 +283,7 @@ impl Notebook {
             };
             match event {
                 CellEvent::Changed => {
+                    this.find_dirty = true;
                     this.sync(cx);
                     cx.notify();
                 }
@@ -381,6 +429,7 @@ impl Notebook {
                     .map(|cell| Some(cell.read(cx).list_focus_handle())),
             );
             self.listed_cells = ids;
+            self.find_dirty = true;
         }
         if let Some(index) = self.reveal_cell.take() {
             // An unmeasured destination has no reliable pixel position yet. A
@@ -395,6 +444,231 @@ impl Notebook {
                 });
             }
         }
+    }
+
+    fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let seed = self
+            .cells
+            .get(self.selected)
+            .map(|cell| cell.read(cx).selected_text().to_owned())
+            .unwrap_or_default();
+        self.find_open = true;
+        self.find_reveal = true;
+        if !seed.is_empty() && !seed.contains('\n') {
+            self.find_input
+                .update(cx, |input, cx| input.set_text(seed, cx));
+        }
+        self.find_input
+            .update(cx, |input, cx| input.select_all_input(cx));
+        self.find_input.read(cx).focus_handle(cx).focus(window, cx);
+        self.find_dirty = true;
+        cx.notify();
+    }
+
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(hit) = self.find_current.and_then(|i| self.find_hits.get(i))
+            && let Some(cell) = self
+                .cells
+                .iter()
+                .find(|cell| cell.entity_id().as_u64() == hit.cell)
+        {
+            cell.update(cx, |cell, cx| cell.finish_find(&hit.range, cx));
+        }
+        self.find_open = false;
+        self.find_task = gpui::Task::ready(());
+        self.find_pending = false;
+        self.find_hits.clear();
+        self.find_current = None;
+        self.apply_find(false, cx);
+        if let Some(cell) = self.cells.get(self.selected) {
+            cell.read(cx).focus_handle(cx).focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn schedule_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.find_dirty = false;
+        self.find_pending = true;
+        let reveal = std::mem::take(&mut self.find_reveal);
+        // Cancel the previous debounce/worker before taking a new snapshot.
+        self.find_task = cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(100))
+                .await;
+            let Ok((query, sources)) = this.update(cx, |this, cx| {
+                (
+                    this.find_input.read(cx).text().to_owned(),
+                    this.cells
+                        .iter()
+                        .map(|cell| (cell.entity_id().as_u64(), cell.read(cx).text().to_owned()))
+                        .collect::<Vec<_>>(),
+                )
+            }) else {
+                return;
+            };
+            let hits = cx
+                .background_executor()
+                .spawn(async move { crate::find::matches(&query, &sources) })
+                .await;
+            this.update(cx, |this, cx| {
+                if !this.find_open || this.find_dirty {
+                    return;
+                }
+                let previous = this
+                    .find_current
+                    .and_then(|i| this.find_hits.get(i))
+                    .cloned();
+                this.find_current = previous
+                    .as_ref()
+                    .and_then(|old| hits.iter().position(|hit| hit == old))
+                    .or_else(|| (!hits.is_empty()).then_some(0));
+                this.find_hits = hits;
+                this.find_pending = false;
+                this.apply_find(reveal, cx);
+                cx.notify();
+            })
+            .ok();
+        });
+    }
+
+    fn navigate_find(&mut self, backwards: bool, cx: &mut Context<Self>) {
+        if self.find_pending {
+            return;
+        }
+        self.find_current = crate::find::step(self.find_current, self.find_hits.len(), backwards);
+        self.apply_find(true, cx);
+        cx.notify();
+    }
+
+    fn apply_find(&mut self, reveal: bool, cx: &mut Context<Self>) {
+        let active = self.find_current.and_then(|i| self.find_hits.get(i));
+        let mut hit_index = 0;
+        for (index, cell) in self.cells.iter().enumerate() {
+            let id = cell.entity_id().as_u64();
+            let start = hit_index;
+            while self
+                .find_hits
+                .get(hit_index)
+                .is_some_and(|hit| hit.cell == id)
+            {
+                hit_index += 1;
+            }
+            let ranges = self.find_hits[start..hit_index]
+                .iter()
+                .map(|hit| hit.range.clone())
+                .collect();
+            let current = active
+                .filter(|hit| hit.cell == id)
+                .map(|hit| hit.range.clone());
+            if current.is_some() && reveal {
+                self.reveal_cell = Some(index);
+                self.selected = index;
+            }
+            cell.update(cx, |cell, cx| {
+                cell.set_search(ranges, current.clone(), reveal && current.is_some(), cx)
+            });
+        }
+        if reveal && active.is_some() {
+            self.select(self.selected, cx);
+        }
+    }
+
+    fn find_bar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use crate::{icon::Icon, theme::ActiveTheme, workspace::icon_button};
+        let t = cx.theme();
+        let label = if self.find_pending {
+            "…".to_owned()
+        } else if self.find_input.read(cx).text().is_empty() {
+            String::new()
+        } else if self.find_hits.is_empty() {
+            "0/0".to_owned()
+        } else {
+            format!(
+                "{}/{}",
+                self.find_current.map_or(0, |i| i + 1),
+                self.find_hits.len()
+            )
+        };
+        div()
+            .id("notebook-find-panel")
+            .occlude()
+            .absolute()
+            .top(gpui::px(44.))
+            .right(gpui::px(8.))
+            .w(gpui::px(340.))
+            .max_w_full()
+            .flex()
+            .items_center()
+            .gap(gpui::px(2.))
+            .p_1()
+            .bg(t.popover.bg)
+            .text_color(t.popover.fg)
+            .border_1()
+            .border_color(t.popover.border)
+            .rounded(t.radius.lg())
+            .shadow(vec![t.toast_shadow.clone()])
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(self.find_input.clone())
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .pr_2()
+                            .text_size(t.font.xs)
+                            .text_color(t.popover.muted_fg)
+                            .child(label),
+                    ),
+            )
+            .child(
+                div()
+                    .w(gpui::px(1.))
+                    .h(gpui::px(20.))
+                    .mr_1()
+                    .bg(t.popover.border),
+            )
+            .child(
+                icon_button(
+                    "find-previous",
+                    "Previous match (Shift+Enter)",
+                    Icon::ArrowUp,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.navigate_find(true, cx)))
+                .on_key_down(cx.listener(
+                    |this, event: &gpui::KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.navigate_find(true, cx);
+                            cx.stop_propagation();
+                        }
+                    },
+                )),
+            )
+            .child(
+                icon_button("find-next", "Next match (Enter)", Icon::ArrowDown, cx)
+                    .on_click(cx.listener(|this, _, _, cx| this.navigate_find(false, cx)))
+                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.navigate_find(false, cx);
+                            cx.stop_propagation();
+                        }
+                    })),
+            )
+            .child(
+                icon_button("find-close", "Close find (Escape)", Icon::X, cx)
+                    .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx)))
+                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.close_find(window, cx);
+                            cx.stop_propagation();
+                        }
+                    })),
+            )
+            .into_any_element()
     }
 
     fn editors(&self, cx: &gpui::App) -> Vec<(u64, CellKind, String)> {
@@ -1141,7 +1415,7 @@ fn changed_items<T: PartialEq>(
 }
 
 impl Render for Notebook {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.applied_count_hint != Some(self.largest_count) {
             for cell in &self.cells {
                 cell.update(cx, |cell, cx| cell.set_count_hint(self.largest_count, cx));
@@ -1149,12 +1423,25 @@ impl Render for Notebook {
             self.applied_count_hint = Some(self.largest_count);
         }
         self.sync_list(cx);
+        if self.find_open && self.find_dirty {
+            self.schedule_find(window, cx);
+        }
         let notebook = cx.entity().downgrade();
         div()
+            .relative()
             .size_full()
             .min_h_0()
             .flex()
             .flex_col()
+            .key_context("Notebook")
+            .on_action(cx.listener(|this, _: &CloseFind, window, cx| {
+                if this.find_open {
+                    this.close_find(window, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &FindNotebook, window, cx| this.open_find(window, cx)))
             .on_action(cx.listener(|this, _: &crate::Save, window, cx| this.save(window, cx)))
             .child(self.toolbar(cx))
             .when_some(self.execution_error.as_ref(), |view, error| {
@@ -1188,6 +1475,7 @@ impl Render for Notebook {
                 .p_4()
                 .pl_3(),
             )
+            .when(self.find_open, |view| view.child(self.find_bar(cx)))
     }
 }
 

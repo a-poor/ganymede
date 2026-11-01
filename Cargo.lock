@@ -2248,6 +2248,7 @@ dependencies = [
  "image",
  "latex-rust",
  "pulldown-cmark",
+ "regex",
  "rust-embed",
  "scraper",
  "serde_json",
