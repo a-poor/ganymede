@@ -1,4 +1,5 @@
 //! Server-backed notebook editor.
+mod list_row;
 use std::collections::VecDeque;
 
 use gpui::{Context, Entity, Focusable, ListAlignment, ListState, Window, div, prelude::*};
@@ -1427,6 +1428,8 @@ impl Render for Notebook {
             self.schedule_find(window, cx);
         }
         let notebook = cx.entity().downgrade();
+        let row_order = std::rc::Rc::new(list_row::RowOrder::default());
+        let row_scroll = self.scroll.clone();
         div()
             .relative()
             .size_full()
@@ -1463,12 +1466,18 @@ impl Render for Notebook {
                         .and_then(|notebook| notebook.read(cx).cells.get(index).cloned());
                     // Padding belongs to each row, since virtual lists don't use
                     // a flex gap. Keep cell entities alive independently of rows.
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .pb_3()
-                        .children(cell)
-                        .into_any_element()
+                    list_row::ListRow {
+                        index,
+                        order: row_order.clone(),
+                        scroll: row_scroll.clone(),
+                        child: div()
+                            .w_full()
+                            .min_w_0()
+                            .pb_3()
+                            .children(cell)
+                            .into_any_element(),
+                    }
+                    .into_any_element()
                 })
                 .flex_1()
                 .min_h_0()

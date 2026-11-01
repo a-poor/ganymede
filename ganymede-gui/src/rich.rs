@@ -69,7 +69,7 @@ impl Inline {
             })
             .collect();
     }
-    fn render(&self, id: usize, window: &Window, cx: &App) -> AnyElement {
+    fn render(&self, id: usize, cx: &App) -> AnyElement {
         let t = cx.theme();
         let highlights = self.spans.iter().map(|(range, style)| {
             let color = style
@@ -96,8 +96,8 @@ impl Inline {
                 },
             )
         });
-        let text = StyledText::new(self.text.clone())
-            .with_default_highlights(&window.text_style(), highlights);
+        // Resolve runs during layout, after parent font styles have been applied.
+        let text = StyledText::new(self.text.clone()).with_highlights(highlights);
         let links: Vec<_> = self
             .spans
             .iter()
@@ -255,7 +255,7 @@ impl Rich {
             prose: true,
         }
     }
-    pub fn render(&self, window: &Window, cx: &App) -> AnyElement {
+    pub fn render(&self, _window: &Window, cx: &App) -> AnyElement {
         let t = cx.theme();
         div()
             .flex()
@@ -280,7 +280,7 @@ impl Rich {
                                     t.font.base
                                 })
                         })
-                        .child(text.render(id, window, cx))
+                        .child(text.render(id, cx))
                         .into_any_element(),
                     Block::Code(text) => div()
                         .id(("rich-code", id))
