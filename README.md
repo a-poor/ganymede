@@ -192,7 +192,8 @@ Restart the app after changing configuration.
 Run `cargo run -p ganymede-gui`. The app starts on the launcher without creating
 a server notebook. Creating a notebook explicitly uses Jupyter’s unused `Untitled`
 name. The file tree starts at the server root; folders
-load on expansion. Its toolbar opens the launcher, prompts for a folder name in the selected directory,
+load on expansion. Within each directory, folders sort before files using
+case-sensitive filename order. Its toolbar opens the launcher, prompts for a folder name in the selected directory,
 and toggles a filename filter input. Filtering is case-insensitive and keeps
 ancestor folders visible for matching files, including files in collapsed folders.
 Clear/close with the × button or Escape to restore the normal tree. Background

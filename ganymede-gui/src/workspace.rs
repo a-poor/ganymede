@@ -542,9 +542,7 @@ impl Workspace {
                 .map_err(|e| e.to_string())?;
             let mut entries: Vec<Contents> =
                 serde_json::from_value(listing.content).map_err(|e| e.to_string())?;
-            entries.sort_by_key(|entry| {
-                (entry.content_type != "directory", entry.name.to_lowercase())
-            });
+            entries.sort_by_key(|entry| (entry.content_type != "directory", entry.name.clone()));
             Ok::<_, String>(entries)
         });
         cx.spawn(async move |this, cx| {
