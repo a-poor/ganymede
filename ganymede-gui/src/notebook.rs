@@ -1,7 +1,7 @@
 //! Server-backed notebook editor.
 use std::collections::VecDeque;
 
-use gpui::{Context, Entity, Focusable, ScrollHandle, Window, div, prelude::*};
+use gpui::{Context, Entity, Focusable, ListAlignment, ListState, Window, div, prelude::*};
 
 use ganymede_core::notebook::CellKind;
 
@@ -78,12 +78,15 @@ pub struct Notebook {
     execution_error: Option<String>,
     selected: usize,
     largest_count: u64,
+    applied_count_hint: Option<u64>,
     type_menu_open: bool,
     type_menu_index: usize,
     type_focus: gpui::FocusHandle,
     counter: SubmissionCounter,
     runs: RunQueue,
-    scroll: ScrollHandle,
+    scroll: ListState,
+    listed_cells: Vec<gpui::EntityId>,
+    reveal_cell: Option<usize>,
 }
 
 impl Notebook {
@@ -110,13 +113,21 @@ impl Notebook {
             execution_error: None,
             selected: 0,
             largest_count: 0,
+            applied_count_hint: None,
             type_menu_open: false,
             type_menu_index: 0,
             type_focus: cx.focus_handle(),
             counter: SubmissionCounter::default(),
             runs: RunQueue::default(),
-            scroll: ScrollHandle::new(),
+            scroll: ListState::new(0, ListAlignment::Top, gpui::px(200.)),
+            listed_cells: vec![],
+            reveal_cell: None,
         };
+        cx.observe_global::<crate::theme::Theme>(|this, cx| {
+            this.scroll.remeasure();
+            cx.notify();
+        })
+        .detach();
         if let Some(mut snapshots) = notebook.session.watch() {
             cx.spawn(async move |this, cx| {
                 while snapshots.changed().await.is_ok() {
@@ -201,6 +212,9 @@ impl Notebook {
                 .session
                 .bind(cell.entity_id().as_u64(), loaded.id().clone());
             cell.update(cx, |cell, cx| cell.load(loaded, cx));
+            notebook.largest_count = notebook
+                .largest_count
+                .max(cell.read(cx).max_execution_count());
         }
         if notebook.cells.is_empty() {
             notebook.append_cell(window, cx);
@@ -215,6 +229,7 @@ impl Notebook {
 
     fn append_cell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let cell = cx.new(|cx| CodeCell::new(window, cx));
+        cell.update(cx, |cell, cx| cell.set_count_hint(self.largest_count, cx));
         cx.subscribe_in(&cell, window, |this, cell, event, window, cx| {
             let Some(index) = this.cells.iter().position(|item| item == cell) else {
                 return;
@@ -273,7 +288,7 @@ impl Notebook {
                     this.cells.insert(target, added.clone());
                     this.select(target, cx);
                     added.read(cx).focus_handle(cx).focus(window, cx);
-                    this.scroll.scroll_to_item(target);
+                    this.reveal_cell = Some(target);
                     cx.notify();
                 }
                 CellEvent::MoveUp | CellEvent::MoveDown => {
@@ -293,7 +308,7 @@ impl Notebook {
                         }
                     });
                     this.select(target, cx);
-                    this.scroll.scroll_to_item(target);
+                    this.reveal_cell = Some(target);
                     cx.notify();
                 }
                 CellEvent::RunFailed => {
@@ -332,13 +347,54 @@ impl Notebook {
                         .read(cx)
                         .focus_handle(cx)
                         .focus(window, cx);
-                    this.scroll.scroll_to_item(index + 1);
+                    this.reveal_cell = Some(index + 1);
                     cx.notify();
                 }
             }
         })
         .detach();
+        // Heights can change outside the viewport (execution, Markdown preview,
+        // edits, or a theme change). Keep the list's measurements current without
+        // resetting its logical scroll anchor.
+        cx.observe(&cell, |this, cell, cx| {
+            this.largest_count = this.largest_count.max(cell.read(cx).max_execution_count());
+            if let Some(index) = this
+                .listed_cells
+                .iter()
+                .position(|id| *id == cell.entity_id())
+            {
+                this.scroll.remeasure_items(index..index + 1);
+            }
+            cx.notify();
+        })
+        .detach();
         self.cells.push(cell);
+    }
+
+    fn sync_list(&mut self, cx: &gpui::App) {
+        let ids: Vec<_> = self.cells.iter().map(Entity::entity_id).collect();
+        if let Some((old, new)) = changed_items(&self.listed_cells, &ids) {
+            self.scroll.splice_focusable(
+                old,
+                self.cells[new]
+                    .iter()
+                    .map(|cell| Some(cell.read(cx).list_focus_handle())),
+            );
+            self.listed_cells = ids;
+        }
+        if let Some(index) = self.reveal_cell.take() {
+            // An unmeasured destination has no reliable pixel position yet. A
+            // logical item offset reveals it without measuring preceding cells.
+            let index = index.min(self.cells.len().saturating_sub(1));
+            if self.scroll.bounds_for_item(index).is_some() {
+                self.scroll.scroll_to_reveal_item(index);
+            } else {
+                self.scroll.scroll_to(gpui::ListOffset {
+                    item_ix: index,
+                    offset_in_item: gpui::px(0.),
+                });
+            }
+        }
     }
 
     fn editors(&self, cx: &gpui::App) -> Vec<(u64, CellKind, String)> {
@@ -604,7 +660,7 @@ impl Notebook {
                 self.runs.remap(|i| if i >= target { i + 1 } else { i });
                 self.cells.insert(target, added);
                 self.select(target, cx);
-                self.scroll.scroll_to_item(target);
+                self.reveal_cell = Some(target);
             }
             ToolbarAction::Copy | ToolbarAction::Cut => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(
@@ -1065,18 +1121,35 @@ enum ToolbarAction {
     RunAll,
 }
 
+// Preserve unchanged prefix/suffix measurements when cells are inserted,
+// removed, or reordered. The changed middle is the only splice required.
+fn changed_items<T: PartialEq>(
+    old: &[T],
+    new: &[T],
+) -> Option<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+    let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    if prefix == old.len() && prefix == new.len() {
+        return None;
+    }
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    Some((prefix..old.len() - suffix, prefix..new.len() - suffix))
+}
+
 impl Render for Notebook {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.largest_count = self.largest_count.max(
-            self.cells
-                .iter()
-                .map(|cell| cell.read(cx).max_execution_count())
-                .max()
-                .unwrap_or(0),
-        );
-        for cell in &self.cells {
-            cell.update(cx, |cell, cx| cell.set_count_hint(self.largest_count, cx));
+        if self.applied_count_hint != Some(self.largest_count) {
+            for cell in &self.cells {
+                cell.update(cx, |cell, cx| cell.set_count_hint(self.largest_count, cx));
+            }
+            self.applied_count_hint = Some(self.largest_count);
         }
+        self.sync_list(cx);
+        let notebook = cx.entity().downgrade();
         div()
             .size_full()
             .min_h_0()
@@ -1097,18 +1170,23 @@ impl Render for Notebook {
                 )
             })
             .child(
-                div()
-                    .id("notebook-cells")
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .p_4()
-                    .pl_3()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .children(self.cells.iter().cloned()),
+                gpui::list(self.scroll.clone(), move |index, _, cx| {
+                    let cell = notebook
+                        .upgrade()
+                        .and_then(|notebook| notebook.read(cx).cells.get(index).cloned());
+                    // Padding belongs to each row, since virtual lists don't use
+                    // a flex gap. Keep cell entities alive independently of rows.
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .pb_3()
+                        .children(cell)
+                        .into_any_element()
+                })
+                .flex_1()
+                .min_h_0()
+                .p_4()
+                .pl_3(),
             )
     }
 }
@@ -1116,6 +1194,89 @@ impl Render for Notebook {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_splices_preserve_unchanged_cells() {
+        assert_eq!(changed_items(&[1, 2, 3], &[1, 4, 2, 3]), Some((1..1, 1..2)));
+        assert_eq!(changed_items(&[1, 2, 3], &[1, 3]), Some((1..2, 1..1)));
+        assert_eq!(changed_items(&[1, 2, 3], &[2, 1, 3]), Some((0..2, 0..2)));
+        assert_eq!(changed_items(&[1, 2], &[1, 2]), None);
+        assert_eq!(changed_items::<usize>(&[], &[1]), Some((0..0, 0..1)));
+        assert_eq!(changed_items::<usize>(&[1], &[]), Some((0..1, 0..0)));
+    }
+
+    #[gpui::test]
+    fn virtual_notebook_renders_a_bounded_window_and_preserves_growing_cell_anchor(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::{point, px, size};
+        use std::{cell::Cell, rc::Rc};
+        let cx = cx.add_empty_window();
+        let state = ListState::new(10_000, ListAlignment::Top, px(200.));
+        let calls = Rc::new(Cell::new(0));
+        let extra_height = Rc::new(Cell::new(0.));
+        struct TestView {
+            state: ListState,
+            calls: Rc<Cell<usize>>,
+            extra_height: Rc<Cell<f32>>,
+        }
+        impl Render for TestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let calls = self.calls.clone();
+                let extra_height = self.extra_height.clone();
+                gpui::list(self.state.clone(), move |index, _, _| {
+                    calls.set(calls.get() + 1);
+                    div()
+                        .w_full()
+                        .h(px(60.
+                            + (index % 4) as f32 * 40.
+                            + if index == 5000 {
+                                extra_height.get()
+                            } else {
+                                0.
+                            }))
+                        .into_any_element()
+                })
+                .w_full()
+                .h_full()
+            }
+        }
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.draw(point(px(0.), px(0.)), size(px(800.), px(600.)), |_, cx| {
+                cx.new(|_| TestView {
+                    state: state.clone(),
+                    calls: calls.clone(),
+                    extra_height: extra_height.clone(),
+                })
+                .into_any_element()
+            });
+        };
+        draw(cx);
+        assert!(
+            calls.get() < 64,
+            "initial render built {} rows",
+            calls.get()
+        );
+        calls.set(0);
+        state.scroll_to(gpui::ListOffset {
+            item_ix: 5000,
+            offset_in_item: px(20.),
+        });
+        draw(cx);
+        assert!(calls.get() < 64, "jump rendered {} rows", calls.get());
+        assert_eq!(state.logical_scroll_top().item_ix, 5000);
+        extra_height.set(400.);
+        state.remeasure_items(5000..5001);
+        calls.set(0);
+        draw(cx);
+        assert_eq!(state.logical_scroll_top().item_ix, 5000);
+        assert_eq!(state.logical_scroll_top().offset_in_item, px(20.));
+        assert!(calls.get() < 64);
+        state.splice(0..0, 1);
+        assert_eq!(state.logical_scroll_top().item_ix, 5001);
+        state.splice(0..1, 0);
+        assert_eq!(state.logical_scroll_top().item_ix, 5000);
+    }
 
     #[test]
     fn deleting_running_cell_removes_its_reruns_and_advances_queue() {

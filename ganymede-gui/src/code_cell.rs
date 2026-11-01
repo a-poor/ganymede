@@ -249,8 +249,9 @@ pub struct CodeCell {
     undo: Vec<Buffer>,
     redo: Vec<Buffer>,
     composition_start: Option<Buffer>,
-    lines: Vec<ShapedLine>,
-    starts: Vec<usize>,
+    lines: Rc<Vec<ShapedLine>>,
+    starts: Rc<Vec<usize>>,
+    text_layouts: Rc<RefCell<TextLayouts>>,
     bounds: Option<Bounds<Pixels>>,
     line_height: Pixels,
     goal_x: Option<Pixels>,
@@ -308,8 +309,9 @@ impl CodeCell {
             undo: vec![],
             redo: vec![],
             composition_start: None,
-            lines: vec![],
-            starts: vec![],
+            lines: Rc::default(),
+            starts: Rc::default(),
+            text_layouts: Rc::default(),
             bounds: None,
             line_height: cx.theme().font.line_height_tight,
             goal_x: None,
@@ -340,6 +342,10 @@ impl CodeCell {
         this.filter_input = true;
         this
     }
+    pub fn list_focus_handle(&self) -> FocusHandle {
+        self.cell_focus.clone()
+    }
+
     pub fn max_execution_count(&self) -> u64 {
         self.output
             .iter()
@@ -1392,16 +1398,62 @@ fn visual_position(starts: &[usize], offset: usize) -> (usize, usize) {
     )
 }
 
+// Keep two width variants: flex measurement may ask for intrinsic and constrained
+// widths in the same frame. Scrolling and cursor blinking do not invalidate either.
+#[derive(Clone, PartialEq)]
+struct LayoutKey {
+    source: Rc<str>,
+    style: gpui::TextStyle,
+    font_size: Pixels,
+    line_height: Pixels,
+    width: Option<Pixels>,
+    marked: Option<Range<usize>>,
+    syntax: Option<[gpui::Hsla; 8]>,
+}
+
+#[derive(Default)]
+struct TextLayouts {
+    entries: Vec<(LayoutKey, Rc<Layout>)>,
+}
+impl TextLayouts {
+    fn get(&self, key: &LayoutKey) -> Option<Rc<Layout>> {
+        self.entries
+            .iter()
+            .find(|(cached, _)| cached == key)
+            .map(|(_, layout)| layout.clone())
+    }
+    fn insert(&mut self, key: LayoutKey, layout: Rc<Layout>) {
+        if self.entries.len() == 2 {
+            self.entries.remove(0);
+        }
+        self.entries.push((key, layout));
+    }
+}
+
+fn visible_rows(
+    top: Pixels,
+    line_height: Pixels,
+    count: usize,
+    clip_top: Pixels,
+    clip_bottom: Pixels,
+) -> Range<usize> {
+    let first = (((clip_top - top) / line_height).floor().max(0.) as usize).min(count);
+    let last = (((clip_bottom - top) / line_height).ceil().max(0.) as usize).min(count);
+    first..last.max(first)
+}
+
 struct CellText {
     cell: Entity<CodeCell>,
 }
 struct Layout {
-    lines: Vec<ShapedLine>,
-    starts: Vec<usize>,
+    lines: Rc<Vec<ShapedLine>>,
+    starts: Rc<Vec<usize>>,
+    size: gpui::Size<Pixels>,
     line_height: Pixels,
     cap_height: Pixels,
 }
 struct Prepaint {
+    visible: Range<usize>,
     selection: Vec<PaintQuad>,
     cursor: Option<PaintQuad>,
 }
@@ -1414,7 +1466,7 @@ impl IntoElement for CellText {
 }
 
 impl Element for CellText {
-    type RequestLayoutState = Rc<RefCell<Layout>>;
+    type RequestLayoutState = Rc<RefCell<Rc<Layout>>>;
     type PrepaintState = Prepaint;
     fn id(&self) -> Option<ElementId> {
         None
@@ -1428,7 +1480,7 @@ impl Element for CellText {
         _: Option<&gpui::InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
-    ) -> (LayoutId, Rc<RefCell<Layout>>) {
+    ) -> (LayoutId, Rc<RefCell<Rc<Layout>>>) {
         let cell = self.cell.read(cx);
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
@@ -1441,15 +1493,33 @@ impl Element for CellText {
             Rc::new(vec![])
         };
         let colors = cx.theme().syntax;
-        let text = cell.buffer.text.clone();
+        let layouts = cell.text_layouts.clone();
+        // Reuse the stored source allocation on ordinary scroll/blink frames.
+        let text: Rc<str> = layouts
+            .borrow()
+            .entries
+            .last()
+            .filter(|(key, _)| key.source.as_ref() == cell.buffer.text)
+            .map(|(key, _)| key.source.clone())
+            .unwrap_or_else(|| Rc::from(cell.buffer.text.as_str()));
+        let key = LayoutKey {
+            source: text.clone(),
+            style: style.clone(),
+            font_size,
+            line_height,
+            width: None,
+            marked: cell.marked.clone(),
+            syntax: cell.python_code().then_some(colors),
+        };
         let marked = cell.marked.clone();
         let wrap = !cell.document && !cell.filter_input;
-        let state = Rc::new(RefCell::new(Layout {
-            lines: vec![],
-            starts: vec![],
+        let state = Rc::new(RefCell::new(Rc::new(Layout {
+            lines: Rc::default(),
+            starts: Rc::default(),
+            size: size(px(0.), px(0.)),
             line_height,
             cap_height,
-        }));
+        })));
         let measured = state.clone();
         let mut layout_style = Style::default();
         layout_style.min_size.width = gpui::relative(1.).into();
@@ -1463,6 +1533,13 @@ impl Element for CellText {
                 } else {
                     None
                 };
+                let mut key = key.clone();
+                key.width = wrap_width;
+                if let Some(layout) = layouts.borrow().get(&key) {
+                    let size = layout.size;
+                    *measured.borrow_mut() = layout;
+                    return size;
+                }
                 let mut starts = vec![];
                 let mut start = 0;
                 let mut lines = vec![];
@@ -1526,12 +1603,15 @@ impl Element for CellText {
                     lines.iter().map(|l| l.width).fold(px(0.), Pixels::max) + px(4.)
                 });
                 let height = line_height * lines.len().max(1) as f32;
-                *measured.borrow_mut() = Layout {
-                    lines,
-                    starts,
+                let layout = Rc::new(Layout {
+                    lines: Rc::new(lines),
+                    starts: Rc::new(starts),
+                    size: size(width, height),
                     line_height,
                     cap_height,
-                };
+                });
+                layouts.borrow_mut().insert(key, layout.clone());
+                *measured.borrow_mut() = layout;
                 size(width, height)
             });
         (id, state)
@@ -1541,8 +1621,8 @@ impl Element for CellText {
         _: Option<&GlobalElementId>,
         _: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
-        state: &mut Rc<RefCell<Layout>>,
-        _: &mut Window,
+        state: &mut Rc<RefCell<Rc<Layout>>>,
+        window: &mut Window,
         cx: &mut App,
     ) -> Prepaint {
         let layout = state.borrow();
@@ -1550,7 +1630,16 @@ impl Element for CellText {
         let selected = cell.buffer.selection();
         let theme = cx.theme();
         let mut selection = vec![];
-        for (row, line) in layout.lines.iter().enumerate() {
+        let clip = window.content_mask().bounds;
+        let visible = visible_rows(
+            bounds.top(),
+            layout.line_height,
+            layout.lines.len(),
+            clip.top(),
+            clip.bottom(),
+        );
+        for row in visible.clone() {
+            let line = &layout.lines[row];
             let start = layout.starts[row];
             let end = start + line.len();
             if selected.start <= end && selected.end > start && !selected.is_empty() {
@@ -1573,37 +1662,42 @@ impl Element for CellText {
             }
         }
         let (row, col) = visual_position(&layout.starts, cell.buffer.head);
-        let cursor = (cell.cursor_visible && selected.is_empty()).then(|| {
-            let line = &layout.lines[row];
-            // Match the baseline used by ShapedLine::paint, excluding line leading.
-            let baseline = (layout.line_height - line.ascent - line.descent) / 2. + line.ascent;
-            let caret_overhang = px(2.);
-            fill(
-                Bounds::new(
-                    point(
-                        bounds.left() + layout.lines[row].x_for_index(col),
-                        bounds.top() + layout.line_height * row as f32 + baseline
-                            - layout.cap_height
-                            - caret_overhang,
+        let cursor =
+            (cell.cursor_visible && selected.is_empty() && visible.contains(&row)).then(|| {
+                let line = &layout.lines[row];
+                // Match the baseline used by ShapedLine::paint, excluding line leading.
+                let baseline = (layout.line_height - line.ascent - line.descent) / 2. + line.ascent;
+                let caret_overhang = px(2.);
+                fill(
+                    Bounds::new(
+                        point(
+                            bounds.left() + layout.lines[row].x_for_index(col),
+                            bounds.top() + layout.line_height * row as f32 + baseline
+                                - layout.cap_height
+                                - caret_overhang,
+                        ),
+                        size(px(1.5), layout.cap_height + caret_overhang * 2.),
                     ),
-                    size(px(1.5), layout.cap_height + caret_overhang * 2.),
-                ),
-                theme.card.fg,
-            )
-        });
-        Prepaint { selection, cursor }
+                    theme.card.fg,
+                )
+            });
+        Prepaint {
+            selection,
+            cursor,
+            visible,
+        }
     }
     fn paint(
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
-        state: &mut Rc<RefCell<Layout>>,
+        state: &mut Rc<RefCell<Rc<Layout>>>,
         prepaint: &mut Prepaint,
         window: &mut Window,
         cx: &mut App,
     ) {
-        let mut layout = state.borrow_mut();
+        let layout = state.borrow();
         let focus = self.cell.read(cx).focus.clone();
         window.handle_input(
             &focus,
@@ -1613,7 +1707,8 @@ impl Element for CellText {
         for quad in prepaint.selection.drain(..) {
             window.paint_quad(quad);
         }
-        for (row, line) in layout.lines.iter().enumerate() {
+        for row in prepaint.visible.clone() {
+            let line = &layout.lines[row];
             line.paint(
                 point(
                     bounds.left(),
@@ -1633,8 +1728,8 @@ impl Element for CellText {
             window.paint_quad(cursor);
         }
         self.cell.update(cx, |cell, _| {
-            cell.lines = std::mem::take(&mut layout.lines);
-            cell.starts = std::mem::take(&mut layout.starts);
+            cell.lines = layout.lines.clone();
+            cell.starts = layout.starts.clone();
             cell.bounds = Some(bounds);
             cell.line_height = layout.line_height;
         });
@@ -1644,6 +1739,73 @@ impl Element for CellText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scroll_layout_cache_reuses_geometry_and_invalidates_visual_inputs() {
+        let key = LayoutKey {
+            source: Rc::from("print('hello')"),
+            style: gpui::TextStyle::default(),
+            font_size: px(14.),
+            line_height: px(20.),
+            width: Some(px(500.)),
+            marked: None,
+            syntax: None,
+        };
+        let layout = Rc::new(Layout {
+            lines: Rc::default(),
+            starts: Rc::default(),
+            size: size(px(500.), px(20.)),
+            line_height: px(20.),
+            cap_height: px(10.),
+        });
+        let mut cache = TextLayouts::default();
+        cache.insert(key.clone(), layout.clone());
+        for _ in 0..120 {
+            assert!(Rc::ptr_eq(&cache.get(&key).unwrap(), &layout));
+        }
+        let mut changed = key.clone();
+        changed.width = Some(px(250.));
+        assert!(cache.get(&changed).is_none());
+        cache.insert(changed, layout.clone());
+        assert!(
+            cache.get(&key).is_some(),
+            "intrinsic/constrained widths can coexist"
+        );
+        let mut changed = key.clone();
+        changed.source = Rc::from("other");
+        assert!(cache.get(&changed).is_none());
+        let mut changed = key.clone();
+        changed.marked = Some(0..5);
+        assert!(cache.get(&changed).is_none());
+        let mut changed = key.clone();
+        changed.font_size = px(16.);
+        assert!(cache.get(&changed).is_none());
+        let mut changed = key.clone();
+        changed.style.color = gpui::rgb(0xff0000).into();
+        assert!(cache.get(&changed).is_none());
+        let mut changed = key.clone();
+        changed.syntax = Some([gpui::rgb(0x888888).into(); 8]);
+        assert!(cache.get(&changed).is_none());
+        cache.insert(changed, layout);
+        assert_eq!(cache.entries.len(), 2);
+    }
+
+    #[test]
+    fn scrolling_only_paints_rows_intersecting_the_viewport() {
+        assert_eq!(
+            visible_rows(px(0.), px(20.), 10_000, px(2000.), px(2600.)),
+            100..130
+        );
+        assert_eq!(
+            visible_rows(px(0.), px(20.), 10_000, px(2001.), px(2601.)),
+            100..131
+        );
+        assert_eq!(visible_rows(px(800.), px(20.), 100, px(0.), px(600.)), 0..0);
+        assert_eq!(
+            visible_rows(px(-3000.), px(20.), 100, px(0.), px(600.)),
+            100..100
+        );
+    }
 
     #[test]
     fn indentation_preserves_reversed_selection_and_excludes_next_line() {

@@ -212,6 +212,14 @@ it reconnects to the existing session without executing code or resetting variab
 Failed/disconnected executions are never automatically replayed, and queued work
 is cancelled on disconnect. A new explicit Run can also reconnect.
 
+Notebook scrolling uses a variable-height virtual list: only viewport cells, a
+small overscan region, and an offscreen focused cell are rendered. Cell entities
+and their edit/execution state stay alive. Edits and streaming outputs invalidate
+individual height measurements while preserving the logical scroll anchor;
+insertions/removals preserve unchanged measurements. Text layouts are cached and
+only visible source rows are painted. One very large visible output still lays
+out as a whole; output-internal virtualization is not implemented.
+
 Notebook cell editors soft-wrap and grow vertically with their source. Code cells
 use Python Tree-sitter syntax highlighting, cached until their source changes;
 cells over 256 KiB fall back to plain text. Markdown/Raw cells and standalone text
