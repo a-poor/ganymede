@@ -5,6 +5,7 @@ mod confirm;
 mod execution;
 mod find;
 pub mod icon;
+mod image_loader;
 mod notebook;
 mod rich;
 mod settings;

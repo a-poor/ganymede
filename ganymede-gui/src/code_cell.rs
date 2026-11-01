@@ -244,6 +244,10 @@ pub struct CodeCell {
     output: Vec<crate::execution::OutputBlock>,
     rich_output: Vec<crate::rich::Rich>,
     markdown_preview: Option<crate::rich::Rich>,
+    image_session: Option<crate::execution::Session>,
+    image_path: String,
+    images: crate::image_loader::Images,
+    image_generation: u64,
     attachments: serde_json::Map<String, serde_json::Value>,
     execution_task: Task<()>,
     buffer: Buffer,
@@ -309,6 +313,10 @@ impl CodeCell {
             output: Vec::new(),
             rich_output: Vec::new(),
             markdown_preview: None,
+            image_session: None,
+            image_path: String::new(),
+            images: Default::default(),
+            image_generation: 0,
             attachments: Default::default(),
             execution_task: Task::ready(()),
             buffer: Buffer::default(),
@@ -463,6 +471,68 @@ impl CodeCell {
             .collect();
         self.output = outputs;
     }
+    pub fn set_image_session(&mut self, session: crate::execution::Session) {
+        self.image_session = Some(session);
+    }
+
+    fn load_images(&mut self, cx: &mut Context<Self>) {
+        let path = self
+            .image_session
+            .as_ref()
+            .map(|s| s.path())
+            .unwrap_or_default();
+        if path != self.image_path {
+            self.image_path = path.clone();
+            self.images.clear();
+            self.image_generation += 1;
+        }
+        let sources: std::collections::HashSet<String> = self
+            .markdown_preview
+            .iter()
+            .chain(self.rich_output.iter())
+            .flat_map(|rich| rich.image_sources())
+            .take(32)
+            .map(str::to_owned)
+            .collect();
+        // Keep images while a Markdown cell is being edited, so previewing again
+        // doesn't redownload them; discard obsolete sources on the next preview.
+        if self.markdown_preview.is_some()
+            || self.kind != ganymede_core::notebook::CellKind::Markdown
+        {
+            self.images.retain(|source, _| sources.contains(source));
+        }
+        let Some(runtime) = cx.try_global::<crate::execution::Runtime>() else {
+            return;
+        };
+        let handle = runtime.handle.clone();
+        let config = runtime.config.clone();
+        for source in sources {
+            if self.images.contains_key(&source) {
+                continue;
+            }
+            self.images.insert(source.clone(), None);
+            let request_source = source.clone();
+            let path = path.clone();
+            let config = config.clone();
+            let generation = self.image_generation;
+            let task = handle.spawn(async move {
+                crate::image_loader::load(&request_source, &path, config).await
+            });
+            cx.spawn(async move |this, cx| {
+                let result = task
+                    .await
+                    .unwrap_or_else(|_| Err("Image request interrupted".into()));
+                let _ = this.update(cx, |this, cx| {
+                    if this.image_generation == generation && this.images.contains_key(&source) {
+                        this.images.insert(source, Some(result));
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+    }
+
     pub fn preview_markdown(&mut self, cx: &mut Context<Self>) {
         if self.kind == ganymede_core::notebook::CellKind::Markdown {
             self.markdown_preview = Some(crate::rich::Rich::markdown(
@@ -911,6 +981,7 @@ impl EntityInputHandler for CodeCell {
 
 impl Render for CodeCell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.load_images(cx);
         let theme = cx.theme();
         let surface = theme.card;
         let prompt = match self.running_frame {
@@ -1353,7 +1424,7 @@ impl Render for CodeCell {
                     .py_2()
                     .font_family(theme.font.sans.clone())
                     .text_size(theme.font.base)
-                    .child(preview.render(window, cx))
+                    .child(preview.render(window, cx, &self.images))
                     .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
                         cx.emit(CellEvent::Selected);
                         if event.click_count() == 2 {
@@ -1460,7 +1531,11 @@ impl Render for CodeCell {
                                             .overflow_x_scroll()
                                             .px(px(13.))
                                             .text_color(theme.app.fg)
-                                            .child(self.rich_output[index].render(window, cx)),
+                                            .child(self.rich_output[index].render(
+                                                window,
+                                                cx,
+                                                &self.images,
+                                            )),
                                     )
                             }),
                         )),

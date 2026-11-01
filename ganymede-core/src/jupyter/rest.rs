@@ -145,6 +145,43 @@ impl JupyterRestClient {
             .append_pair("content", if include_content { "1" } else { "0" });
         Ok(self.request(Method::GET, url, None).await?.json().await?)
     }
+    /// Read a file through Contents, with a bounded base64 response.
+    pub async fn read_file_bytes(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>> {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let mut url = self.contents_url(path)?;
+        url.query_pairs_mut()
+            .append_pair("content", "1")
+            .append_pair("format", "base64");
+        let mut response = self.request(Method::GET, url, None).await?;
+        let limit = max_bytes.saturating_mul(4) / 3 + 64 * 1024;
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if body.len().saturating_add(chunk.len()) > limit {
+                return Err(Error::Protocol("file exceeds download limit".into()));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let model: Contents = serde_json::from_slice(&body)?;
+        if model.content_type != "file" || model.format.as_deref() != Some("base64") {
+            return Err(Error::Protocol("expected a base64 file".into()));
+        }
+        let encoded = model
+            .content
+            .as_str()
+            .ok_or_else(|| Error::Protocol("missing file data".into()))?;
+        let encoded: String = encoded
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect();
+        let bytes = STANDARD
+            .decode(encoded)
+            .map_err(|_| Error::Protocol("invalid base64 file".into()))?;
+        if bytes.len() > max_bytes {
+            return Err(Error::Protocol("file exceeds download limit".into()));
+        }
+        Ok(bytes)
+    }
+
     /// Let the server allocate an unused notebook name in this directory.
     pub async fn create_notebook(&self, directory: &str) -> Result<Contents> {
         Ok(self

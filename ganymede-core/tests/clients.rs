@@ -183,3 +183,52 @@ async fn overflow_is_a_terminal_error_not_silent_loss() {
     assert!(events.recv().await.is_none());
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn contents_binary_download_authenticates_and_enforces_size_limit() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            while !bytes.windows(4).any(|w| w == b"\r\n\r\n") {
+                let mut buf = [0; 2048];
+                let count = socket.read(&mut buf).await.unwrap();
+                assert!(count > 0);
+                bytes.extend_from_slice(&buf[..count]);
+            }
+            let request = String::from_utf8(bytes).unwrap().to_ascii_lowercase();
+            assert!(
+                request.starts_with(
+                    "get /prefix/api/contents/images/a%20b.png?content=1&format=base64 "
+                )
+            );
+            assert!(request.contains("authorization: token image-test\r\n"));
+            let body = json!({"name":"a b.png", "path":"images/a b.png", "type":"file", "writable":true, "created":"", "last_modified":"", "format":"base64", "content":"YWJjZA==\n"}).to_string();
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+    });
+    let rest = JupyterRestClient::new(
+        ServerConfig::new(&format!("http://{address}/prefix"))
+            .unwrap()
+            .with_token("image-test")
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        rest.read_file_bytes("images/a b.png", 4).await.unwrap(),
+        b"abcd"
+    );
+    assert!(rest.read_file_bytes("images/a b.png", 3).await.is_err());
+    server.await.unwrap();
+}

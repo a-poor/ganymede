@@ -251,9 +251,14 @@ when saving, including unsupported representations.
 Markdown cells open in preview. Double-click or select and press Enter to edit;
 Run or Shift+Enter renders the source again. Headings, emphasis, links, nested lists,
 fenced code, tables, embedded raster attachments, and LaTeX formulas are supported.
+PNG/JPEG/GIF/WebP image URLs load asynchronously over HTTP(S); relative image paths
+resolve from the notebook directory through Jupyter’s authenticated Contents API.
+Leading `/` paths start at the server root. External requests never receive the
+Jupyter token. Previews cache images per cell, limit downloads to 32 MiB and
+32 million pixels, and load at most 32 distinct image sources per cell. Failed
+loads show an inline placeholder. SVG and data URLs are not supported.
 Formulas currently occupy separate lines, including inline math; unsupported LaTeX
-shows its source. HTML is parsed into native controls: scripts, CSS, widgets, and
-remote images are not executed or fetched. Links open only on an explicit click
+shows its source. HTML is parsed into native controls; scripts, CSS, and widgets are not executed. Links open only on an explicit click
 and only for HTTP(S)/mailto destinations. This is a native subset rather than a
 browser-compatible HTML renderer. Interactive stdin is disabled. Save with the toolbar or ⌘S (Ctrl+S elsewhere).
 Saving preserves notebook/cell metadata, attachments, unknown fields, cell order,

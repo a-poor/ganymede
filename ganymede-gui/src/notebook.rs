@@ -277,7 +277,10 @@ impl Notebook {
 
     fn append_cell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let cell = cx.new(|cx| CodeCell::new(window, cx));
-        cell.update(cx, |cell, cx| cell.set_count_hint(self.largest_count, cx));
+        cell.update(cx, |cell, cx| {
+            cell.set_image_session(self.session.clone());
+            cell.set_count_hint(self.largest_count, cx);
+        });
         cx.subscribe_in(&cell, window, |this, cell, event, window, cx| {
             let Some(index) = this.cells.iter().position(|item| item == cell) else {
                 return;

@@ -1,5 +1,5 @@
 //! Inert native rendering of notebook MIME bundles and Markdown. No web view,
-//! scripts, stylesheets, or implicit network requests are involved.
+//! scripts or stylesheets. Image references are fetched separately by image_loader.
 use crate::theme::ActiveTheme;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use gpui::{
@@ -121,6 +121,7 @@ pub enum Block {
     Code(String),
     Table(Vec<Vec<(String, bool)>>),
     Image(Arc<Image>),
+    ExternalImage { source: String, alt: String },
     Rule,
     Math(String),
 }
@@ -255,7 +256,18 @@ impl Rich {
             prose: true,
         }
     }
-    pub fn render(&self, _window: &Window, cx: &App) -> AnyElement {
+    pub fn image_sources(&self) -> impl Iterator<Item = &str> {
+        self.blocks.iter().filter_map(|block| match block {
+            Block::ExternalImage { source, .. } => Some(source.as_str()),
+            _ => None,
+        })
+    }
+    pub fn render(
+        &self,
+        _window: &Window,
+        cx: &App,
+        images: &crate::image_loader::Images,
+    ) -> AnyElement {
         let t = cx.theme();
         div()
             .flex()
@@ -294,6 +306,34 @@ impl Rich {
                         .text_size(t.font.code)
                         .child(text.clone())
                         .into_any_element(),
+                    Block::ExternalImage { source, alt } => match images.get(source) {
+                        Some(Some(Ok(image))) => img(image.clone())
+                            .max_w_full()
+                            .object_fit(gpui::ObjectFit::Contain)
+                            .with_fallback(|| {
+                                div()
+                                    .child("[Image could not be decoded]")
+                                    .into_any_element()
+                            })
+                            .into_any_element(),
+                        state => div()
+                            .text_size(t.font.sm)
+                            .text_color(t.app.muted_fg)
+                            .child(format!(
+                                "{}{}",
+                                if alt.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("{alt}: ")
+                                },
+                                match state {
+                                    Some(Some(Err(error))) => error.as_str(),
+                                    Some(None) => "Loading image…",
+                                    _ => "Image not loaded",
+                                }
+                            ))
+                            .into_any_element(),
+                    },
                     Block::Image(image) => img(image.clone())
                         .max_w_full()
                         .object_fit(gpui::ObjectFit::Contain)
@@ -487,16 +527,14 @@ fn collect(
                 .and_then(|n| attachments?.get(n)?.as_object());
             if let Some(image) = attachment.and_then(image_data) {
                 blocks.push(Block::Image(image));
+            } else if !src.starts_with("attachment:") {
+                blocks.push(Block::ExternalImage {
+                    source: src.to_owned(),
+                    alt: element.value().attr("alt").unwrap_or_default().to_owned(),
+                });
             } else {
                 let mut text = Inline::default();
-                text.push(
-                    element
-                        .value()
-                        .attr("alt")
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or("[External image not loaded]"),
-                    &Default::default(),
-                );
+                text.push("[Notebook image attachment missing]", &Default::default());
                 blocks.push(Block::Text(text, 0));
             }
             return;
@@ -754,6 +792,25 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n")
     }
+    #[test]
+    fn markdown_image_references_preserve_sources_and_alt_text() {
+        let rich = Rich::markdown(
+            "![Plot](../plots/a%20b.png)\n\n![Remote](https://example.test/a.png)",
+            None,
+        );
+        assert_eq!(
+            rich.image_sources().collect::<Vec<_>>(),
+            ["../plots/a%20b.png", "https://example.test/a.png"]
+        );
+        assert!(matches!(&rich.blocks[0], Block::ExternalImage { alt, .. } if alt == "Plot"));
+        assert_eq!(
+            Rich::markdown("![Missing](attachment:missing.png)", None)
+                .image_sources()
+                .count(),
+            0
+        );
+    }
+
     #[test]
     fn mime_priority_falls_back_from_bad_images_and_preserves_tables() {
         let data = serde_json::from_value(serde_json::json!({
