@@ -178,6 +178,26 @@ impl Session {
         }
         Ok(())
     }
+    pub fn restore_structure(
+        &self,
+        bindings: &[(u64, CellId)],
+        restored: &[ganymede_core::notebook::Cell],
+    ) -> Result<(), String> {
+        let controller = self.controller.as_ref().map_err(Clone::clone)?;
+        let mut cells = self.cells.lock().unwrap();
+        controller
+            .restore_structure(
+                &bindings
+                    .iter()
+                    .map(|(_, id)| id.clone())
+                    .collect::<Vec<_>>(),
+                restored,
+            )
+            .map_err(|error| error.to_string())?;
+        *cells = bindings.iter().cloned().collect();
+        Ok(())
+    }
+
     pub fn clear_outputs(&self, key: u64) -> Result<(), String> {
         let controller = self.controller.as_ref().map_err(Clone::clone)?;
         if let Some(id) = self.cells.lock().unwrap().get(&key) {

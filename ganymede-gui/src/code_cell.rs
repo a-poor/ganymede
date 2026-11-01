@@ -451,6 +451,7 @@ impl CodeCell {
     pub fn load(&mut self, cell: &ganymede_core::notebook::Cell, cx: &mut Context<Self>) {
         self.buffer.text = cell.source();
         self.kind = cell.kind();
+        self.markdown_preview = None;
         self.execution_count = cell.execution_count();
         self.set_output(crate::execution::output_blocks(cell.outputs()));
         self.attachments = cell

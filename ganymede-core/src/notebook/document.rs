@@ -290,6 +290,33 @@ impl NotebookDocument {
         self.changed();
         Ok(id)
     }
+    /// Restore structure without rolling back source edits or outputs of retained cells.
+    /// Supplied cells restore deleted cells or the payload of a cell-type change.
+    pub fn restore_structure(&mut self, order: &[CellId], restored: &[Cell]) -> Result<()> {
+        let mut seen = HashSet::new();
+        let mut cells = Vec::with_capacity(order.len());
+        for id in order {
+            if !seen.insert(id) {
+                return Err(Error::Invalid("duplicate cell in history".into()));
+            }
+            let current = self.cells.iter().find(|cell| cell.id() == id);
+            let saved = restored.iter().find(|cell| cell.id() == id);
+            let mut cell = saved
+                .or(current)
+                .ok_or_else(|| Error::MissingCell(id.clone()))?
+                .clone();
+            if let (Some(current), Some(_)) = (current, saved) {
+                cell.source = current.source.clone();
+            }
+            cells.push(cell);
+        }
+        if cells != self.cells {
+            self.cells = cells;
+            self.changed();
+        }
+        Ok(())
+    }
+
     pub fn remove_cell(&mut self, id: &CellId) -> Result<Cell> {
         let index = self.index(id)?;
         let cell = self.cells.remove(index);
@@ -422,6 +449,33 @@ fn take<T: serde::de::DeserializeOwned>(fields: &mut Map<String, Value>, key: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn structural_restore_is_atomic_and_keeps_live_outputs_and_saved_revision() {
+        let mut doc = NotebookDocument::new();
+        let a = doc.insert_cell(0, CellKind::Code, "a").unwrap();
+        let b = doc.insert_cell(1, CellKind::Code, "b").unwrap();
+        let saved = doc.cell(&a).unwrap().clone();
+        doc.remove_cell(&a).unwrap();
+        doc.update_source(&b, "newer source").unwrap();
+        doc.cells[0].execution_count = Some(20);
+        doc.mark_saved(doc.revision());
+        let revision = doc.revision();
+        doc.restore_structure(&[a.clone(), b.clone()], &[saved])
+            .unwrap();
+        assert!(doc.is_dirty());
+        assert!(doc.revision() > revision);
+        assert_eq!(doc.cell(&b).unwrap().source(), "newer source");
+        assert_eq!(doc.cell(&b).unwrap().execution_count(), Some(20));
+        let before = doc.to_json();
+        let revision = doc.revision();
+        assert!(doc.restore_structure(&[a.clone(), a], &[]).is_err());
+        assert_eq!(doc.to_json(), before);
+        assert_eq!(doc.revision(), revision);
+        let ids: Vec<_> = doc.cells().iter().map(|c| c.id().clone()).collect();
+        doc.restore_structure(&ids, &[]).unwrap();
+        assert_eq!(doc.revision(), revision);
+    }
+
     #[test]
     fn round_trip_preserves_unknown_fields_and_multiline_representations() {
         let original = json!({"nbformat":4,"nbformat_minor":5,"metadata":{"vendor":{"a":1}},"extra_root":[1,2],"cells":[

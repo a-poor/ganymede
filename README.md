@@ -355,3 +355,18 @@ cargo test -p ganymede-gui execution::tests::live_execution -- --ignored
 This test creates its own unique scratch session, verifies streaming output,
 shared state, errors, interrupt, and restart, and deletes that test session
 afterward.
+
+## Notebook undo and redo
+
+Cell insertion, deletion/cut, duplication, movement, and type changes have a
+separate undo history per open notebook (up to 100 structural edits). Press
+Escape to select the cell, then Cmd+Z to undo or Cmd+Shift+Z to redo (Ctrl on
+other platforms). While editing text or answering an input prompt, these
+shortcuts continue to use that input's own undo history.
+
+Restoring a deleted cell retains its source, outputs, ID, metadata, and
+attachments. Moving cells does not roll back their text or execution results.
+Undo never executes code; changes that would remove or replace a running cell
+are blocked until execution finishes or is interrupted. New structural edits clear
+redo. History lasts until the notebook closes or is reloaded from the server;
+undo/redo changes participate in normal saving and autosave.

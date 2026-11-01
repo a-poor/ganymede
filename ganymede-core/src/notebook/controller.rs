@@ -157,6 +157,42 @@ impl NotebookController {
             Some(id.clone()),
         )
     }
+    /// Atomically apply structural history; execution itself is never replayed.
+    pub fn restore_structure(&self, order: &[CellId], restored: &[super::Cell]) -> Result<()> {
+        self.edit(
+            |state| {
+                let affected: Vec<_> = state
+                    .snapshot
+                    .document
+                    .cells()
+                    .iter()
+                    .filter(|cell| {
+                        !order.contains(cell.id())
+                            || restored.iter().any(|saved| saved.id() == cell.id())
+                    })
+                    .map(|cell| cell.id().clone())
+                    .collect();
+                if affected.iter().any(|id| {
+                    state
+                        .snapshot
+                        .executions
+                        .get(id)
+                        .is_some_and(|run| run.phase.is_active())
+                }) {
+                    return Err(Error::Unavailable(
+                        "finish or interrupt execution before undoing this cell change".into(),
+                    ));
+                }
+                state.snapshot.document.restore_structure(order, restored)?;
+                for id in affected {
+                    state.forget_cell(&id);
+                }
+                Ok(())
+            },
+            None,
+        )
+    }
+
     pub fn remove_cell(&self, id: &CellId) -> Result<()> {
         self.edit(
             |state| {
@@ -761,4 +797,54 @@ async fn finish<T: Send + 'static>(
     tokio::spawn(future)
         .await
         .map_err(|error| Error::Unavailable(format!("notebook operation task failed: {error}")))?
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    #[test]
+    fn structural_history_blocks_removing_or_replacing_active_cells_but_allows_moves() {
+        let mut document = NotebookDocument::new();
+        let a = document.insert_cell(0, CellKind::Code, "input()").unwrap();
+        let b = document.insert_cell(1, CellKind::Code, "2").unwrap();
+        let saved = document.cell(&a).unwrap().clone();
+        let controller = NotebookController::new(
+            ServerConfig::new("http://127.0.0.1:9").unwrap(),
+            "test.ipynb",
+            document,
+        )
+        .unwrap();
+        controller
+            .inner
+            .data
+            .lock()
+            .unwrap()
+            .state
+            .snapshot
+            .executions
+            .insert(
+                a.clone(),
+                super::super::CellExecution {
+                    request_id: "request".into(),
+                    source: "input()".into(),
+                    phase: ExecutionPhase::WaitingForInput,
+                },
+            );
+        let before = controller.snapshot().document.to_json();
+        assert!(
+            controller
+                .restore_structure(std::slice::from_ref(&b), &[])
+                .is_err()
+        );
+        assert!(
+            controller
+                .restore_structure(&[a.clone(), b.clone()], &[saved])
+                .is_err()
+        );
+        assert_eq!(controller.snapshot().document.to_json(), before);
+        controller.restore_structure(&[b, a.clone()], &[]).unwrap();
+        assert_eq!(controller.snapshot().document.cells()[1].id(), &a);
+        assert!(controller.snapshot().executions[&a].phase.is_active());
+    }
 }

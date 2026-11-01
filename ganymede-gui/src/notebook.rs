@@ -1,4 +1,5 @@
 //! Server-backed notebook editor.
+mod history;
 mod list_row;
 use std::collections::VecDeque;
 
@@ -8,14 +9,32 @@ use ganymede_core::notebook::CellKind;
 
 use crate::code_cell::{CellEvent, CodeCell};
 
-gpui::actions!(notebook, [FindNotebook, CloseFind]);
+gpui::actions!(
+    notebook,
+    [FindNotebook, CloseFind, UndoStructure, RedoStructure]
+);
 pub fn init(cx: &mut gpui::App) {
     let key = if cfg!(target_os = "macos") {
         "cmd-f"
     } else {
         "ctrl-f"
     };
+    let modifier = if cfg!(target_os = "macos") {
+        "cmd"
+    } else {
+        "ctrl"
+    };
     cx.bind_keys([
+        gpui::KeyBinding::new(
+            &format!("{modifier}-z"),
+            UndoStructure,
+            Some("Notebook && !CodeCell"),
+        ),
+        gpui::KeyBinding::new(
+            &format!("{modifier}-shift-z"),
+            RedoStructure,
+            Some("Notebook && !CodeCell"),
+        ),
         gpui::KeyBinding::new(key, FindNotebook, Some("Notebook")),
         gpui::KeyBinding::new("escape", CloseFind, Some("Notebook && !CodeCell")),
     ]);
@@ -78,6 +97,8 @@ impl RunQueue {
 pub struct Notebook {
     toasts: Entity<crate::toast::ToastHost>,
     cells: Vec<Entity<CodeCell>>,
+    undo_structure: Vec<history::Entry>,
+    redo_structure: Vec<history::Entry>,
     saving: bool,
     file_busy: bool,
     save_conflict: bool,
@@ -139,6 +160,8 @@ impl Notebook {
         let mut notebook = Self {
             toasts,
             cells: vec![],
+            undo_structure: vec![],
+            redo_structure: vec![],
             session,
             saving: false,
             file_busy: false,
@@ -302,6 +325,9 @@ impl Notebook {
                     if this.runs.active == Some(index) {
                         return;
                     }
+                    if !this.record_structure(Some(index), cx) {
+                        return;
+                    }
                     // A running cell stays in place until the kernel finishes.
                     cell.update(cx, |cell, cx| cell.clear_execution(cx));
                     this.runs.remove(index);
@@ -319,6 +345,9 @@ impl Notebook {
                     cx.notify();
                 }
                 CellEvent::Duplicate | CellEvent::InsertAbove | CellEvent::InsertBelow => {
+                    if !this.record_structure(None, cx) {
+                        return;
+                    }
                     let source = if matches!(event, CellEvent::Duplicate) {
                         cell.read(cx).text().to_owned()
                     } else {
@@ -353,6 +382,12 @@ impl Notebook {
                     } else {
                         (index + 1).min(this.cells.len() - 1)
                     };
+                    if index == target {
+                        return;
+                    }
+                    if !this.record_structure(None, cx) {
+                        return;
+                    }
                     this.cells.swap(index, target);
                     this.runs.remap(|i| {
                         if i == index {
@@ -396,6 +431,9 @@ impl Notebook {
                         }
                     }
                     if index + 1 == this.cells.len() {
+                        if !this.record_structure(None, cx) {
+                            return;
+                        }
                         this.append_cell(window, cx);
                     }
                     this.select(index + 1, cx);
@@ -844,6 +882,8 @@ impl Notebook {
                 .and_then(|result| result.map_err(|error| error.to_string()));
             this.update_in(cx, |this, window, cx| {
                 if choice == 1 && result.is_ok() {
+                    this.undo_structure.clear();
+                    this.redo_structure.clear();
                     this.cells.clear();
                     this.session.clear_bindings();
                     this.runs = RunQueue::default();
@@ -928,6 +968,9 @@ impl Notebook {
     ) {
         match action {
             ToolbarAction::Add | ToolbarAction::Paste => {
+                if !self.record_structure(None, cx) {
+                    return;
+                }
                 let text = if matches!(action, ToolbarAction::Paste) {
                     cx.read_from_clipboard()
                         .and_then(|item| item.text())
@@ -953,6 +996,9 @@ impl Notebook {
                         return;
                     }
                     let index = self.selected;
+                    if !self.record_structure(Some(index), cx) {
+                        return;
+                    }
                     self.cells[index].update(cx, |cell, cx| cell.clear_execution(cx));
                     self.runs.remove(index);
                     self.cells.remove(index);
@@ -1085,6 +1131,9 @@ impl Notebook {
             return;
         }
         if self.cells[self.selected].read(cx).kind() != kind {
+            if !self.record_structure(Some(self.selected), cx) {
+                return;
+            }
             self.runs.finish(self.selected);
             self.runs.pending.retain(|run| run.0 != self.selected);
             self.cells[self.selected].update(cx, |cell, cx| cell.set_kind(kind, cx));
@@ -1453,6 +1502,12 @@ impl Render for Notebook {
                 } else {
                     cx.propagate();
                 }
+            }))
+            .on_action(cx.listener(|this, _: &UndoStructure, window, cx| {
+                this.restore_history(false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &RedoStructure, window, cx| {
+                this.restore_history(true, window, cx)
             }))
             .on_action(cx.listener(|this, _: &FindNotebook, window, cx| this.open_find(window, cx)))
             .on_action(cx.listener(|this, _: &crate::Save, window, cx| this.save(window, cx)))
