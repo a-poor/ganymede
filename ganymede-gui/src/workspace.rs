@@ -311,7 +311,7 @@ impl Workspace {
         })
         .detach();
         this.refresh_directory(String::new(), cx);
-        this.create(DocumentKind::Notebook, window, cx);
+        this.open_launcher(window, cx);
         this
     }
     fn create(&mut self, kind: DocumentKind, window: &mut Window, cx: &mut Context<Self>) {
