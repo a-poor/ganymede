@@ -110,7 +110,7 @@ impl Notebook {
         }
         let response = window.prompt(gpui::PromptLevel::Warning, &format!("Switch to {label}?"),
             Some("The current kernel will stop and its variables will be lost. Running and queued cells will be stopped. Other notebooks using that kernel are also affected. Your notebook and outputs will be kept."),
-            &["Cancel", "Switch Kernel"], cx);
+            &["Cancel", "Switch"], cx);
         cx.spawn(async move |this, cx| {
             if response.await == Ok(1) {
                 this.update(cx, |this, cx| this.switch_kernel(name, cx))

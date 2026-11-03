@@ -237,7 +237,7 @@ atomically on a background worker; a crash can lose edits made since the last
 completed backup. Recovery copies include document contents and the original
 server version, but no connection credentials. On Unix the files are owner-only.
 Each document instance has its own copy, so windows do not overwrite each other's
-backups. Reopening offers **Restore changes**, **Discard recovery copy**, or
+backups. Reopening offers **Restore**, **Discard**, or
 **Later**. Restored edits stay dirty with autosave paused until an explicit save;
 the original server version still controls conflict detection. Successful saves,
 explicit discards, and confirmed deletion of an open file clear its recovery copy.
@@ -338,7 +338,7 @@ Saves are silent; failures show an error toast and pause autosave until a manual
 save or toggling autosave off/on. ⌘S / Ctrl+S always remains available.
 
 Closing a tab or the main window, or using ⌘Q / Quit, checks for unsaved work.
-The confirmation offers Cancel, Discard changes, and Save and close/quit.
+The confirmation offers Cancel, Discard, and Save.
 Saving must succeed, with no newer unsaved edits, before closing. Autosave pauses
 while the dialog is open. Escape cancels; Tab/arrows choose an action and Enter
 confirms. The same save and close protection applies to text files.
@@ -348,9 +348,9 @@ this confirmation with the current GPUI platform hooks.
 Before each manual or automatic save, Ganymede checks the server's `last_modified`
 against the version returned by the last open, reload, or successful save. External
 changes (including deletion) pause autosave and open the same confirmation dialog:
-Cancel, Reload, Save a Copy, or Overwrite. Cancel keeps local edits; Reload discards
+Cancel, Reload, Save Copy, or Overwrite. Cancel keeps local edits; Reload discards
 them and loads the server version; Overwrite explicitly replaces the server file.
-Save a Copy uses a server-allocated unused notebook name in the same directory and
+Save Copy uses a server-allocated unused notebook name in the same directory and
 shows its path in a toast. The original remains open and dirty, with autosave paused,
 until you resolve its conflict or discard it. Toggling autosave does not dismiss a
 conflict. Reload is refused during execution or if edits arrive while fetching.

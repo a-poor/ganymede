@@ -310,7 +310,7 @@ impl Workspace {
         self.recovery.prompt = true;
         let response = window.prompt(gpui::PromptLevel::Warning, "Recover unsaved changes?",
             Some(&format!("A local recovery copy is available for {path}. Restore opens those edits without changing the server file. Autosave stays paused until you save. Discard removes only this recovery copy.")),
-            &["Later", "Discard recovery copy", "Restore changes"], cx);
+            &["Later", "Discard", "Restore"], cx);
         cx.spawn_in(window, async move |this, cx| {
             let answer = response.await.unwrap_or(0);
             this.update_in(cx, |this, window, cx| {

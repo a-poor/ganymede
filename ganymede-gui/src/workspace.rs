@@ -902,15 +902,7 @@ impl Workspace {
             "Save changes before closing?"
         };
         let detail = "Your unsaved changes will be lost if you discard them.";
-        let choices = vec![
-            "Cancel",
-            "Discard changes",
-            if quitting {
-                "Save and quit"
-            } else {
-                "Save and close"
-            },
-        ];
+        let choices = ["Cancel", "Discard", "Save"];
         self.close_pending = true;
         self.suspend_autosave(target, true, cx);
         let response = window.prompt(

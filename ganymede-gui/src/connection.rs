@@ -482,7 +482,7 @@ impl ConnectionWindow {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Choose project folder".into()),
+            prompt: Some("Choose".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = paths.await
@@ -1175,7 +1175,7 @@ mod tests {
             continue_quit(cx);
         });
         assert!(cx.has_pending_prompt());
-        cx.simulate_prompt_answer("Discard changes");
+        cx.simulate_prompt_answer("Discard");
         cx.run_until_parked();
         assert!(cx.has_pending_prompt());
         assert_eq!(

@@ -37,13 +37,13 @@ fn conflict_prompt(
     cx: &mut App,
 ) -> impl std::future::Future<Output = usize> + use<> {
     let detail = format!(
-        "{path} has changed on the server. Reload discards your local changes. Save a Copy preserves them in a separate {kind}. Overwrite replaces the server version."
+        "{path} has changed on the server. Reload discards your local changes. Save Copy preserves them in a separate {kind}. Overwrite replaces the server version."
     );
     let response = window.prompt(
         gpui::PromptLevel::Warning,
         &format!("{title} changed on the server"),
         Some(&detail),
-        &["Cancel", "Reload", "Save a Copy", "Overwrite"],
+        &["Cancel", "Reload", "Save Copy", "Overwrite"],
         cx,
     );
     async move { response.await.unwrap_or(0) }
