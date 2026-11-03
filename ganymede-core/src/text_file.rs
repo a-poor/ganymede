@@ -30,6 +30,15 @@ impl Snapshot {
         self.revision != self.saved_revision
     }
 }
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct TextRecovery {
+    pub path: String,
+    pub text: String,
+    pub saved_version: String,
+    pub crlf: bool,
+    pub bom: bool,
+}
+
 struct Data {
     snapshot: Snapshot,
     version: String,
@@ -114,6 +123,34 @@ impl TextFileController {
             saves: Default::default(),
         })
     }
+    pub fn recovery(&self) -> Option<TextRecovery> {
+        let data = self.data.lock().unwrap();
+        data.snapshot.is_dirty().then(|| TextRecovery {
+            path: data.snapshot.path.clone(),
+            text: data.snapshot.text.clone(),
+            saved_version: data.version.clone(),
+            crlf: data.crlf,
+            bom: data.bom,
+        })
+    }
+    pub fn from_recovery(config: ServerConfig, recovery: TextRecovery) -> Result<Self> {
+        Ok(Self {
+            rest: JupyterRestClient::new(config)?,
+            data: Arc::new(Mutex::new(Data {
+                snapshot: Snapshot {
+                    path: recovery.path,
+                    text: recovery.text,
+                    revision: 1,
+                    saved_revision: 0,
+                },
+                version: recovery.saved_version,
+                crlf: recovery.crlf,
+                bom: recovery.bom,
+            })),
+            saves: Default::default(),
+        })
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         self.data.lock().unwrap().snapshot.clone()
     }

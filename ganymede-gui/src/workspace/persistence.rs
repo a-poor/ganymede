@@ -36,7 +36,7 @@ impl Default for Layout {
     }
 }
 
-fn state_path(address: &str) -> PathBuf {
+pub(super) fn state_path(address: &str) -> PathBuf {
     // Hex is reversible and collision-free, unlike a process-dependent hash.
     // Use a directory component per chunk to stay below filename limits for long base URLs.
     let mut path = crate::connection::history_path().with_extension("workspaces");
@@ -106,6 +106,20 @@ impl Workspace {
     }
 
     pub(super) fn begin_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for (path, notebook) in self.recovery.paths() {
+            if !self
+                .saved_layout
+                .tabs
+                .iter()
+                .any(|t| t.path.as_ref() == Some(&path))
+            {
+                self.saved_layout.tabs.push(SavedTab {
+                    path: Some(path),
+                    notebook,
+                    ..Default::default()
+                });
+            }
+        }
         let saved = self.saved_layout.clone();
         self.expanded.extend(saved.expanded.iter().cloned());
         for path in saved.expanded {
@@ -127,11 +141,22 @@ impl Workspace {
             }
         }
         self.finish_restore(window, cx);
-        cx.on_release(|this, cx| this.persist_layout(cx)).detach();
-        cx.spawn(async move |this, cx| {
+        cx.on_release(|this, cx| {
+            this.persist_layout(cx);
+            this.persist_recovery(cx);
+        })
+        .detach();
+        cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
-                if this.update(cx, |this, cx| this.persist_layout(cx)).is_err() {
+                if this
+                    .update_in(cx, |this, window, cx| {
+                        this.persist_layout(cx);
+                        this.persist_recovery(cx);
+                        this.next_recovery(window, cx);
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -140,7 +165,7 @@ impl Workspace {
     }
 
     pub(super) fn finish_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.restoring || !self.opening.is_empty() {
+        if !self.restoring || !self.opening.is_empty() || self.recovery.waiting() {
             return;
         }
         self.unrestored = self

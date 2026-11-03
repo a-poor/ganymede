@@ -66,6 +66,14 @@ impl Inner {
 pub struct NotebookController {
     inner: Arc<Inner>,
 }
+/// A local recovery copy, including the version used by normal save conflict checks.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct NotebookRecovery {
+    pub path: String,
+    pub document: Value,
+    pub saved_version: Option<String>,
+}
+
 impl NotebookController {
     /// Construct without connecting. `document` may contain unsaved local work.
     pub fn new(
@@ -112,6 +120,24 @@ impl NotebookController {
         controller.inner.data.lock().unwrap().saved_version = Some(contents.last_modified);
         Ok(controller)
     }
+    pub fn recovery(&self) -> Option<NotebookRecovery> {
+        let data = self.inner.data.lock().unwrap();
+        let snapshot = &data.state.snapshot;
+        snapshot.document.is_dirty().then(|| NotebookRecovery {
+            path: snapshot.path.clone(),
+            document: snapshot.document.to_json(),
+            saved_version: data.saved_version.clone(),
+        })
+    }
+
+    pub fn from_recovery(config: ServerConfig, recovery: NotebookRecovery) -> Result<Self> {
+        let mut document = NotebookDocument::from_json(recovery.document)?;
+        document.mark_recovered();
+        let controller = Self::new(config, recovery.path, document)?;
+        controller.inner.data.lock().unwrap().saved_version = recovery.saved_version;
+        Ok(controller)
+    }
+
     pub fn server_config(&self) -> ServerConfig {
         self.inner.config.clone()
     }

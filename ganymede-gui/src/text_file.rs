@@ -32,6 +32,7 @@ pub struct TextFile {
     save_error: bool,
     autosave: AutosaveClock,
     suspended: bool,
+    recovery_pending: bool,
 }
 impl TextFile {
     pub fn view_offset(&self, cx: &gpui::App) -> (f32, f32) {
@@ -77,6 +78,7 @@ impl TextFile {
                         let (revision, dirty) = this.controller.status();
                         let enabled = cx.global::<AutosavePreference>().0
                             && !this.suspended
+                            && !this.recovery_pending
                             && !this.file_busy
                             && !this.conflict;
                         if this
@@ -103,6 +105,7 @@ impl TextFile {
             save_error: false,
             autosave: Default::default(),
             suspended: false,
+            recovery_pending: false,
         }
     }
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -124,10 +127,14 @@ impl TextFile {
         self.controller.clone()
     }
     pub fn file_saved_as(&mut self, cx: &mut Context<Self>) {
+        self.recovery_pending = false;
         self.conflict = false;
         self.save_error = false;
         self.autosave.resume();
         cx.notify();
+    }
+    pub fn set_recovery_pending(&mut self, pending: bool) {
+        self.recovery_pending = pending;
     }
     pub fn suspend_autosave(&mut self, suspended: bool) {
         self.suspended = suspended;
@@ -206,6 +213,7 @@ impl TextFile {
                             this.editor.update(cx, |editor, cx| editor.set_text(text, cx));
                             this.focus(window, cx);
                         }
+                        this.recovery_pending = false;
                         this.conflict = false;
                         this.save_error = false;
                         this.autosave.resume();

@@ -2,6 +2,7 @@
 mod file_management;
 mod kernels;
 mod persistence;
+mod recovery;
 mod selection;
 mod server;
 use crate::execution::{Runtime, Session};
@@ -221,6 +222,7 @@ enum FileAction {
 pub struct Workspace {
     runtime: Runtime,
     saved_layout: persistence::Layout,
+    recovery: recovery::Recovery,
     last_written: Option<persistence::Layout>,
     unrestored: Vec<(usize, persistence::SavedTab)>,
     restoring: bool,
@@ -280,7 +282,9 @@ impl Workspace {
         )
         .detach();
         let saved_layout = Self::load_layout(&runtime);
+        let recovery = recovery::Recovery::new(&runtime);
         let mut this = Self {
+            recovery,
             saved_layout,
             last_written: None,
             unrestored: Vec::new(),
@@ -616,6 +620,9 @@ impl Workspace {
                 self.activate(doc.id, window, cx);
                 return;
             }
+            if self.recovery_before_open(path, kind, window, cx) {
+                return;
+            }
             if !self.opening.insert(path.clone()) {
                 return;
             }
@@ -625,6 +632,8 @@ impl Workspace {
             }
             self.creating = true;
         }
+        let recovery = path.as_ref().and_then(|path| self.recovery.selected(path));
+        let recovered = recovery.is_some();
         let runtime = &self.runtime;
         let config = runtime.config.clone();
         let requested = path.clone();
@@ -642,9 +651,12 @@ impl Workspace {
                         .path
                 }
             };
-            let controller = ganymede_core::text_file::TextFileController::open(config, &path)
-                .await
-                .map_err(|e| e.to_string())?;
+            let controller = if let Some(recovery::Backup::Text(backup)) = recovery {
+                ganymede_core::text_file::TextFileController::from_recovery(config, backup)
+            } else {
+                ganymede_core::text_file::TextFileController::open(config, &path).await
+            }
+            .map_err(|e| e.to_string())?;
             Ok::<_, String>((path, controller))
         });
         cx.spawn_in(window, async move |this, cx| {
@@ -663,9 +675,13 @@ impl Workspace {
                         this.reveal_file_parent(&path);
                         let editor =
                             cx.new(|cx| TextFile::new(controller, this.toasts.clone(), window, cx));
-                        editor.update(cx, |view, _| view.set_file_busy(this.file_busy));
+                        editor.update(cx, |view, _| {
+                            view.set_file_busy(this.file_busy);
+                            view.set_recovery_pending(recovered);
+                        });
                         cx.observe(&editor, |_, _, cx| cx.notify()).detach();
                         this.next_id += 1;
+                        this.track_recovery(this.next_id, &path);
                         this.documents.push(Document {
                             id: this.next_id,
                             name: path.rsplit('/').next().unwrap_or(&path).to_owned().into(),
@@ -690,6 +706,7 @@ impl Workspace {
                         cx,
                     ),
                 }
+                this.persist_recovery(cx);
                 this.finish_restore(window, cx);
                 cx.notify();
             })
@@ -710,6 +727,9 @@ impl Workspace {
                 self.activate(doc.id, window, cx);
                 return;
             }
+            if self.recovery_before_open(path, DocumentKind::Notebook, window, cx) {
+                return;
+            }
             if !self.opening.insert(path.clone()) {
                 return;
             }
@@ -720,6 +740,8 @@ impl Workspace {
             self.creating = true;
         }
         self.file_error = None;
+        let recovery = path.as_ref().and_then(|path| self.recovery.selected(path));
+        let recovered = recovery.is_some();
         let runtime = &self.runtime;
         let config = runtime.config.clone();
         let restoring = self.restoring;
@@ -738,10 +760,13 @@ impl Workspace {
                         .path
                 }
             };
-            let controller = NotebookController::open(config.clone(), &path)
-                .await
-                .map_err(|e| e.to_string())?;
-            if restoring {
+            let controller = if let Some(recovery::Backup::Notebook(backup)) = recovery {
+                NotebookController::from_recovery(config.clone(), backup)
+            } else {
+                NotebookController::open(config.clone(), &path).await
+            }
+            .map_err(|e| e.to_string())?;
+            if restoring || recovered {
                 // A stopped or unavailable kernel must not prevent restoring the document.
                 let _ = controller.attach_existing_session().await;
             }
@@ -763,7 +788,7 @@ impl Workspace {
                         this.reveal_file_parent(&path);
                         let session = Session::from_controller(controller, &this.runtime);
                         let notebook = cx.new(|cx| {
-                            if restoring {
+                            if restoring || recovered {
                                 Notebook::new_with_connection(
                                     session,
                                     this.toasts.clone(),
@@ -775,9 +800,13 @@ impl Workspace {
                                 Notebook::new(session, this.toasts.clone(), window, cx)
                             }
                         });
-                        notebook.update(cx, |view, _| view.set_file_busy(this.file_busy));
+                        notebook.update(cx, |view, _| {
+                            view.set_file_busy(this.file_busy);
+                            view.set_recovery_pending(recovered);
+                        });
                         cx.observe(&notebook, |_, _, cx| cx.notify()).detach();
                         this.next_id += 1;
+                        this.track_recovery(this.next_id, &path);
                         this.documents.push(Document {
                             id: this.next_id,
                             name: path.rsplit('/').next().unwrap_or(&path).to_owned().into(),
@@ -798,6 +827,7 @@ impl Workspace {
                     Ok(Err(error)) => this.file_error = Some(error),
                     Err(_) => this.file_error = Some("Could not open notebook".into()),
                 }
+                this.persist_recovery(cx);
                 this.finish_restore(window, cx);
                 cx.notify();
             })
@@ -893,7 +923,10 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             let response = response.await;
             this.update_in(cx, |this, window, cx| match response {
-                Ok(1) => this.complete_close(target, window, cx),
+                Ok(1) => {
+                    this.discard_recovery(target);
+                    this.complete_close(target, window, cx);
+                }
                 Ok(2) => this.save_and_close(target, window, cx),
                 _ => {
                     crate::connection::cancel_quit(cx);
@@ -939,6 +972,7 @@ impl Workspace {
     }
     fn complete_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
         self.close_pending = false;
+        self.persist_recovery(cx);
         match target {
             CloseTarget::Tab(id) => self.finish_close(id, window, cx),
             CloseTarget::Window | CloseTarget::Quit => {

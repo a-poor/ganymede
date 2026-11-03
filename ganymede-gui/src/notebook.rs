@@ -105,6 +105,7 @@ pub struct Notebook {
     save_conflict: bool,
     autosave: crate::autosave::AutosaveClock,
     autosave_suspended: bool,
+    recovery_pending: bool,
     save_error: Option<String>,
     session: crate::execution::Session,
     control_pending: bool,
@@ -180,6 +181,7 @@ impl Notebook {
             save_conflict: false,
             autosave: Default::default(),
             autosave_suspended: false,
+            recovery_pending: false,
             save_error: None,
             control_pending: false,
             control_label: "",
@@ -250,6 +252,7 @@ impl Notebook {
                         let document = this.session.document();
                         let enabled = cx.global::<crate::autosave::AutosavePreference>().0
                             && !this.autosave_suspended
+                            && !this.recovery_pending
                             && !this.file_busy
                             && !this.save_conflict;
                         if this.autosave.due(
@@ -862,6 +865,7 @@ impl Notebook {
         if self.save_error.is_some() {
             self.autosave.failed();
         } else {
+            self.recovery_pending = false;
             self.save_conflict = false;
             self.autosave.resume();
         }
@@ -957,10 +961,14 @@ impl Notebook {
         self.session.controller()
     }
     pub fn file_saved_as(&mut self, cx: &mut Context<Self>) {
+        self.recovery_pending = false;
         self.save_conflict = false;
         self.save_error = None;
         self.autosave.resume();
         cx.notify();
+    }
+    pub fn set_recovery_pending(&mut self, pending: bool) {
+        self.recovery_pending = pending;
     }
     pub fn suspend_autosave(&mut self, suspended: bool) {
         self.autosave_suspended = suspended;

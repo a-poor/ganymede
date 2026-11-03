@@ -3,7 +3,7 @@ mod controller;
 mod document;
 mod state;
 
-pub use controller::NotebookController;
+pub use controller::{NotebookController, NotebookRecovery};
 pub use document::{Cell, CellId, CellKind, KnownOutput, Multiline, NotebookDocument, Output};
 pub use state::{
     CellExecution, ConnectionState, ExecutionPhase, NotebookEvent, NotebookSnapshot, PendingInput,

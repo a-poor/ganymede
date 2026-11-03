@@ -600,3 +600,84 @@ async fn workspace_restore_only_attaches_matching_existing_sessions() {
     controller.disconnect().await.unwrap();
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn notebook_recovery_preserves_payload_and_original_save_conflict() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = ServerConfig::new(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let (header, _) = read_http(&mut socket).await;
+        assert!(header.starts_with("GET /api/contents/test.ipynb?"));
+        let mut initial = contents("v1", "original");
+        initial["content"]["vendor"] = json!({"keep":true});
+        reply_json(&mut socket, "200 OK", initial).await;
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let (header, _) = read_http(&mut socket).await;
+        assert!(header.starts_with("GET /api/contents/test.ipynb?"));
+        reply_json(&mut socket, "200 OK", contents("v2", "someone else's work")).await;
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let (header, body) = read_http(&mut socket).await;
+        assert!(header.starts_with("PUT /api/contents/test.ipynb "));
+        assert_eq!(body["content"]["cells"][0]["source"], "recovered work");
+        assert_eq!(body["content"]["vendor"], json!({"keep":true}));
+        reply_json(&mut socket, "200 OK", contents("v3", "recovered work")).await;
+    });
+    let original = NotebookController::open(config.clone(), "test.ipynb")
+        .await
+        .unwrap();
+    assert!(original.recovery().is_none());
+    let id = original.snapshot().document.cells()[0].id().clone();
+    original.update_source(&id, "recovered work").unwrap();
+    let bytes = serde_json::to_vec(&original.recovery().unwrap()).unwrap();
+    let restored =
+        NotebookController::from_recovery(config, serde_json::from_slice(&bytes).unwrap()).unwrap();
+    assert!(restored.snapshot().document.is_dirty());
+    assert_eq!(
+        restored.snapshot().document.to_json(),
+        original.snapshot().document.to_json()
+    );
+    assert!(matches!(
+        restored.save().await,
+        Err(ganymede_core::notebook::Error::SaveConflict)
+    ));
+    assert!(restored.recovery().is_some());
+    restored.overwrite().await.unwrap();
+    assert!(restored.recovery().is_none());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn text_recovery_keeps_encoding_and_requires_conflict_resolution() {
+    use ganymede_core::text_file::{Error, TextFileController};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = ServerConfig::new(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let file = |version: &str| json!({"name":"notes.txt","path":"notes.txt","type":"file","format":"text","writable":true,"created":"","last_modified":version,"content":"\u{feff}old\r\n"});
+    let server = tokio::spawn(async move {
+        for version in ["v1", "v2"] {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let (header, _) = read_http(&mut socket).await;
+            assert!(header.starts_with("GET /api/contents/notes.txt?"));
+            reply_json(&mut socket, "200 OK", file(version)).await;
+        }
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let (header, body) = read_http(&mut socket).await;
+        assert!(header.starts_with("PUT /api/contents/notes.txt "));
+        assert_eq!(body["content"], "\u{feff}recovered\r\n");
+        reply_json(&mut socket, "200 OK", file("v3")).await;
+    });
+    let original = TextFileController::open(config.clone(), "notes.txt")
+        .await
+        .unwrap();
+    original.update_text("recovered\n".into());
+    let bytes = serde_json::to_vec(&original.recovery().unwrap()).unwrap();
+    let restored =
+        TextFileController::from_recovery(config, serde_json::from_slice(&bytes).unwrap()).unwrap();
+    assert_eq!(restored.snapshot().text, "recovered\n");
+    assert!(restored.snapshot().is_dirty());
+    assert!(matches!(restored.save(false).await, Err(Error::Conflict)));
+    assert!(restored.recovery().is_some());
+    restored.save(true).await.unwrap();
+    assert!(restored.recovery().is_none());
+    server.await.unwrap();
+}

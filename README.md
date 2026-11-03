@@ -226,10 +226,22 @@ Recent connections as “Configured server”.
 Reopening a server restores notebook and text-file tabs in order, the active tab,
 sidebar visibility and section, expanded folders, and document scroll positions.
 Layouts are stored locally per server URL (including its base path), alongside the
-recent-connections file. They contain neither credentials nor document contents;
-unsaved-edit recovery is not included. Restored notebooks attach only to existing
+recent-connections file. Layouts contain neither credentials nor document contents.
+Restored notebooks attach only to existing
 sessions at the same path. They do not start kernels or execute cells. Files that
 cannot be reopened remain in the saved layout for a later attempt.
+
+Unsaved notebook and text-file edits are backed up separately in the server's
+`recovery/` directory. Changed revisions are queued once per second and written
+atomically on a background worker; a crash can lose edits made since the last
+completed backup. Recovery copies include document contents and the original
+server version, but no connection credentials. On Unix the files are owner-only.
+Each document instance has its own copy, so windows do not overwrite each other's
+backups. Reopening offers **Restore changes**, **Discard recovery copy**, or
+**Later**. Restored edits stay dirty with autosave paused until an explicit save;
+the original server version still controls conflict detection. Successful saves,
+explicit discards, and confirmed deletion of an open file clear its recovery copy.
+Unavailable files and copies deferred with **Later** are retained for reopening.
 
 A new connection without a saved layout starts on the launcher without creating
 a server notebook. Creating a notebook explicitly uses Jupyter’s unused `Untitled`

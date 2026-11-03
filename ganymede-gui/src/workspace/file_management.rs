@@ -578,6 +578,7 @@ impl Workspace {
                                     .map(|doc| doc.id)
                                     .collect();
                                 for id in ids {
+                                    this.discard_recovery(super::CloseTarget::Tab(id));
                                     this.tabs.close(id);
                                     this.documents.retain(|doc| doc.id != id);
                                 }

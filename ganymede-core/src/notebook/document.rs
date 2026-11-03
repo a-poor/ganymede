@@ -261,6 +261,9 @@ impl NotebookDocument {
     pub(crate) fn mark_saved(&mut self, revision: u64) {
         self.saved_revision = Some(revision);
     }
+    pub(crate) fn mark_recovered(&mut self) {
+        self.saved_revision = None;
+    }
     fn changed(&mut self) {
         self.revision += 1;
     }
