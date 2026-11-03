@@ -455,3 +455,82 @@ async fn rejected_kernel_switch_keeps_connection_and_unsaved_document() {
     finish.send(()).unwrap();
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn server_reconnect_preserves_edits_and_never_creates_or_executes() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let (header, _) = read_http(&mut socket).await;
+            assert!(header.starts_with("GET /api/sessions/session "));
+            reply_json(&mut socket, "200 OK", json!({"id":"session","path":"test.ipynb","name":"test.ipynb","type":"notebook","kernel":{"id":"kernel","name":"python3"}})).await;
+            drop(socket);
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let Message::Text(text) = ws.next().await.unwrap().unwrap() else {
+                panic!()
+            };
+            let info: KernelMessage = serde_json::from_str(&text).unwrap();
+            assert_eq!(info.header.msg_type, "kernel_info_request");
+            let mut reply =
+                KernelMessage::request("server", "shell", "kernel_info_reply", json!({}));
+            reply.parent_header = serde_json::to_value(info.header).unwrap();
+            ws.send(Message::Text(serde_json::to_string(&reply).unwrap().into()))
+                .await
+                .unwrap();
+            // Reconnecting may send a close frame, but must not replay code.
+            while let Some(message) = ws.next().await {
+                match message {
+                    Ok(Message::Close(_)) | Err(_) => break,
+                    Ok(Message::Text(_)) | Ok(Message::Binary(_)) => {
+                        panic!("unexpected execution after reconnect")
+                    }
+                    _ => (),
+                }
+            }
+        }
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let (header, _) = read_http(&mut socket).await;
+        assert!(header.starts_with("GET /api/sessions/session "));
+        reply_json(
+            &mut socket,
+            "404 Not Found",
+            json!({"message":"session is gone"}),
+        )
+        .await;
+        // There must be no follow-up POST to create a replacement.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+    });
+    let mut doc = NotebookDocument::new();
+    let cell = doc.insert_cell(0, CellKind::Code, "original").unwrap();
+    let controller = NotebookController::new(
+        ServerConfig::new(&format!("http://{address}")).unwrap(),
+        "test.ipynb",
+        doc,
+    )
+    .unwrap();
+    assert!(!controller.reconnect_existing_session().await.unwrap());
+    controller.attach_session("session").await.unwrap();
+    controller.update_source(&cell, "unsaved edit").unwrap();
+    let revision = controller.snapshot().document.revision();
+    controller.disconnect().await.unwrap();
+    assert!(controller.reconnect_existing_session().await.unwrap());
+    assert_eq!(controller.snapshot().connection, ConnectionState::Connected);
+    assert_eq!(controller.snapshot().document.revision(), revision);
+    controller.disconnect().await.unwrap();
+    assert!(!controller.reconnect_existing_session().await.unwrap());
+    assert!(controller.snapshot().session.is_none());
+    assert_eq!(
+        controller.snapshot().document.cell(&cell).unwrap().source(),
+        "unsaved edit"
+    );
+    assert!(controller.snapshot().document.is_dirty());
+    assert!(!controller.reconnect_existing_session().await.unwrap());
+    server.await.unwrap();
+}

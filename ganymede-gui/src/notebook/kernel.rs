@@ -147,6 +147,39 @@ impl Notebook {
         .detach();
         cx.notify();
     }
+    pub fn cancel_server_queue(&mut self, cx: &mut Context<Self>) {
+        self.runs.pending.clear();
+        self.restart_run_all = false;
+        self.session.cancel_pending();
+        for cell in &self.cells {
+            cell.update(cx, |cell, cx| cell.set_queued(false, cx));
+        }
+        cx.notify();
+    }
+
+    pub fn recover_server_session(&mut self, cx: &mut Context<Self>) {
+        if self.connecting || self.control_pending || self.kernel_id().is_none() {
+            return;
+        }
+        self.cancel_server_queue(cx);
+        self.connecting = true;
+        let task = self.session.reconnect_existing();
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .unwrap_or_else(|_| Err("Could not reconnect to the kernel".into()));
+            this.update(cx, |this, cx| {
+                this.connecting = false;
+                this.execution_error = result.err();
+                this.report_kernel_error(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
     pub fn begin_kernel_shutdown(&mut self, cx: &mut Context<Self>) -> bool {
         if self.control_pending || self.connecting {
             return false;

@@ -498,6 +498,45 @@ impl NotebookController {
         })
         .await
     }
+    /// Recover only the previously associated session. Never creates a kernel,
+    /// reloads the document, or replays execution requests.
+    pub async fn reconnect_existing_session(&self) -> Result<bool> {
+        let this = self.clone();
+        finish(async move {
+            let _op = this.inner.operations.lock().await;
+            let Some(previous) = this.snapshot().session.clone() else {
+                return Ok(false);
+            };
+            let session = match this.inner.rest.get_session(&previous.id).await {
+                Ok(session) => session,
+                Err(crate::jupyter::Error::Api { status, .. })
+                    if status == reqwest::StatusCode::NOT_FOUND =>
+                {
+                    this.disconnect_inner().await?;
+                    let mut data = this.inner.data.lock().unwrap();
+                    data.state.snapshot.session = None;
+                    this.inner.publish(&mut data, vec![]);
+                    return Ok(false);
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if session.path != this.snapshot().path {
+                return Err(Error::Invalid(
+                    "session belongs to a different notebook path".into(),
+                ));
+            }
+            if session.kernel.id == previous.kernel.id
+                && this.inner.data.lock().unwrap().live.is_some()
+            {
+                return Ok(true);
+            }
+            this.disconnect_inner().await?;
+            this.attach_inner(session).await?;
+            Ok(true)
+        })
+        .await
+    }
+
     /// Attach to an existing session for this notebook path, without taking
     /// ownership of its kernel. Shutdown always requires an explicit call.
     pub async fn attach_session(&self, session_id: impl Into<String>) -> Result<()> {

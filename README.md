@@ -204,6 +204,15 @@ started servers remain running when their window closes and can be reconnected
 from Recent connections. Closing or quitting checks every workspace for unsaved
 changes and does not shut down server kernels.
 
+The titlebar server menu shows connection status and provides **Reconnect**,
+**Open server in browser**, and **New connection window**. Reachability is checked
+every ten seconds. An outage keeps open documents and unsaved edits in memory
+and cancels queued notebook runs. When the server returns, choose Reconnect to
+reattach surviving sessions without rerunning cells or reloading documents.
+Sessions that no longer exist remain disconnected; use the notebook's kernel
+controls or explicitly run a cell to start a replacement. Browser links omit
+credentials, so your browser may ask you to sign in.
+
 For a development shortcut, copy `.env.example` to `.env` in the repository root and set
 `GANYMEDE_JUPYTER_URL` to the server root (for example,
 `http://127.0.0.1:8888/`, without `/lab` or a token query). Set

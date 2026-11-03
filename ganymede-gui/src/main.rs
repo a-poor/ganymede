@@ -71,7 +71,12 @@ struct Ganymede {
 }
 
 impl Ganymede {
-    fn new(runtime: execution::Runtime, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        runtime: execution::Runtime,
+        label: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.observe_window_appearance(window, |_, window, cx| {
             theme::follow_system_appearance(window, cx);
         })
@@ -79,6 +84,7 @@ impl Ganymede {
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         let toasts = cx.new(|cx| toast::ToastHost::new(window, cx));
         let workspace = cx.new(|cx| workspace::Workspace::new(runtime, toasts.clone(), window, cx));
+        workspace.update(cx, |workspace, _| workspace.set_server_label(label));
         cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
         let focus = cx.focus_handle();
         focus.focus(window, cx);
@@ -279,7 +285,12 @@ impl Render for Ganymede {
                                     .text_color(outer.muted_fg),
                             ),
                     )
-                    .child(div().w(px((sidebar_width - 80.).max(0.))).flex_shrink_0())
+                    .child(
+                        div()
+                            .w(px((sidebar_width - 80.).max(32.)))
+                            .flex_shrink_0()
+                            .child(workspace::Workspace::server_button(&self.workspace, cx)),
+                    )
                     .child(header),
             )
             .child(

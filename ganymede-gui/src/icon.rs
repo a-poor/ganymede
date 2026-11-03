@@ -66,6 +66,8 @@ define_icons! {
     Cpu => "regular/cpu.svg",
     Gear => "regular/gear.svg",
     Server => "regular/hard-drives.svg",
+    AppWindow => "regular/app-window.svg",
+    Browsers => "regular/browsers.svg",
     Sliders => "regular/sliders-horizontal.svg",
     Palette => "regular/palette.svg",
     Desktop => "regular/desktop.svg",

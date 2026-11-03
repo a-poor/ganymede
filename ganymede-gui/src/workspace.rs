@@ -2,6 +2,7 @@
 mod file_management;
 mod kernels;
 mod selection;
+mod server;
 use crate::execution::{Runtime, Session};
 use crate::{
     code_cell::CodeCell,
@@ -248,6 +249,7 @@ pub struct Workspace {
     file_menu_focus: gpui::FocusHandle,
     tree_generation: u64,
     kernels: kernels::KernelList,
+    server: server::Server,
 }
 impl Workspace {
     pub fn new(
@@ -304,6 +306,7 @@ impl Workspace {
             file_menu_focus: cx.focus_handle(),
             tree_generation: 0,
             kernels: Default::default(),
+            server: server::Server::new(cx),
         };
         cx.spawn(async move |this, cx| {
             loop {
@@ -312,6 +315,7 @@ impl Workspace {
                     .await;
                 if this
                     .update(cx, |this, cx| {
+                        this.check_server(false, cx);
                         this.refresh_files(cx);
                         this.refresh_kernels(false, cx);
                     })
@@ -322,6 +326,7 @@ impl Workspace {
             }
         })
         .detach();
+        this.check_server(false, cx);
         this.refresh_kernels(false, cx);
         this.refresh_directory(String::new(), cx);
         this.open_launcher(window, cx);
@@ -1490,12 +1495,13 @@ impl Workspace {
                 },
             )
             .when_some(this.file_error.as_ref(), |view, error| {
-                view.child(
-                    div()
-                        .text_size(t.font.xs)
-                        .text_color(t.destructive)
-                        .child(error.clone()),
-                )
+                view.child(div().text_size(t.font.xs).text_color(t.destructive).child(
+                    if this.server_unavailable() {
+                        "Server unavailable. Showing cached files.".to_owned()
+                    } else {
+                        error.clone()
+                    },
+                ))
             })
             .child(
                 div()

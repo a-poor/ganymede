@@ -243,6 +243,19 @@ impl Session {
         })
     }
 
+    pub fn reconnect_existing(&self) -> tokio::task::JoinHandle<Result<bool, String>> {
+        let this = self.clone();
+        self.handle.spawn(async move {
+            let _submission = this.submission.lock().await;
+            this.controller
+                .as_ref()
+                .map_err(Clone::clone)?
+                .reconnect_existing_session()
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
     pub fn kernel_name(&self) -> String {
         if let Ok(controller) = &self.controller {
             let snapshot = controller.snapshot();

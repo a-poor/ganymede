@@ -209,7 +209,8 @@ fn open_workspace(
         |window, cx| {
             cx.new(|cx| {
                 let mut view = ConnectionWindow::new(window, cx);
-                view.workspace = Some(cx.new(|cx| crate::Ganymede::new(runtime, window, cx)));
+                view.workspace =
+                    Some(cx.new(|cx| crate::Ganymede::new(runtime, label, window, cx)));
                 view
             })
         },

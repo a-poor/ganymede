@@ -275,6 +275,9 @@ pub struct Theme {
     pub muted: Hsla,
     pub destructive: Hsla,
     pub destructive_fg: Hsla,
+    pub warning: Hsla,
+    pub warning_fg: Hsla,
+    pub warning_subtle: Hsla,
     pub input: Hsla,
     pub scrim: Hsla,
     pub dialog_action_bg: Hsla,
@@ -369,6 +372,8 @@ pub struct ThemeSpec {
     pub accent_foreground: Hsla,
     pub destructive: Hsla,
     pub destructive_foreground: Hsla,
+    pub warning: Hsla,
+    pub warning_foreground: Hsla,
 
     pub input: Hsla,
     pub ring: Hsla,
@@ -444,6 +449,9 @@ impl ThemeSpec {
             secondary_active: state_shift(self.secondary, app.bg, d.active_shift),
             destructive_hover: state_shift(self.destructive, app.bg, d.hover_shift),
             destructive_subtle: alpha(self.destructive, d.subtle_alpha),
+            warning: self.warning,
+            warning_fg: self.warning_foreground,
+            warning_subtle: alpha(self.warning, d.subtle_alpha),
             destructive_ring: alpha(self.destructive, d.ring_alpha),
             ring_focus: alpha(self.ring, d.ring_alpha),
             disabled_opacity: d.disabled_opacity,
@@ -589,6 +597,8 @@ impl ThemeSpec {
             accent_foreground: oklch(0.220, 0.020, 264.),
             destructive: oklch(0.550, 0.200, 27.),
             destructive_foreground: oklch(0.990, 0.005, 27.),
+            warning: oklch(0.740, 0.160, 65.),
+            warning_foreground: oklch(0.440, 0.100, 55.),
 
             input: oklch(0.900, 0.008, 264.),
             ring: oklch(0.520, 0.200, 259.),
@@ -628,6 +638,8 @@ impl ThemeSpec {
             accent_foreground: oklch(0.970, 0.004, 264.),
             destructive: oklch(0.550, 0.200, 27.),
             destructive_foreground: oklch(0.990, 0.005, 27.),
+            warning: oklch(0.780, 0.140, 65.),
+            warning_foreground: oklch(0.820, 0.120, 65.),
 
             input: oklch(0.300, 0.012, 264.),
             ring: oklch(0.680, 0.160, 259.),
@@ -716,6 +728,11 @@ mod tests {
             ("active file", theme.active_file_bg, theme.active_file_fg),
             ("primary", theme.app.primary, theme.app.primary_fg),
             ("secondary", theme.secondary, theme.secondary_fg),
+            (
+                "warning badge",
+                theme.popover.bg.blend(theme.warning_subtle),
+                theme.warning_fg,
+            ),
             ("accent", theme.app.accent, theme.app.accent_fg),
             ("destructive", theme.destructive, theme.destructive_fg),
             (
