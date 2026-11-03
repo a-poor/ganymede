@@ -15,6 +15,7 @@ use std::{
 };
 use tokio::{runtime::Handle, sync::watch};
 
+#[derive(Clone)]
 pub struct Runtime {
     pub handle: Handle,
     pub config: Result<ServerConfig, String>,

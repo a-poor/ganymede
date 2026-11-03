@@ -112,6 +112,10 @@ impl NotebookController {
         controller.inner.data.lock().unwrap().saved_version = Some(contents.last_modified);
         Ok(controller)
     }
+    pub fn server_config(&self) -> ServerConfig {
+        self.inner.config.clone()
+    }
+
     pub fn snapshot(&self) -> Arc<NotebookSnapshot> {
         self.inner.snapshots.borrow().clone()
     }

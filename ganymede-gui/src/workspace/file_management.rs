@@ -474,7 +474,7 @@ impl Workspace {
                         Some((path, controller))
                     })
                     .collect();
-                let runtime = cx.global::<Runtime>();
+                let runtime = &this.runtime;
                 let config = runtime.config.clone();
                 runtime.handle.spawn(async move {
                     let client = JupyterRestClient::new(config?).map_err(|e| e.to_string())?;

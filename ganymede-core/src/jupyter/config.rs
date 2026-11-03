@@ -57,6 +57,11 @@ impl ServerConfig {
         })
     }
 
+    /// Sanitized server root; authentication is held separately.
+    pub fn base_url(&self) -> &Url {
+        &self.base_url
+    }
+
     pub fn with_token(mut self, token: &str) -> Result<Self> {
         if token.is_empty() {
             return Err(Error::Config("token must not be empty".into()));

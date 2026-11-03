@@ -1,6 +1,6 @@
 //! A standalone, in-memory code cell. Notebook persistence and execution can be
 //! connected later without coupling the text-input machinery to a kernel.
-mod stdin_prompt;
+pub(crate) mod stdin_prompt;
 use std::{cell::RefCell, ops::Range, rc::Rc, time::Duration};
 
 use crate::theme::ActiveTheme;
@@ -514,7 +514,11 @@ impl CodeCell {
             return;
         };
         let handle = runtime.handle.clone();
-        let config = runtime.config.clone();
+        let config = self
+            .image_session
+            .as_ref()
+            .map(|session| session.controller().server_config())
+            .ok_or_else(|| "No notebook server connection".to_owned());
         for source in sources {
             if self.images.contains_key(&source) {
                 continue;

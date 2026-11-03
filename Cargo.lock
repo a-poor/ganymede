@@ -2247,6 +2247,7 @@ dependencies = [
  "gpui_platform",
  "image",
  "latex-rust",
+ "libc",
  "percent-encoding",
  "pulldown-cmark",
  "regex",

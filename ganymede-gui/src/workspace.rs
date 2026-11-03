@@ -216,6 +216,7 @@ enum FileAction {
 }
 
 pub struct Workspace {
+    runtime: Runtime,
     toasts: Entity<crate::toast::ToastHost>,
     documents: Vec<Document>,
     tabs: Tabs,
@@ -248,6 +249,7 @@ pub struct Workspace {
 }
 impl Workspace {
     pub fn new(
+        runtime: Runtime,
         toasts: Entity<crate::toast::ToastHost>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -269,6 +271,7 @@ impl Workspace {
         )
         .detach();
         let mut this = Self {
+            runtime,
             toasts,
             documents: vec![],
             tabs: Tabs::default(),
@@ -464,8 +467,8 @@ impl Workspace {
                     return;
                 }
             };
-            let task = this.update(cx, |_, cx| {
-                let runtime = cx.global::<Runtime>();
+            let task = this.update(cx, |this, _| {
+                let runtime = &this.runtime;
                 let config = runtime.config.clone();
                 runtime.handle.spawn(async move {
                     let client =
@@ -531,7 +534,7 @@ impl Workspace {
             return;
         }
         let generation = self.tree_generation;
-        let runtime = cx.global::<Runtime>();
+        let runtime = &self.runtime;
         let config = runtime.config.clone();
         let request_path = path.clone();
         let task = runtime.handle.spawn(async move {
@@ -596,7 +599,7 @@ impl Workspace {
             }
             self.creating = true;
         }
-        let runtime = cx.global::<Runtime>();
+        let runtime = &self.runtime;
         let config = runtime.config.clone();
         let requested = path.clone();
         let directory = self.file_directory.clone();
@@ -688,7 +691,7 @@ impl Workspace {
             self.creating = true;
         }
         self.file_error = None;
-        let runtime = cx.global::<Runtime>();
+        let runtime = &self.runtime;
         let config = runtime.config.clone();
         let requested = path.clone();
         let directory = self.file_directory.clone();
@@ -722,7 +725,7 @@ impl Workspace {
                 match result {
                     Ok(Ok((path, controller))) => {
                         this.reveal_file_parent(&path);
-                        let session = Session::from_controller(controller, cx.global::<Runtime>());
+                        let session = Session::from_controller(controller, &this.runtime);
                         let notebook =
                             cx.new(|cx| Notebook::new(session, this.toasts.clone(), window, cx));
                         notebook.update(cx, |view, _| view.set_file_busy(this.file_busy));
@@ -802,6 +805,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if self.file_busy || self.close_pending || window.has_active_prompt() {
+            if matches!(target, CloseTarget::Quit) {
+                crate::connection::cancel_quit(cx);
+            }
             return;
         }
         let dirty = self
@@ -842,6 +848,7 @@ impl Workspace {
                 Ok(1) => this.complete_close(target, window, cx),
                 Ok(2) => this.save_and_close(target, window, cx),
                 _ => {
+                    crate::connection::cancel_quit(cx);
                     this.close_pending = false;
                     this.suspend_autosave(target, false, cx);
                     cx.notify();
@@ -866,6 +873,7 @@ impl Workspace {
                 let finished = this.update_in(cx, |this, window, cx| {
                     if documents.iter().any(|document| document.is_saving(cx)) { return false; }
                     if documents.iter().any(|document| document.save_failed(cx)) || this.affected(target).any(|doc| doc.content.is_dirty(cx) || doc.content.is_saving(cx)) {
+                        crate::connection::cancel_quit(cx);
                         this.close_pending = false;
                         this.suspend_autosave(target, false, cx);
                         if !documents.iter().any(|document| document.save_failed(cx)) {
@@ -886,7 +894,7 @@ impl Workspace {
         match target {
             CloseTarget::Tab(id) => self.finish_close(id, window, cx),
             CloseTarget::Window => window.remove_window(),
-            CloseTarget::Quit => cx.quit(),
+            CloseTarget::Quit => window.remove_window(),
         }
     }
     fn finish_close(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
@@ -1916,6 +1924,29 @@ impl Render for Tip {
             .border_color(t.popover.border)
             .text_size(t.font.xs)
             .child(self.0)
+    }
+}
+
+#[cfg(test)]
+impl Workspace {
+    pub(crate) fn add_dirty_test_notebook(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use ganymede_core::notebook::{CellKind, NotebookDocument};
+        let mut document = NotebookDocument::new();
+        document
+            .insert_cell(0, CellKind::Code, "unsaved = True")
+            .unwrap();
+        let config = ganymede_core::jupyter::ServerConfig::new("http://127.0.0.1:9/").unwrap();
+        let controller = NotebookController::new(config, "test.ipynb", document).unwrap();
+        let session = Session::from_controller(controller, &self.runtime);
+        let notebook = cx.new(|cx| Notebook::new(session, self.toasts.clone(), window, cx));
+        self.next_id += 1;
+        self.documents.push(Document {
+            id: self.next_id,
+            name: "test.ipynb".into(),
+            path: Some("test.ipynb".into()),
+            kind: DocumentKind::Notebook,
+            content: Content::Notebook(notebook),
+        });
     }
 }
 

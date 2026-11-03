@@ -2,11 +2,11 @@
 use super::*;
 use gpui::{ClipboardItem, ContentMask, canvas};
 
-pub(super) struct StdinPrompt {
+pub(crate) struct StdinPrompt {
     pub id: String,
     prompt: String,
     password: bool,
-    session: crate::execution::Session,
+    session: Option<crate::execution::Session>,
     generation: u64,
     buffer: Buffer,
     marked: Option<Range<usize>>,
@@ -35,7 +35,7 @@ impl StdinPrompt {
             prompt: input.prompt,
             password: input.password,
             generation: session.input_generation(),
-            session,
+            session: Some(session),
             buffer: Buffer::default(),
             marked: None,
             focus: cx.focus_handle(),
@@ -52,10 +52,63 @@ impl StdinPrompt {
             redo: vec![],
         }
     }
+    /// Reuse the secure single-line editor for connection fields.
+    pub(crate) fn field(
+        value: String,
+        password: bool,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let focus = cx.focus_handle();
+        Self {
+            id: String::new(),
+            prompt: label.into(),
+            password,
+            session: None,
+            generation: 0,
+            buffer: Buffer {
+                text: value,
+                ..Default::default()
+            },
+            marked: None,
+            focus: focus.clone(),
+            parent_focus: focus,
+            focus_pending: false,
+            reveal: true,
+            submitting: false,
+            error: None,
+            line: None,
+            bounds: None,
+            scroll_x: px(0.),
+            selecting: false,
+            undo: vec![],
+            redo: vec![],
+        }
+    }
+    pub(crate) fn value(&self) -> &str {
+        &self.buffer.text
+    }
+    pub(crate) fn set_value(&mut self, value: String, cx: &mut Context<Self>) {
+        self.buffer = Buffer {
+            text: value,
+            ..Default::default()
+        };
+        self.undo.clear();
+        self.redo.clear();
+        self.marked = None;
+        self.line = None;
+        self.scroll_x = px(0.);
+        self.reveal = true;
+        cx.notify();
+    }
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.submitting || self.marked.is_some() {
             return;
         }
+        let Some(session) = &self.session else {
+            cx.emit(FieldSubmit);
+            return;
+        };
         self.submitting = true;
         self.error = None;
         let value = std::mem::take(&mut self.buffer.text);
@@ -64,9 +117,7 @@ impl StdinPrompt {
         self.redo.clear();
         self.line = None;
         self.scroll_x = px(0.);
-        let task = self
-            .session
-            .reply_input(self.id.clone(), value, self.generation);
+        let task = session.reply_input(self.id.clone(), value, self.generation);
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
@@ -143,6 +194,9 @@ impl StdinPrompt {
         }
     }
 }
+pub(crate) struct FieldSubmit;
+impl gpui::EventEmitter<FieldSubmit> for StdinPrompt {}
+
 impl Focusable for StdinPrompt {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -260,10 +314,13 @@ impl Render for StdinPrompt {
             .id("stdin-input")
             .key_context("CodeCell")
             .track_focus(&self.focus)
-            .aria_label(if self.password {
-                "Kernel password input"
+            .tab_index(0)
+            .aria_label(if self.session.is_none() {
+                self.prompt.clone()
+            } else if self.password {
+                "Kernel password input".into()
             } else {
-                "Kernel input"
+                "Kernel input".into()
             })
             .flex_1()
             .min_w_0()
@@ -271,13 +328,27 @@ impl Render for StdinPrompt {
             .h(px(28.))
             .px_2()
             .py_1()
-            .font_family(t.font.mono.clone())
-            .text_size(t.font.code)
+            .font_family(if self.session.is_some() {
+                t.font.mono.clone()
+            } else {
+                t.font.sans.clone()
+            })
+            .text_size(if self.session.is_some() {
+                t.font.code
+            } else {
+                t.font.sm
+            })
             .bg(t.card.bg)
             .text_color(t.card.fg)
             .border_1()
             .border_color(t.card.border)
             .rounded(t.radius.md())
+            .when(self.session.is_none(), |s| {
+                s.rounded(t.radius.lg())
+                    .border_color(t.launcher_border)
+                    .bg(t.app.bg)
+                    .text_color(t.app.fg)
+            })
             .focus(|s| s.border_color(t.card.ring))
             .cursor(gpui::CursorStyle::IBeam)
             .on_action(cx.listener(|this, _: &Enter, window, cx| this.submit(window, cx)))
@@ -484,6 +555,9 @@ impl Render for StdinPrompt {
                 )
                 .size_full(),
             );
+        if self.session.is_none() {
+            return input.into_any_element();
+        }
         div()
             .flex()
             .flex_col()
@@ -522,6 +596,7 @@ impl Render for StdinPrompt {
                         .child(error),
                 )
             })
+            .into_any_element()
     }
 }
 

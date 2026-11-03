@@ -2,6 +2,7 @@ mod assets;
 mod autosave;
 mod code_cell;
 mod confirm;
+mod connection;
 mod execution;
 mod find;
 pub mod icon;
@@ -16,14 +17,14 @@ pub mod toast;
 mod workspace;
 
 use gpui::{
-    App, Bounds, Context, Entity, FontWeight, KeyBinding, Menu, MenuItem, TitlebarOptions, Window,
-    WindowBounds, WindowControlArea, WindowOptions, actions, div, point, prelude::*, px, size,
+    App, Context, Entity, FontWeight, KeyBinding, Menu, MenuItem, Window, WindowControlArea,
+    actions, div, prelude::*, px,
 };
 use icon::Icon;
 use std::time::{Duration, Instant};
 use theme::{ActiveTheme, Theme};
 
-actions!(ganymede, [Quit, NewTab, CloseTab, Save]);
+actions!(ganymede, [Quit, NewWindow, NewTab, CloseTab, Save]);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SidebarTab {
@@ -56,53 +57,33 @@ impl SidebarMotion {
     }
 }
 
+#[derive(Default)]
+struct SettingsWindow(Option<gpui::WindowHandle<settings::Settings>>);
+impl gpui::Global for SettingsWindow {}
+
 struct Ganymede {
+    focus: gpui::FocusHandle,
     workspace: Entity<workspace::Workspace>,
     toasts: Entity<toast::ToastHost>,
     sidebar_open: bool,
     sidebar_motion: SidebarMotion,
     sidebar_tab: SidebarTab,
-    settings_window: Option<gpui::WindowHandle<settings::Settings>>,
 }
 
 impl Ganymede {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        theme::AppearancePreference::default().apply(window.appearance(), cx);
+    fn new(runtime: execution::Runtime, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe_window_appearance(window, |_, window, cx| {
             theme::follow_system_appearance(window, cx);
         })
         .detach();
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         let toasts = cx.new(|cx| toast::ToastHost::new(window, cx));
-        let workspace = cx.new(|cx| workspace::Workspace::new(toasts.clone(), window, cx));
+        let workspace = cx.new(|cx| workspace::Workspace::new(runtime, toasts.clone(), window, cx));
         cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
-        let closing = workspace.downgrade();
-        window.on_window_should_close(cx, move |window, cx| {
-            closing
-                .update(cx, |workspace, cx| {
-                    workspace.request_close(workspace::CloseTarget::Window, window, cx)
-                })
-                .ok();
-            false
-        });
-        let quitting = workspace.downgrade();
-        let main_window = window.window_handle();
-        App::on_action(cx, move |_: &Quit, cx: &mut App| {
-            if main_window
-                .update(cx, |_, window, cx| {
-                    window.activate_window();
-                    quitting
-                        .update(cx, |workspace, cx| {
-                            workspace.request_close(workspace::CloseTarget::Quit, window, cx)
-                        })
-                        .ok();
-                })
-                .is_err()
-            {
-                cx.quit();
-            }
-        });
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
         Self {
+            focus,
             workspace,
             toasts,
             sidebar_open: true,
@@ -112,7 +93,6 @@ impl Ganymede {
                 started: Instant::now(),
             },
             sidebar_tab: SidebarTab::Files,
-            settings_window: None,
         }
     }
 
@@ -200,7 +180,7 @@ impl Ganymede {
     }
 
     fn open_settings(&mut self, cx: &mut Context<Self>) {
-        if let Some(handle) = self.settings_window
+        if let Some(handle) = cx.global::<SettingsWindow>().0
             && handle
                 .update(cx, |_, window, _| window.activate_window())
                 .is_ok()
@@ -208,9 +188,9 @@ impl Ganymede {
             return;
         }
         // A closed window leaves an invalid handle; replace it on the next request.
-        self.settings_window = None;
+        cx.global_mut::<SettingsWindow>().0 = None;
         match settings::open(cx) {
-            Ok(handle) => self.settings_window = Some(handle),
+            Ok(handle) => cx.global_mut::<SettingsWindow>().0 = Some(handle),
             Err(error) => eprintln!("Failed to open Settings: {error}"),
         }
     }
@@ -238,6 +218,7 @@ impl Render for Ganymede {
         let body = theme.app;
         div()
             .id("main-window")
+            .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &NewTab, window, cx| {
                 this.workspace
                     .update(cx, |workspace, cx| workspace.open_launcher(window, cx));
@@ -434,77 +415,74 @@ fn main() {
         .build()
         .expect("create network runtime");
     let execution = execution::Runtime::new(runtime.handle().clone());
-    gpui_platform::application()
-        .with_assets(assets::Assets)
-        .run(move |cx: &mut App| {
-            cx.set_global(execution);
-            cx.set_global(autosave::AutosavePreference::default());
-            confirm::init(cx);
-            assets::register_fonts(cx).expect("failed to register embedded fonts");
-            code_cell::init(cx);
-            notebook::init(cx);
-            let quit_key = if cfg!(target_os = "macos") {
-                "cmd-q"
-            } else {
-                "ctrl-q"
-            };
-            cx.bind_keys([
-                KeyBinding::new(
-                    if cfg!(target_os = "macos") {
-                        "cmd-s"
-                    } else {
-                        "ctrl-s"
-                    },
-                    Save,
-                    None,
-                ),
-                KeyBinding::new(quit_key, Quit, None),
-                KeyBinding::new(
-                    if cfg!(target_os = "macos") {
-                        "cmd-t"
-                    } else {
-                        "ctrl-t"
-                    },
-                    NewTab,
-                    None,
-                ),
-                KeyBinding::new(
-                    if cfg!(target_os = "macos") {
-                        "cmd-w"
-                    } else {
-                        "ctrl-w"
-                    },
-                    CloseTab,
-                    None,
-                ),
-            ]);
-            cx.set_menus(vec![
-                Menu::new("Ganymede").items([MenuItem::action("Quit Ganymede", Quit)]),
-            ]);
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
-
-            let bounds = Bounds::centered(None, size(px(1000.), px(700.)), cx);
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(480.), px(320.))),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("Ganymede".into()),
-                        appears_transparent: true,
-                        traffic_light_position: Some(point(px(12.), px(14.))),
-                    }),
-                    ..Default::default()
+    let app = gpui_platform::application().with_assets(assets::Assets);
+    app.on_reopen(connection::reopen);
+    app.run(move |cx: &mut App| {
+        theme::AppearancePreference::default().apply(cx.window_appearance(), cx);
+        cx.set_global(execution);
+        cx.set_global(SettingsWindow::default());
+        cx.set_global(autosave::AutosavePreference::default());
+        confirm::init(cx);
+        assets::register_fonts(cx).expect("failed to register embedded fonts");
+        code_cell::init(cx);
+        notebook::init(cx);
+        let quit_key = if cfg!(target_os = "macos") {
+            "cmd-q"
+        } else {
+            "ctrl-q"
+        };
+        cx.bind_keys([
+            KeyBinding::new(
+                if cfg!(target_os = "macos") {
+                    "cmd-s"
+                } else {
+                    "ctrl-s"
                 },
-                |window, cx| cx.new(|cx| Ganymede::new(window, cx)),
-            )
-            .expect("failed to open the Ganymede window");
-            cx.activate(true);
-        });
+                Save,
+                None,
+            ),
+            KeyBinding::new(quit_key, Quit, None),
+            KeyBinding::new(
+                if cfg!(target_os = "macos") {
+                    "cmd-shift-n"
+                } else {
+                    "ctrl-shift-n"
+                },
+                NewWindow,
+                None,
+            ),
+            KeyBinding::new(
+                if cfg!(target_os = "macos") {
+                    "cmd-t"
+                } else {
+                    "ctrl-t"
+                },
+                NewTab,
+                None,
+            ),
+            KeyBinding::new(
+                if cfg!(target_os = "macos") {
+                    "cmd-w"
+                } else {
+                    "ctrl-w"
+                },
+                CloseTab,
+                None,
+            ),
+        ]);
+        cx.set_menus(vec![
+            Menu::new("Ganymede").items([MenuItem::action("Quit Ganymede", Quit)]),
+            Menu::new("File").items([
+                MenuItem::action("New Window", NewWindow),
+                MenuItem::action("New Tab", NewTab),
+                MenuItem::action("Save", Save),
+                MenuItem::action("Close Tab", CloseTab),
+            ]),
+        ]);
+        connection::init(cx);
+        connection::open(cx);
+        cx.activate(true);
+    });
 }
 
 #[cfg(test)]

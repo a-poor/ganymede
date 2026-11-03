@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 anyhow = "1"
+libc = "0.2"
 unicode-segmentation = "1"
 rust-embed = { version = "8.12", features = ["debug-embed", "include-exclude"] }
 ganymede-core.workspace = true

@@ -178,18 +178,34 @@ its session. Passing a path as the first argument selects the save destination.
 The disposable integration runner tests both API layers and both examples.
 
 
-## GUI notebooks on a local Jupyter server
+## GUI server connections and notebooks
 
-Copy `.env.example` to `.env` in the repository root and set
+Run `cargo run -p ganymede-gui` to open the connection picker. Start a local
+server by choosing a project folder and an environment: Global Python (`python3`),
+a virtual environment folder, or a custom Python executable.
+Python environments need `jupyter-server` and `ipykernel`. Relative environment paths
+resolve from the project folder. You can also connect to
+an existing HTTP(S) server with its URL and optional token. Deployment prefixes
+and pasted `/lab?token=…` URLs are supported.
+
+Each workspace connects to one server. **File → New Window** (`Cmd+Shift+N` on
+macOS) opens another picker. Recent connections are remembered without tokens;
+remote credentials must be entered again after restarting the app. Locally
+started servers remain running when their window closes and can be reconnected
+from Recent connections. Closing or quitting checks every workspace for unsaved
+changes and does not shut down server kernels.
+
+For a development shortcut, copy `.env.example` to `.env` in the repository root and set
 `GANYMEDE_JUPYTER_URL` to the server root (for example,
 `http://127.0.0.1:8888/`, without `/lab` or a token query). Set
 `GANYMEDE_JUPYTER_TOKEN` separately and optionally
-`GANYMEDE_JUPYTER_KERNEL` (defaults to `python3`). The local file is ignored
+`GANYMEDE_JUPYTER_KERNEL` (defaults to `python3` for this shortcut). The local file is ignored
 by Git; process environment variables override its values. The development
 build reads this file from the repository root even when launched elsewhere.
-Restart the app after changing configuration.
+Restart the app after changing configuration. The connection appears under
+Recent connections as “Configured server”.
 
-Run `cargo run -p ganymede-gui`. The app starts on the launcher without creating
+After connecting, the workspace starts on the launcher without creating
 a server notebook. Creating a notebook explicitly uses Jupyter’s unused `Untitled`
 name. The file tree starts at the server root; folders
 load on expansion. Within each directory, folders sort before files using

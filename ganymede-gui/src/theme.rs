@@ -283,6 +283,10 @@ pub struct Theme {
     pub dialog_destructive_fg: Hsla,
     pub dialog_destructive_hover: Hsla,
     pub dialog_destructive_active: Hsla,
+    pub launcher_sidebar: Surface,
+    pub launcher_recent_hover_bg: Hsla,
+    pub launcher_border: Hsla,
+    pub launcher_shadow: BoxShadow,
     pub body_shadow: BoxShadow,
     pub active_tab_edges: [BoxShadow; 2],
     pub toast_shadow: BoxShadow,
@@ -479,6 +483,18 @@ impl ThemeSpec {
             chart: self.chart,
             toast_shadow: BoxShadow::new(px(0.), px(4.), alpha(gpui::black(), 0.10))
                 .blur_radius(px(14.)),
+            launcher_sidebar: if self.is_dark { card } else { app },
+            launcher_recent_hover_bg: {
+                let surface = if self.is_dark { card } else { app };
+                surface.bg.blend(alpha(surface.fg, 0.035))
+            },
+            launcher_border: app.bg.blend(alpha(app.border, 0.55)),
+            launcher_shadow: BoxShadow::new(
+                px(0.),
+                px(4.),
+                alpha(gpui::black(), if self.is_dark { 0.18 } else { 0.06 }),
+            )
+            .blur_radius(px(18.)),
             body_shadow: BoxShadow::new(
                 px(0.),
                 px(0.5),
