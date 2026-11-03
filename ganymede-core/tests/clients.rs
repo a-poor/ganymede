@@ -33,6 +33,11 @@ async fn rest_auth_base_path_errors_and_no_content() {
                 "",
             ),
             ("POST /prefix/api/shutdown", "200 OK", ""),
+            (
+                "GET /prefix/api/status",
+                "200 OK",
+                r#"{"started":"2026-11-03T12:00:00Z"}"#,
+            ),
         ] {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut bytes = Vec::new();
@@ -72,6 +77,10 @@ async fn rest_auth_base_path_errors_and_no_content() {
     }
     rest.interrupt_kernel("kernel").await.unwrap();
     rest.shutdown_server().await.unwrap();
+    assert_eq!(
+        rest.server_status().await.unwrap().started,
+        "2026-11-03T12:00:00Z"
+    );
     server.await.unwrap();
 }
 

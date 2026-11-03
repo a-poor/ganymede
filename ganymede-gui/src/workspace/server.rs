@@ -64,7 +64,8 @@ impl Workspace {
             return;
         };
         let state = server.state();
-        if state == LocalState::Busy || window.has_active_prompt() {
+        if matches!(state, LocalState::Busy | LocalState::Unverified) || window.has_active_prompt()
+        {
             return;
         }
         let restart = state == LocalState::Stopped;
@@ -137,7 +138,7 @@ impl Workspace {
         if self.server.checking
             || self
                 .local_server(cx)
-                .is_some_and(|s| s.state() != LocalState::Running)
+                .is_some_and(|s| s.state() == LocalState::Busy)
         {
             return;
         }
@@ -146,7 +147,11 @@ impl Workspace {
             self.server.status = Status::Reconnecting;
         }
         let config = self.runtime.config.clone();
+        let local = self.local_server(cx);
         let task = self.runtime.handle.spawn(async move {
+            if let Some(local) = local {
+                local.reconcile().await;
+            }
             let mut config = config?;
             config.connect_timeout = Duration::from_secs(3);
             config.request_timeout = Duration::from_secs(5);
@@ -162,7 +167,7 @@ impl Workspace {
             let result = task.await.unwrap_or_else(|_| Err("Could not reach the server".into()));
             this.update(cx, |this, cx| {
                 this.server.checking = false;
-                if this.local_server(cx).is_some_and(|s| s.state() != LocalState::Running) {
+                if this.local_server(cx).is_some_and(|s| matches!(s.state(), LocalState::Stopped | LocalState::Busy)) {
                     cx.notify();
                     return;
                 }
@@ -227,6 +232,7 @@ impl Workspace {
         let status_label = match local {
             Some(LocalState::Stopped) => "Stopped",
             Some(LocalState::Busy) => "Working…",
+            Some(LocalState::Unverified) => "Ownership unverified",
             _ => this.server.status.label(),
         };
         let mut actions = vec![
@@ -234,7 +240,7 @@ impl Workspace {
             ("Open server in browser", Icon::Browsers),
             ("New connection window…", Icon::AppWindow),
         ];
-        if let Some(state) = local {
+        if let Some(state) = local.filter(|s| *s != LocalState::Unverified) {
             actions.push(if state == LocalState::Stopped {
                 ("Restart Server…", Icon::Restart)
             } else {
@@ -244,7 +250,7 @@ impl Workspace {
         let action_count = actions.len();
         let t = cx.theme();
         let surface = t.sidebar;
-        let pending = local == Some(LocalState::Busy)
+        let pending = matches!(local, Some(LocalState::Busy | LocalState::Unverified))
             || (local != Some(LocalState::Stopped)
                 && matches!(
                     this.server.status,
@@ -492,7 +498,10 @@ impl Workspace {
                                             (index == 0
                                                 && (this.server.checking
                                                     || local.is_some_and(|s| {
-                                                        s != LocalState::Running
+                                                        matches!(
+                                                            s,
+                                                            LocalState::Stopped | LocalState::Busy
+                                                        )
                                                     })))
                                                 || (index == 3 && local == Some(LocalState::Busy)),
                                             |v| v.opacity(0.4),

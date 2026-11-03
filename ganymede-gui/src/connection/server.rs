@@ -1,3 +1,8 @@
+mod persistence;
+pub(crate) use persistence::load_servers;
+pub(super) fn storage_directory() -> PathBuf {
+    persistence::directory()
+}
 use ganymede_core::jupyter::{JupyterRestClient, ServerConfig};
 use std::{
     path::PathBuf,
@@ -66,6 +71,7 @@ pub(super) async fn validate(mut config: ServerConfig) -> Result<String, String>
 /// Until accepted by the UI, cancellation/failure cleans up a server that has
 /// never been exposed to notebook execution. Accepted servers are left running.
 pub(super) struct PendingServer {
+    record: Option<(PathBuf, persistence::Record)>,
     launch: Launch,
     child: Option<Child>,
     pub info: PathBuf,
@@ -76,6 +82,9 @@ pub(super) struct PendingServer {
 impl PendingServer {
     pub fn accept(mut self) -> ManagedServer {
         ManagedServer(std::sync::Arc::new(std::sync::Mutex::new(Managed {
+            record: self.record.take(),
+            state: LocalState::Running,
+            epoch: 0,
             child: self.child.take(),
             launch: self.launch.clone(),
             config: self.config.clone(),
@@ -95,6 +104,9 @@ impl Drop for PendingServer {
             let _ = child.kill();
             let _ = child.wait();
             let _ = std::fs::remove_dir_all(&self.directory);
+            if let Some((path, _)) = &self.record {
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
 }
@@ -106,7 +118,7 @@ pub(super) fn read_local(info: &std::path::Path) -> Option<(String, ServerConfig
     parse_connection(address, token).ok()
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum Environment {
     Global,
     Venv,
@@ -201,6 +213,7 @@ fn start_launch(
         .args([
             "--no-browser",
             "--ServerApp.ip=127.0.0.1",
+            "--ServerApp.base_url=/",
             "--ServerApp.port_retries=0",
         ])
         .arg(format!("--ServerApp.port={port}"))
@@ -221,6 +234,7 @@ fn start_launch(
     };
     let info = directory.join(format!("jpserver-{}.json", child.id()));
     let mut pending = PendingServer {
+        record: None,
         launch: Launch {
             mode,
             python: python.into(),
@@ -467,7 +481,7 @@ mod connection_tests {
 }
 
 // Ownership is retained across workspace windows, but never inferred from a loopback URL.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Launch {
     mode: Environment,
     python: String,
@@ -476,16 +490,35 @@ struct Launch {
     port: u16,
 }
 struct Managed {
+    record: Option<(PathBuf, persistence::Record)>,
+    state: LocalState,
+    epoch: u64,
     child: Option<Child>,
     launch: Launch,
     config: ServerConfig,
     info: PathBuf,
     busy: bool,
 }
+impl Managed {
+    fn release_child(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            // Reap accepted processes without tying their lifetime to an app/window.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+    }
+}
+impl Drop for Managed {
+    fn drop(&mut self) {
+        self.release_child();
+    }
+}
 #[derive(Clone)]
 pub(crate) struct ManagedServer(std::sync::Arc<std::sync::Mutex<Managed>>);
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocalState {
+    Unverified,
     Running,
     Stopped,
     Busy,
@@ -503,6 +536,16 @@ impl ManagedServer {
         if server
             .child
             .as_mut()
+            .is_some_and(|child| child.try_wait().ok().flatten().is_some())
+        {
+            server.child = None;
+        }
+        if server.record.is_some() {
+            return server.state;
+        }
+        if server
+            .child
+            .as_mut()
             .is_some_and(|child| child.try_wait().ok().flatten().is_none())
         {
             LocalState::Running
@@ -510,22 +553,46 @@ impl ManagedServer {
             LocalState::Stopped
         }
     }
+    pub async fn reconcile(&self) -> LocalState {
+        let (stored, epoch) = {
+            let server = self.0.lock().unwrap();
+            if server.busy {
+                return LocalState::Busy;
+            }
+            (server.record.clone(), server.epoch)
+        };
+        let Some((path, _)) = stored else {
+            return self.state();
+        };
+        let record = persistence::Record::load(&path);
+        let state = if let Some(record) = &record {
+            record.verify().await
+        } else {
+            LocalState::Unverified
+        };
+        let mut server = self.0.lock().unwrap();
+        if !server.busy && server.epoch == epoch {
+            server.state = state;
+            if let Some(record) = record {
+                let _ = record.adopt(&mut server);
+                server.record = Some((path, record));
+            }
+        }
+        if server.busy {
+            LocalState::Busy
+        } else {
+            server.state
+        }
+    }
     pub async fn change(&self, restart: bool) -> Result<(), String> {
-        let (launch, config) = {
+        {
             let mut server = self.0.lock().unwrap();
             if server.busy {
                 return Err("A server operation is already in progress.".into());
             }
-            let running = server
-                .child
-                .as_mut()
-                .is_some_and(|c| c.try_wait().ok().flatten().is_none());
-            if restart == running {
-                return Err("The server state changed. Try again.".into());
-            }
             server.busy = true;
-            (server.launch.clone(), server.config.clone())
-        };
+            server.epoch = server.epoch.wrapping_add(1);
+        }
         // Also release the operation lock if the async task is cancelled.
         struct ResetBusy(ManagedServer);
         impl Drop for ResetBusy {
@@ -534,7 +601,55 @@ impl ManagedServer {
             }
         }
         let _reset = ResetBusy(self.clone());
-        self.change_inner(restart, launch, config).await
+        let stored = self.0.lock().unwrap().record.clone();
+        let _lock = if let Some((path, _)) = &stored {
+            Some(persistence::Record::lock(path)?)
+        } else {
+            None
+        };
+        let state = if let Some((path, _)) = &stored {
+            let record = persistence::Record::load(path)
+                .ok_or("Local server settings are missing or invalid.")?;
+            let state = record.verify().await;
+            let mut server = self.0.lock().unwrap();
+            record.adopt(&mut server)?;
+            server.record = Some((path.clone(), record));
+            state
+        } else {
+            let mut server = self.0.lock().unwrap();
+            if server
+                .child
+                .as_mut()
+                .is_some_and(|c| c.try_wait().ok().flatten().is_none())
+            {
+                LocalState::Running
+            } else {
+                LocalState::Stopped
+            }
+        };
+        if state
+            != if restart {
+                LocalState::Stopped
+            } else {
+                LocalState::Running
+            }
+        {
+            self.0.lock().unwrap().state = state;
+            return Err("Could not verify the server state. Reconnect and try again.".into());
+        }
+        let (launch, config) = {
+            let server = self.0.lock().unwrap();
+            (server.launch.clone(), server.config.clone())
+        };
+        let result = self.change_inner(restart, launch, config).await;
+        if result.is_ok() {
+            self.0.lock().unwrap().state = if restart {
+                LocalState::Running
+            } else {
+                LocalState::Stopped
+            };
+        }
+        result
     }
     async fn change_inner(
         &self,
@@ -549,7 +664,14 @@ impl ManagedServer {
             .await
             .map_err(|_| "Could not restart Jupyter.".to_owned())??;
             validate(pending.config.clone()).await?;
+            let stored = self.0.lock().unwrap().record.clone();
+            if let Some((path, record)) = stored {
+                let record = persistence::Record::replacement(&pending, &record).await?;
+                record.save(&path)?;
+                self.0.lock().unwrap().record = Some((path, record));
+            }
             let mut server = self.0.lock().unwrap();
+            server.release_child();
             server.child = pending.child.take();
             server.info = pending.info.clone();
             return Ok(());
@@ -563,14 +685,18 @@ impl ManagedServer {
                 "Could not stop the server. Check its connection and try again.".to_owned()
             })?;
         for _ in 0..100 {
-            if self
-                .0
-                .lock()
-                .unwrap()
-                .child
-                .as_mut()
-                .is_none_or(|c| c.try_wait().ok().flatten().is_some())
-            {
+            let record = self.0.lock().unwrap().record.clone();
+            let stopped = if let Some((_, record)) = record {
+                record.verify().await == LocalState::Stopped
+            } else {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .child
+                    .as_mut()
+                    .is_none_or(|c| c.try_wait().ok().flatten().is_some())
+            };
+            if stopped {
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(100)).await;

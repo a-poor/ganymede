@@ -3,6 +3,11 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct ServerStatus {
+    pub started: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct ServerVersion {
     pub version: String,
 }

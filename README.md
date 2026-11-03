@@ -213,15 +213,28 @@ Sessions that no longer exist remain disconnected; use the notebook's kernel
 controls or explicitly run a cell to start a replacement. Browser links omit
 credentials, so your browser may ask you to sign in.
 
-Servers launched during the current app session also offer **Stop Server** and,
-when stopped, **Restart Server** in the server card. Stop asks for confirmation
-and shuts down the server and all its kernels, including work in other clients.
-Open documents and unsaved edits remain in their windows. Restart uses the same
-folder, environment, address, and token; it does not create kernels or run cells.
-If another process has taken the port, restart fails instead of changing addresses.
-These controls share ownership across windows and are never shown for external
-connections. Ownership is currently held in memory: after quitting Ganymede,
-existing servers can still be connected to but are not managed by these controls.
+Servers launched by Ganymede offer **Stop Server** and, when stopped,
+**Restart Server** in the server card. Stop asks for confirmation and shuts down
+all kernels, including work in other clients. Open documents and unsaved edits
+remain in their windows. Restart uses the same folder, environment, address, and
+token; it does not create kernels or run cells. A stopped entry in Recent
+connections can be clicked to start it and reopen its workspace.
+
+Local launch records survive app restarts in `connections.servers/<id>.json`,
+alongside the recent-connections file (or the configured override). These separate
+records contain the environment, project folder, protected runtime-file path,
+launch timestamp, and local server token. On Unix their directory is owner-only
+(`0700`) and files are `0600`; writes are atomic. Recent connections contain only
+the record ID and connection metadata, never credentials.
+
+Ganymede verifies the private runtime metadata and the authenticated server's
+launch timestamp before offering Stop, and checks again before shutdown. A reused
+PID or port alone never establishes ownership. A reachable server whose identity
+cannot be verified can still be connected to normally, but has no management
+actions. Invalid, incompatible, or insecure saved records are ignored. File locks
+serialize management operations across app instances. Older local connections
+without launch records remain ordinary connections; they are not adopted.
+If another process takes a stopped server's port, Ganymede will not replace it.
 Startup reports missing Python, jupyter-server, and ipykernel separately.
 
 For a development shortcut, copy `.env.example` to `.env` in the repository root and set

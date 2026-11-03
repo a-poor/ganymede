@@ -75,6 +75,9 @@ impl JupyterRestClient {
         Ok(())
     }
 
+    pub async fn server_status(&self) -> Result<ServerStatus> {
+        self.json(Method::GET, &["api", "status"], None).await
+    }
     pub async fn server_version(&self) -> Result<ServerVersion> {
         self.json(Method::GET, &["api"], None).await
     }

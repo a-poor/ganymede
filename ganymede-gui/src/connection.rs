@@ -15,6 +15,7 @@ struct Recent {
     address: String,
     config: Option<ServerConfig>,
     local_info: Option<PathBuf>,
+    local_id: Option<String>,
 }
 #[derive(Default)]
 struct Connections {
@@ -50,6 +51,10 @@ fn load_recent() -> Vec<Recent> {
                 label: item.get("label")?.as_str()?.into(),
                 address,
                 config: None,
+                local_id: item
+                    .get("local_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
                 local_info: item
                     .get("local_info")
                     .and_then(|p| p.as_str())
@@ -63,7 +68,7 @@ fn history_data(recent: &[Recent]) -> serde_json::Value {
     serde_json::Value::Array(
         recent
             .iter()
-            .map(|r| serde_json::json!({"label":r.label,"url":r.address,"local_info":r.local_info}))
+            .map(|r| serde_json::json!({"label":r.label,"url":r.address,"local_info":r.local_info,"local_id":r.local_id}))
             .collect(),
     )
 }
@@ -99,13 +104,31 @@ pub fn init(cx: &mut App) {
                 address,
                 config: Some(config.clone()),
                 local_info: None,
+                local_id: None,
             },
         );
+    }
+    let ids = recent
+        .iter()
+        .filter_map(|r| r.local_id.clone())
+        .collect::<Vec<_>>();
+    let managed = server::load_servers(&ids);
+    for server in managed.values() {
+        let server = server.clone();
+        let task = cx
+            .global::<Runtime>()
+            .handle
+            .spawn(async move { server.reconcile().await });
+        cx.spawn(async move |cx| {
+            let _ = task.await;
+            cx.update(|cx| cx.refresh_windows());
+        })
+        .detach();
     }
     cx.set_global(Connections {
         recent,
         quitting: false,
-        managed: Default::default(),
+        managed,
     });
     cx.on_action(|_: &crate::NewWindow, cx| open(cx));
     cx.on_action(|_: &crate::Quit, cx| {
@@ -336,14 +359,14 @@ impl ConnectionWindow {
         self.busy = true;
         self.error = None;
         let handle = cx.global::<Runtime>().handle.clone();
-        let stopped =
-            managed_server(&address, cx).is_some_and(|s| s.state() == server::LocalState::Stopped);
+        let managed = managed_server(&address, cx);
         let task = handle.spawn(async move {
-            let kernel = if stopped {
-                "python3".into()
-            } else {
-                server::validate(config.clone()).await?
-            };
+            if let Some(managed) = managed
+                && managed.reconcile().await == server::LocalState::Stopped
+            {
+                managed.change(true).await?;
+            }
+            let kernel = server::validate(config.clone()).await?;
             Ok::<_, String>((address, config, label, kernel, info, None))
         });
         self.finish(task, window, cx);
@@ -373,17 +396,19 @@ impl ConnectionWindow {
                 self.busy = true;
                 self.error = None;
                 let handle = cx.global::<Runtime>().handle.clone();
+                let storage = server::storage_directory();
                 let task = handle.spawn(async move {
                     let label = PathBuf::from(&folder)
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "Local server".into());
-                    let pending = tokio::task::spawn_blocking(move || {
+                    let mut pending = tokio::task::spawn_blocking(move || {
                         server::start(environment, &python, &folder)
                     })
                     .await
                     .map_err(|_| "Could not start Jupyter.".to_owned())??;
                     let kernel = server::validate(pending.config.clone()).await?;
+                    pending.persist(&storage).await?;
                     Ok((
                         pending.address.clone(),
                         pending.config.clone(),
@@ -440,7 +465,13 @@ impl ConnectionWindow {
                                 label: label.clone(),
                                 address: address.clone(),
                                 config: Some(config),
-                                local_info: info,
+                                local_info: managed_server(&address, cx)
+                                    .map(|s| s.connection().1)
+                                    .or(info),
+                                local_id: pending
+                                    .as_ref()
+                                    .and_then(|p| p.id())
+                                    .or_else(|| managed_server(&address, cx).and_then(|s| s.id())),
                             },
                             cx,
                         );
@@ -873,7 +904,22 @@ impl Render for ConnectionWindow {
                                             .text_size(t.font.xs)
                                             .text_color(surface.muted_fg)
                                             .truncate()
-                                            .child(recent.address.clone()),
+                                            .child(
+                                                match managed_server(&recent.address, cx)
+                                                    .map(|s| s.state())
+                                                {
+                                                    Some(server::LocalState::Stopped) => {
+                                                        "Stopped · Click to start".to_owned()
+                                                    }
+                                                    Some(server::LocalState::Busy) => {
+                                                        "Starting…".to_owned()
+                                                    }
+                                                    Some(server::LocalState::Unverified) => {
+                                                        "Local server · Not verified".to_owned()
+                                                    }
+                                                    _ => recent.address.clone(),
+                                                },
+                                            ),
                                     ),
                             )
                             .when(!self.busy, |v| {
@@ -1144,6 +1190,7 @@ mod tests {
             address,
             config: Some(config),
             local_info: None,
+            local_id: None,
         }]);
         assert_eq!(data[0]["url"], "https://example.test/");
         assert!(!data.to_string().contains("private-token"));
