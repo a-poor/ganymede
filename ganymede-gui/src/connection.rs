@@ -1,4 +1,5 @@
 //! One connection picker / workspace per native window.
+mod credentials;
 pub(crate) mod server;
 use crate::{
     code_cell::stdin_prompt::{FieldSubmit, StdinPrompt as Field},
@@ -16,6 +17,7 @@ struct Recent {
     config: Option<ServerConfig>,
     local_info: Option<PathBuf>,
     local_id: Option<String>,
+    saved_token: bool,
 }
 #[derive(Default)]
 struct Connections {
@@ -51,6 +53,10 @@ fn load_recent() -> Vec<Recent> {
                 label: item.get("label")?.as_str()?.into(),
                 address,
                 config: None,
+                saved_token: item
+                    .get("saved_token")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 local_id: item
                     .get("local_id")
                     .and_then(|v| v.as_str())
@@ -68,7 +74,7 @@ fn history_data(recent: &[Recent]) -> serde_json::Value {
     serde_json::Value::Array(
         recent
             .iter()
-            .map(|r| serde_json::json!({"label":r.label,"url":r.address,"local_info":r.local_info,"local_id":r.local_id}))
+            .map(|r| serde_json::json!({"label":r.label,"url":r.address,"local_info":r.local_info,"local_id":r.local_id,"saved_token":r.saved_token}))
             .collect(),
     )
 }
@@ -105,6 +111,7 @@ pub fn init(cx: &mut App) {
                 config: Some(config.clone()),
                 local_info: None,
                 local_id: None,
+                saved_token: false,
             },
         );
     }
@@ -253,6 +260,8 @@ struct ConnectionWindow {
     page: Page,
     address: Entity<Field>,
     token: Entity<Field>,
+    remember_token: bool,
+    save_token: Option<(String, String)>,
     python: Entity<Field>,
     environment: server::Environment,
     environment_open: bool,
@@ -304,6 +313,8 @@ impl ConnectionWindow {
             page: Page::Recent,
             address,
             token,
+            remember_token: false,
+            save_token: None,
             python,
             environment: server::Environment::Global,
             environment_open: false,
@@ -382,6 +393,15 @@ impl ConnectionWindow {
                 self.token.read(cx).value(),
             ) {
                 Ok((address, config)) => {
+                    self.save_token = if self.remember_token {
+                        credentials::token(
+                            self.address.read(cx).value(),
+                            self.token.read(cx).value(),
+                        )
+                        .map(|token| (address.clone(), token))
+                    } else {
+                        None
+                    };
                     self.connect(address.clone(), config, address, None, window, cx)
                 }
                 Err(error) => {
@@ -430,10 +450,19 @@ impl ConnectionWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let save_token = self.save_token.take();
         self.task = cx.spawn_in(window, async move |this, cx| {
-            let result = task
+            let mut result = task
                 .await
                 .unwrap_or_else(|_| Err("Connection interrupted.".into()));
+            let mut saved = false;
+            if result.is_ok() && let Some((address, token)) = save_token {
+                let write = cx.update(|_, cx| cx.write_credentials(&credentials::key(&address), "token", token.as_bytes()));
+                if let Ok(write) = write {
+                    if write.await.is_ok() { saved = true; }
+                    else { result = Err("Connected, but the token could not be saved to Keychain. Try again or uncheck Remember token.".into()); }
+                } else { return; }
+            }
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
                 match result {
@@ -465,6 +494,7 @@ impl ConnectionWindow {
                                 label: label.clone(),
                                 address: address.clone(),
                                 config: Some(config),
+                                saved_token: saved || cx.global::<Connections>().recent.iter().any(|r| r.address == address && r.saved_token),
                                 local_info: managed_server(&address, cx)
                                     .map(|s| s.connection().1)
                                     .or(info),
@@ -493,12 +523,40 @@ impl ConnectionWindow {
         });
     }
     fn recent(&mut self, mut recent: Recent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        self.save_token = None;
+        if recent.saved_token && managed_server(&recent.address, cx).is_none() {
+            self.edit_recent(&recent, window, cx);
+            self.busy = true;
+            let read = cx.read_credentials(&credentials::key(&recent.address));
+            self.task = cx.spawn_in(window, async move |this, cx| {
+                let result = read.await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.busy = false;
+                    match result.ok().flatten().and_then(|(_, bytes)| String::from_utf8(bytes).ok()) {
+                        Some(token) => {
+                            this.token.update(cx, |input, cx| input.set_value(token.clone(), cx));
+                            match server::parse_connection(&recent.address, &token) {
+                                Ok((address, config)) => this.connect(address, config, recent.label, None, window, cx),
+                                Err(error) => this.error = Some(error),
+                            }
+                        }
+                        None => this.error = Some("Could not read the saved token. Enter it again, or unlock Keychain and retry.".into()),
+                    }
+                    cx.notify();
+                });
+            });
+            cx.notify();
+            return;
+        }
         if let Some(server) = managed_server(&recent.address, cx) {
             let (config, info) = server.connection();
             recent.config = Some(config);
             recent.local_info = Some(info);
         }
-        let config = recent.config.or_else(|| {
+        let config = recent.config.clone().or_else(|| {
             recent
                 .local_info
                 .as_deref()
@@ -515,13 +573,98 @@ impl ConnectionWindow {
                 cx,
             );
         } else {
-            self.address
-                .update(cx, |input, cx| input.set_value(recent.address, cx));
-            self.token
-                .update(cx, |input, cx| input.set_value(String::new(), cx));
-            self.page(Page::Existing, window, cx);
-            self.token.read(cx).focus_handle(cx).focus(window, cx);
+            self.edit_recent(&recent, window, cx);
         }
+    }
+    fn edit_recent(&mut self, recent: &Recent, window: &mut Window, cx: &mut Context<Self>) {
+        self.address
+            .update(cx, |input, cx| input.set_value(recent.address.clone(), cx));
+        self.token
+            .update(cx, |input, cx| input.set_value(String::new(), cx));
+        self.remember_token = recent.saved_token;
+        self.page(Page::Existing, window, cx);
+        self.token.read(cx).focus_handle(cx).focus(window, cx);
+    }
+    fn forget_token(&mut self, address: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+        let delete = cx.delete_credentials(&credentials::key(&address));
+        self.task = cx.spawn_in(window, async move |this, cx| {
+            let result = delete.await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                this.busy = false;
+                if credentials::deleted(&result) {
+                    let recent = cx
+                        .global::<Connections>()
+                        .recent
+                        .iter()
+                        .find(|r| r.address == address)
+                        .cloned();
+                    if let Some(mut recent) = recent {
+                        recent.saved_token = false;
+                        recent.config = None;
+                        remember(recent, cx);
+                    }
+                    this.remember_token = false;
+                    this.token
+                        .update(cx, |input, cx| input.set_value(String::new(), cx));
+                    this.error = None;
+                } else {
+                    this.error =
+                        Some("Could not forget the token. Unlock Keychain and try again.".into());
+                }
+                cx.notify();
+            });
+        });
+        cx.notify();
+    }
+    fn remember_control(&self, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.theme();
+        div()
+            .id("remember-token")
+            .tab_index(0)
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_size(t.font.sm)
+            .cursor_pointer()
+            .child(
+                div()
+                    .size(px(14.))
+                    .border_1()
+                    .border_color(t.input)
+                    .rounded(t.radius.sm())
+                    .bg(if self.remember_token {
+                        t.card.primary
+                    } else {
+                        t.card.bg
+                    })
+                    .text_color(if self.remember_token {
+                        t.card.primary_fg
+                    } else {
+                        t.card.fg
+                    })
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(if self.remember_token { "✓" } else { "" }),
+            )
+            .child("Remember token")
+            .hover(|s| s.text_color(t.card.primary))
+            .focus(|s| s.bg(t.card.accent).text_color(t.card.accent_fg))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.remember_token = !this.remember_token;
+                cx.notify();
+            }))
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "space" | "enter") {
+                    this.remember_token = !this.remember_token;
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
     }
     fn choose_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
@@ -856,6 +999,8 @@ impl Render for ConnectionWindow {
                     })
                     .children(recent.into_iter().enumerate().map(|(i, recent)| {
                         let click = recent.clone();
+                        let settings = recent.clone();
+                        let settings_key = recent.clone();
                         div()
                             .id(("recent", i))
                             .tab_index(0)
@@ -922,6 +1067,40 @@ impl Render for ConnectionWindow {
                                             ),
                                     ),
                             )
+                            .when(recent.saved_token && !self.busy, |v| {
+                                v.child(
+                                    div()
+                                        .id(("recent-settings", i))
+                                        .tab_index(0)
+                                        .p_1()
+                                        .rounded(t.radius.md())
+                                        .cursor_pointer()
+                                        .hover(|s| {
+                                            s.bg(surface.accent).text_color(surface.accent_fg)
+                                        })
+                                        .child(
+                                            crate::icon::Icon::Gear
+                                                .svg()
+                                                .size(px(14.))
+                                                .text_color(surface.muted_fg),
+                                        )
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            this.edit_recent(&settings, window, cx);
+                                        }))
+                                        .on_key_down(cx.listener(
+                                            move |this, event: &gpui::KeyDownEvent, window, cx| {
+                                                if matches!(
+                                                    event.keystroke.key.as_str(),
+                                                    "enter" | "space"
+                                                ) {
+                                                    cx.stop_propagation();
+                                                    this.edit_recent(&settings_key, window, cx);
+                                                }
+                                            },
+                                        )),
+                                )
+                            })
                             .when(!self.busy, |v| {
                                 v.cursor_pointer()
                                     .hover(|s| {
@@ -1060,11 +1239,22 @@ impl Render for ConnectionWindow {
                             .gap_3()
                             .child(field("Server URL", self.address.clone(), cx))
                             .child(field("Token (optional)", self.token.clone(), cx))
+                            .when(cfg!(target_os = "macos"), |v| v.child(self.remember_control(cx)))
+                            .when_some(server::parse_connection(self.address.read(cx).value(), "").ok().map(|(a, _)| a).filter(|address| cx.global::<Connections>().recent.iter().any(|r| r.address == *address && r.saved_token)), |v, address| {
+                                let key_address = address.clone();
+                                v.child(div().flex().child(button("forget-token", "Forget token", false, cx)
+                                    .on_click(cx.listener(move |this, _, window, cx| this.forget_token(address.clone(), window, cx)))
+                                    .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                            cx.stop_propagation(); this.forget_token(key_address.clone(), window, cx);
+                                        }
+                                    }))))
+                            })
                             .child(
                                 div()
                                     .text_size(t.font.xs)
                                     .text_color(t.card.muted_fg)
-                                    .child("Tokens are not saved to connection history."),
+                                    .child("Saved tokens stay in macOS Keychain until you choose Forget token."),
                             ),
                     )
                     .child(
@@ -1191,6 +1381,7 @@ mod tests {
             config: Some(config),
             local_info: None,
             local_id: None,
+            saved_token: true,
         }]);
         assert_eq!(data[0]["url"], "https://example.test/");
         assert!(!data.to_string().contains("private-token"));
