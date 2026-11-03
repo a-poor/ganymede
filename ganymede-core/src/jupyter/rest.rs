@@ -64,6 +64,17 @@ impl JupyterRestClient {
             .await?)
     }
 
+    /// Explicitly stop the server and its kernels. Closing a client must not call this.
+    pub async fn shutdown_server(&self) -> Result<()> {
+        self.request(
+            Method::POST,
+            self.config.endpoint(&["api", "shutdown"])?,
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn server_version(&self) -> Result<ServerVersion> {
         self.json(Method::GET, &["api"], None).await
     }

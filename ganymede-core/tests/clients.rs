@@ -32,6 +32,7 @@ async fn rest_auth_base_path_errors_and_no_content() {
                 "204 No Content",
                 "",
             ),
+            ("POST /prefix/api/shutdown", "200 OK", ""),
         ] {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut bytes = Vec::new();
@@ -70,6 +71,7 @@ async fn rest_auth_base_path_errors_and_no_content() {
         error => panic!("{error}"),
     }
     rest.interrupt_kernel("kernel").await.unwrap();
+    rest.shutdown_server().await.unwrap();
     server.await.unwrap();
 }
 

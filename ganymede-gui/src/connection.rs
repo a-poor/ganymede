@@ -1,5 +1,5 @@
 //! One connection picker / workspace per native window.
-mod server;
+pub(crate) mod server;
 use crate::{
     code_cell::stdin_prompt::{FieldSubmit, StdinPrompt as Field},
     execution::Runtime,
@@ -20,6 +20,7 @@ struct Recent {
 struct Connections {
     recent: Vec<Recent>,
     quitting: bool,
+    managed: std::collections::HashMap<String, server::ManagedServer>,
 }
 impl gpui::Global for Connections {}
 
@@ -104,6 +105,7 @@ pub fn init(cx: &mut App) {
     cx.set_global(Connections {
         recent,
         quitting: false,
+        managed: Default::default(),
     });
     cx.on_action(|_: &crate::NewWindow, cx| open(cx));
     cx.on_action(|_: &crate::Quit, cx| {
@@ -334,8 +336,14 @@ impl ConnectionWindow {
         self.busy = true;
         self.error = None;
         let handle = cx.global::<Runtime>().handle.clone();
+        let stopped =
+            managed_server(&address, cx).is_some_and(|s| s.state() == server::LocalState::Stopped);
         let task = handle.spawn(async move {
-            let kernel = server::validate(config.clone()).await?;
+            let kernel = if stopped {
+                "python3".into()
+            } else {
+                server::validate(config.clone()).await?
+            };
             Ok::<_, String>((address, config, label, kernel, info, None))
         });
         self.finish(task, window, cx);
@@ -430,14 +438,16 @@ impl ConnectionWindow {
                         remember(
                             Recent {
                                 label: label.clone(),
-                                address,
+                                address: address.clone(),
                                 config: Some(config),
                                 local_info: info,
                             },
                             cx,
                         );
                         if let Some(pending) = pending {
-                            pending.accept();
+                            cx.global_mut::<Connections>()
+                                .managed
+                                .insert(address, pending.accept());
                         }
                         this.token
                             .update(cx, |input, cx| input.set_value(String::new(), cx));
@@ -451,7 +461,12 @@ impl ConnectionWindow {
             });
         });
     }
-    fn recent(&mut self, recent: Recent, window: &mut Window, cx: &mut Context<Self>) {
+    fn recent(&mut self, mut recent: Recent, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(server) = managed_server(&recent.address, cx) {
+            let (config, info) = server.connection();
+            recent.config = Some(config);
+            recent.local_info = Some(info);
+        }
         let config = recent.config.or_else(|| {
             recent
                 .local_info
@@ -1091,6 +1106,28 @@ impl Render for ConnectionWindow {
                     ),
             )
             .into_any_element()
+    }
+}
+
+pub(crate) fn managed_server(address: &str, cx: &App) -> Option<server::ManagedServer> {
+    cx.global::<Connections>().managed.get(address).cloned()
+}
+
+pub(crate) fn update_local_history(address: &str, cx: &mut App) {
+    let Some(server) = managed_server(address, cx) else {
+        return;
+    };
+    let (config, info) = server.connection();
+    let recent = cx
+        .global::<Connections>()
+        .recent
+        .iter()
+        .find(|r| r.address == address)
+        .cloned();
+    if let Some(mut recent) = recent {
+        recent.config = Some(config);
+        recent.local_info = Some(info);
+        remember(recent, cx);
     }
 }
 

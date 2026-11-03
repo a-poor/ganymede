@@ -66,6 +66,7 @@ pub(super) async fn validate(mut config: ServerConfig) -> Result<String, String>
 /// Until accepted by the UI, cancellation/failure cleans up a server that has
 /// never been exposed to notebook execution. Accepted servers are left running.
 pub(super) struct PendingServer {
+    launch: Launch,
     child: Option<Child>,
     pub info: PathBuf,
     directory: PathBuf,
@@ -73,13 +74,14 @@ pub(super) struct PendingServer {
     pub config: ServerConfig,
 }
 impl PendingServer {
-    pub fn accept(mut self) {
-        if let Some(mut child) = self.child.take() {
-            // Reap the process if it eventually exits while the app is still open.
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-        }
+    pub fn accept(mut self) -> ManagedServer {
+        ManagedServer(std::sync::Arc::new(std::sync::Mutex::new(Managed {
+            child: self.child.take(),
+            launch: self.launch.clone(),
+            config: self.config.clone(),
+            info: self.info.clone(),
+            busy: false,
+        })))
     }
 }
 impl Drop for PendingServer {
@@ -121,12 +123,15 @@ impl Environment {
     }
 }
 
+// Fixed script: user paths are separate process arguments, never interpolated code.
+const PYTHON_LAUNCH: &str = "import importlib.util,sys,runpy; sys.exit(81) if importlib.util.find_spec('jupyter_server') is None else None; sys.exit(82) if importlib.util.find_spec('ipykernel') is None else None; sys.argv[0]='jupyter-server'; runpy.run_module('jupyter_server',run_name='__main__')";
+
 fn launch_command(
     mode: Environment,
     value: &str,
     root: &std::path::Path,
 ) -> Result<(std::ffi::OsString, Vec<&'static str>), String> {
-    let python_args = vec!["-m", "jupyter_server"];
+    let python_args = vec!["-c", PYTHON_LAUNCH];
     match mode {
         Environment::Global => Ok(("python3".into(), python_args)),
         Environment::Venv | Environment::Custom => {
@@ -157,6 +162,15 @@ pub(super) fn start(
     python: &str,
     folder: &str,
 ) -> Result<PendingServer, String> {
+    start_launch(mode, python, folder, None)
+}
+
+fn start_launch(
+    mode: Environment,
+    python: &str,
+    folder: &str,
+    reuse: Option<&Launch>,
+) -> Result<PendingServer, String> {
     let root = std::fs::canonicalize(folder.trim())
         .map_err(|_| "Choose an existing project folder.".to_owned())?;
     if !root.is_dir() {
@@ -172,7 +186,10 @@ pub(super) fn start(
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
             .map_err(|_| "Could not secure the runtime directory.".to_owned())?;
     }
-    let token = uuid::Uuid::new_v4().to_string();
+    let token = reuse
+        .map(|l| l.token.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let port = reuse.map(|l| l.port).unwrap_or(0);
     let mut command = Command::new(executable);
     #[cfg(unix)]
     {
@@ -184,9 +201,9 @@ pub(super) fn start(
         .args([
             "--no-browser",
             "--ServerApp.ip=127.0.0.1",
-            "--ServerApp.port=0",
             "--ServerApp.port_retries=0",
         ])
+        .arg(format!("--ServerApp.port={port}"))
         .arg(format!("--ServerApp.root_dir={}", root.display()))
         .env("JUPYTER_RUNTIME_DIR", &directory)
         .env("JUPYTER_TOKEN", &token)
@@ -204,6 +221,13 @@ pub(super) fn start(
     };
     let info = directory.join(format!("jpserver-{}.json", child.id()));
     let mut pending = PendingServer {
+        launch: Launch {
+            mode,
+            python: python.into(),
+            folder: root.to_string_lossy().into_owned(),
+            token,
+            port,
+        },
         child: Some(child),
         info,
         directory,
@@ -212,15 +236,18 @@ pub(super) fn start(
     };
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(30) {
-        if pending
+        if let Some(status) = pending
             .child
             .as_mut()
             .unwrap()
             .try_wait()
             .map_err(|_| "Could not check server startup.".to_owned())?
-            .is_some()
         {
-            return Err("Jupyter could not start. Make sure jupyter-server and ipykernel are installed in the selected Python environment.".into());
+            return Err(match status.code() {
+                Some(81) => "The selected Python environment is missing jupyter-server. Install it there, then try again.",
+                Some(82) => "The selected Python environment is missing ipykernel. Install it there, then try again.",
+                _ => "Jupyter exited during startup. Check the selected environment and its Jupyter configuration.",
+            }.into());
         }
         let info = std::fs::read_dir(&pending.directory)
             .ok()
@@ -235,6 +262,7 @@ pub(super) fn start(
             && let Some((address, config)) = read_local(&info)
         {
             pending.info = info;
+            pending.launch.port = config.base_url().port_or_known_default().unwrap();
             pending.address = address;
             pending.config = config;
             return Ok(pending);
@@ -259,7 +287,7 @@ mod tests {
                 "bin/python"
             })
         );
-        assert_eq!(args, ["-m", "jupyter_server"]);
+        assert_eq!(args, ["-c", PYTHON_LAUNCH]);
         assert_eq!(
             launch_command(Environment::Global, "", &root).unwrap().0,
             "python3"
@@ -336,6 +364,87 @@ mod connection_tests {
         check_local_server(Environment::Custom, python).await;
     }
 
+    #[tokio::test]
+    #[ignore = "requires GANYMEDE_TEST_PYTHON with jupyter-server and ipykernel"]
+    async fn managed_server_stops_and_restarts_without_running_kernels() {
+        let python = std::env::var("GANYMEDE_TEST_PYTHON").unwrap();
+        let root =
+            std::env::temp_dir().join(format!("ganymede-lifecycle-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("example.txt"), "preserved").unwrap();
+        let folder = root.to_string_lossy().into_owned();
+        let pending =
+            tokio::task::spawn_blocking(move || start(Environment::Custom, &python, &folder))
+                .await
+                .unwrap()
+                .unwrap();
+        validate(pending.config.clone()).await.unwrap();
+        let client = JupyterRestClient::new(pending.config.clone()).unwrap();
+        let first_info = pending.info.clone();
+        let server = pending.accept();
+        assert!(server.state() == LocalState::Running);
+        assert!(server.change(true).await.is_err());
+        client.start_kernel("python3", None).await.unwrap();
+        server.change(false).await.unwrap();
+        assert!(server.state() == LocalState::Stopped);
+        assert!(client.list_kernels().await.is_err());
+        assert!(server.change(false).await.is_err());
+        let port = server.connection().0.base_url().port().unwrap();
+        let occupied = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+        assert!(server.change(true).await.is_err());
+        assert!(server.state() == LocalState::Stopped);
+        assert_eq!(occupied.local_addr().unwrap().port(), port);
+        drop(occupied);
+        server.change(true).await.unwrap();
+        // The original client and authentication still work; no execution was replayed.
+        assert!(server.state() == LocalState::Running);
+        assert!(client.list_kernels().await.unwrap().is_empty());
+        assert_eq!(
+            client
+                .get_contents("example.txt", true)
+                .await
+                .unwrap()
+                .content,
+            "preserved"
+        );
+        let second_info = server.connection().1;
+        server.change(false).await.unwrap();
+        for info in [first_info, second_info] {
+            let _ = std::fs::remove_dir_all(info.parent().unwrap());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires GANYMEDE_TEST_PYTHON with venv support"]
+    async fn startup_identifies_missing_python_and_packages() {
+        let python = std::env::var("GANYMEDE_TEST_PYTHON").unwrap();
+        let root =
+            std::env::temp_dir().join(format!("ganymede-start-errors-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let folder = root.to_string_lossy().into_owned();
+        let missing = root.join("missing-python").to_string_lossy().into_owned();
+        let error = start(Environment::Custom, &missing, &folder).err().unwrap();
+        assert!(error.contains("Could not launch the environment"));
+        let env = root.join("venv");
+        assert!(
+            Command::new(python)
+                .args(["-m", "venv", "--without-pip"])
+                .arg(&env)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let env = env.to_string_lossy().into_owned();
+        let error = start(Environment::Venv, &env, &folder).err().unwrap();
+        assert!(error.contains("missing jupyter-server"), "{error}");
+        // Make just jupyter_server discoverable in this disposable project.
+        std::fs::write(root.join("jupyter_server.py"), "").unwrap();
+        let error = start(Environment::Venv, &env, &folder).err().unwrap();
+        assert!(error.contains("missing ipykernel"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     async fn check_local_server(mode: Environment, python: String) {
         let root = std::env::temp_dir().join(format!("ganymede-root-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
@@ -354,5 +463,118 @@ mod connection_tests {
         drop(pending);
         assert!(!info.exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+// Ownership is retained across workspace windows, but never inferred from a loopback URL.
+#[derive(Clone)]
+struct Launch {
+    mode: Environment,
+    python: String,
+    folder: String,
+    token: String,
+    port: u16,
+}
+struct Managed {
+    child: Option<Child>,
+    launch: Launch,
+    config: ServerConfig,
+    info: PathBuf,
+    busy: bool,
+}
+#[derive(Clone)]
+pub(crate) struct ManagedServer(std::sync::Arc<std::sync::Mutex<Managed>>);
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalState {
+    Running,
+    Stopped,
+    Busy,
+}
+impl ManagedServer {
+    pub fn connection(&self) -> (ServerConfig, PathBuf) {
+        let server = self.0.lock().unwrap();
+        (server.config.clone(), server.info.clone())
+    }
+    pub fn state(&self) -> LocalState {
+        let mut server = self.0.lock().unwrap();
+        if server.busy {
+            return LocalState::Busy;
+        }
+        if server
+            .child
+            .as_mut()
+            .is_some_and(|child| child.try_wait().ok().flatten().is_none())
+        {
+            LocalState::Running
+        } else {
+            LocalState::Stopped
+        }
+    }
+    pub async fn change(&self, restart: bool) -> Result<(), String> {
+        let (launch, config) = {
+            let mut server = self.0.lock().unwrap();
+            if server.busy {
+                return Err("A server operation is already in progress.".into());
+            }
+            let running = server
+                .child
+                .as_mut()
+                .is_some_and(|c| c.try_wait().ok().flatten().is_none());
+            if restart == running {
+                return Err("The server state changed. Try again.".into());
+            }
+            server.busy = true;
+            (server.launch.clone(), server.config.clone())
+        };
+        // Also release the operation lock if the async task is cancelled.
+        struct ResetBusy(ManagedServer);
+        impl Drop for ResetBusy {
+            fn drop(&mut self) {
+                self.0.0.lock().unwrap().busy = false;
+            }
+        }
+        let _reset = ResetBusy(self.clone());
+        self.change_inner(restart, launch, config).await
+    }
+    async fn change_inner(
+        &self,
+        restart: bool,
+        launch: Launch,
+        mut config: ServerConfig,
+    ) -> Result<(), String> {
+        if restart {
+            let mut pending = tokio::task::spawn_blocking(move || {
+                start_launch(launch.mode, &launch.python, &launch.folder, Some(&launch))
+            })
+            .await
+            .map_err(|_| "Could not restart Jupyter.".to_owned())??;
+            validate(pending.config.clone()).await?;
+            let mut server = self.0.lock().unwrap();
+            server.child = pending.child.take();
+            server.info = pending.info.clone();
+            return Ok(());
+        }
+        config.request_timeout = Duration::from_secs(10);
+        JupyterRestClient::new(config)
+            .map_err(|_| "Could not contact Jupyter.".to_owned())?
+            .shutdown_server()
+            .await
+            .map_err(|_| {
+                "Could not stop the server. Check its connection and try again.".to_owned()
+            })?;
+        for _ in 0..100 {
+            if self
+                .0
+                .lock()
+                .unwrap()
+                .child
+                .as_mut()
+                .is_none_or(|c| c.try_wait().ok().flatten().is_some())
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Err("The server is still shutting down. Check its status before trying again.".into())
     }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::connection::server::LocalState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Status {
@@ -50,6 +51,80 @@ impl Server {
     }
 }
 impl Workspace {
+    fn local_server(&self, cx: &App) -> Option<crate::connection::server::ManagedServer> {
+        self.runtime
+            .config
+            .as_ref()
+            .ok()
+            .and_then(|config| crate::connection::managed_server(config.base_url().as_str(), cx))
+    }
+
+    fn local_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(server) = self.local_server(cx) else {
+            return;
+        };
+        let state = server.state();
+        if state == LocalState::Busy || window.has_active_prompt() {
+            return;
+        }
+        let restart = state == LocalState::Stopped;
+        let answer = window.prompt(gpui::PromptLevel::Warning,
+            if restart { "Restart local server?" } else { "Stop local server?" },
+            Some(if restart { "The server will use the same project folder and Python environment. Cells will not run automatically." }
+                 else { "This ends all kernels and running work on this server, including in other windows or browsers. Open documents and unsaved edits will be kept." }),
+            &["Cancel", if restart { "Restart" } else { "Stop" }], cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(1) {
+                return;
+            }
+            let task = this.update(cx, |this, cx| {
+                this.persist_recovery(cx);
+                for doc in &this.documents {
+                    if let Content::Notebook(view) = &doc.content {
+                        view.update(cx, |view, cx| view.cancel_server_queue(cx));
+                    }
+                }
+                let task = this
+                    .runtime
+                    .handle
+                    .spawn(async move { server.change(restart).await });
+                cx.refresh_windows();
+                task
+            });
+            let Ok(task) = task else {
+                return;
+            };
+            let result = task
+                .await
+                .unwrap_or_else(|_| Err("Server operation interrupted.".into()));
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) if restart => {
+                        if let Ok(config) = &this.runtime.config {
+                            crate::connection::update_local_history(config.base_url().as_str(), cx);
+                        }
+                        this.check_server(true, cx);
+                    }
+                    Ok(()) => {
+                        this.server.status = Status::Disconnected;
+                    }
+                    Err(error) => this.toasts.update(cx, |host, cx| {
+                        host.push(
+                            crate::toast::Toast::new("Server operation failed")
+                                .description(error)
+                                .kind(crate::toast::ToastKind::Error),
+                            cx,
+                        );
+                    }),
+                }
+                cx.refresh_windows();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub(super) fn server_unavailable(&self) -> bool {
         self.server.status == Status::Disconnected
     }
@@ -59,7 +134,11 @@ impl Workspace {
     }
 
     pub fn check_server(&mut self, reconnect: bool, cx: &mut Context<Self>) {
-        if self.server.checking {
+        if self.server.checking
+            || self
+                .local_server(cx)
+                .is_some_and(|s| s.state() != LocalState::Running)
+        {
             return;
         }
         self.server.checking = true;
@@ -82,8 +161,12 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let result = task.await.unwrap_or_else(|_| Err("Could not reach the server".into()));
             this.update(cx, |this, cx| {
-                let previous = this.server.status;
                 this.server.checking = false;
+                if this.local_server(cx).is_some_and(|s| s.state() != LocalState::Running) {
+                    cx.notify();
+                    return;
+                }
+                let previous = this.server.status;
                 this.server.status = previous.checked(result.is_ok(), reconnect);
                 if result.is_err() && previous != Status::Disconnected {
                     for doc in &this.documents {
@@ -132,6 +215,7 @@ impl Workspace {
                 }
             }
             2 => crate::connection::open(cx),
+            3 => self.local_action(window, cx),
             _ => (),
         }
         cx.notify();
@@ -139,13 +223,35 @@ impl Workspace {
 
     pub fn server_button(entity: &Entity<Self>, cx: &App) -> impl IntoElement {
         let this = entity.read(cx);
+        let local = this.local_server(cx).map(|s| s.state());
+        let status_label = match local {
+            Some(LocalState::Stopped) => "Stopped",
+            Some(LocalState::Busy) => "Working…",
+            _ => this.server.status.label(),
+        };
+        let mut actions = vec![
+            ("Reconnect", Icon::Restart),
+            ("Open server in browser", Icon::Browsers),
+            ("New connection window…", Icon::AppWindow),
+        ];
+        if let Some(state) = local {
+            actions.push(if state == LocalState::Stopped {
+                ("Restart Server…", Icon::Restart)
+            } else {
+                ("Stop Server…", Icon::Stop)
+            });
+        }
+        let action_count = actions.len();
         let t = cx.theme();
         let surface = t.sidebar;
-        let pending = matches!(
-            this.server.status,
-            Status::Checking | Status::Reconnecting | Status::Available
-        );
-        let error = this.server.status == Status::Disconnected;
+        let pending = local == Some(LocalState::Busy)
+            || (local != Some(LocalState::Stopped)
+                && matches!(
+                    this.server.status,
+                    Status::Checking | Status::Reconnecting | Status::Available
+                ));
+        let error =
+            local != Some(LocalState::Stopped) && this.server.status == Status::Disconnected;
         let (badge_bg, badge_fg) = if error {
             (t.dialog_destructive_bg, t.dialog_destructive_fg)
         } else if pending {
@@ -178,11 +284,7 @@ impl Workspace {
                     .id("server-menu-button")
                     .track_focus(&this.server.focus)
                     .tab_index(0)
-                    .aria_label(format!(
-                        "{}: {}",
-                        this.server.label,
-                        this.server.status.label()
-                    ))
+                    .aria_label(format!("{}: {}", this.server.label, status_label))
                     .relative()
                     .size(px(28.))
                     .flex()
@@ -222,8 +324,10 @@ impl Workspace {
                                     this.server.menu = true;
                                     this.server.selected = Some(match this.server.selected {
                                         None => 0,
-                                        Some(i) if event.keystroke.key == "down" => (i + 1) % 3,
-                                        Some(i) => (i + 2) % 3,
+                                        Some(i) if event.keystroke.key == "down" => {
+                                            (i + 1) % action_count
+                                        }
+                                        Some(i) => (i + action_count - 1) % action_count,
                                     });
                                 }
                                 "enter" | "space" => {
@@ -313,7 +417,7 @@ impl Workspace {
                                         .font_weight(FontWeight::MEDIUM)
                                         .bg(badge_bg)
                                         .text_color(badge_fg)
-                                        .child(this.server.status.label()),
+                                        .child(status_label),
                                 ),
                             )
                             .child(
@@ -362,15 +466,8 @@ impl Workspace {
                                         ),
                                     ),
                             )
-                            .children(
-                                [
-                                    ("Reconnect", Icon::Restart),
-                                    ("Open server in browser", Icon::Browsers),
-                                    ("New connection window…", Icon::AppWindow),
-                                ]
-                                .into_iter()
-                                .enumerate()
-                                .map(|(index, (label, icon))| {
+                            .children(actions.into_iter().enumerate().map(
+                                |(index, (label, icon))| {
                                     let click = entity.downgrade();
                                     let hover = click.clone();
                                     let selected = this.server.selected == Some(index);
@@ -391,9 +488,15 @@ impl Workspace {
                                         .text_color(fg)
                                         .cursor_pointer()
                                         .when(selected, |v| v.bg(t.popover.accent))
-                                        .when(index == 0 && this.server.checking, |v| {
-                                            v.opacity(0.4)
-                                        })
+                                        .when(
+                                            (index == 0
+                                                && (this.server.checking
+                                                    || local.is_some_and(|s| {
+                                                        s != LocalState::Running
+                                                    })))
+                                                || (index == 3 && local == Some(LocalState::Busy)),
+                                            |v| v.opacity(0.4),
+                                        )
                                         .child(icon.svg().size(px(14.)).text_color(fg))
                                         .child(label)
                                         .on_hover(move |over, _, cx| {
@@ -416,8 +519,8 @@ impl Workspace {
                                                 })
                                                 .ok();
                                         })
-                                }),
-                            ),
+                                },
+                            )),
                     ),
             ));
         }
