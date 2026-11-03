@@ -394,3 +394,64 @@ async fn reload_refuses_to_discard_edits_made_during_fetch() {
     assert!(controller.snapshot().document.is_dirty());
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn rejected_kernel_switch_keeps_connection_and_unsaved_document() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (finish, finished) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let (header, _) = read_http(&mut socket).await;
+        assert!(header.starts_with("GET /api/sessions/session "));
+        reply_json(&mut socket, "200 OK", json!({"id":"session","path":"test.ipynb","name":"test.ipynb","type":"notebook","kernel":{"id":"original","name":"python3"}})).await;
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+        let Message::Text(text) = ws.next().await.unwrap().unwrap() else {
+            panic!()
+        };
+        let info: KernelMessage = serde_json::from_str(&text).unwrap();
+        let mut reply = KernelMessage::request("server", "shell", "kernel_info_reply", json!({}));
+        reply.parent_header = serde_json::to_value(info.header).unwrap();
+        ws.send(Message::Text(serde_json::to_string(&reply).unwrap().into()))
+            .await
+            .unwrap();
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let (header, _) = read_http(&mut socket).await;
+        assert!(header.starts_with("GET /api/kernelspecs "));
+        reply_json(&mut socket, "200 OK", json!({"default":"python3","kernelspecs":{"broken":{"name":"broken","spec":{"display_name":"Broken Python","language":"python"}}}})).await;
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let (header, body) = read_http(&mut socket).await;
+        assert!(header.starts_with("PATCH /api/sessions/session "));
+        assert_eq!(body, json!({"kernel":{"name":"broken"}}));
+        reply_json(
+            &mut socket,
+            "501 Not Implemented",
+            json!({"message":"kernel executable not found"}),
+        )
+        .await;
+        finished.await.unwrap();
+        drop(ws);
+    });
+    let mut document = NotebookDocument::new();
+    document
+        .insert_cell(0, CellKind::Code, "unsaved = 42")
+        .unwrap();
+    let controller = NotebookController::new(
+        ServerConfig::new(&format!("http://{address}")).unwrap(),
+        "test.ipynb",
+        document,
+    )
+    .unwrap();
+    controller.attach_session("session").await.unwrap();
+    let before = controller.snapshot().document.to_json();
+    assert!(controller.change_kernel("broken".into()).await.is_err());
+    assert_eq!(controller.snapshot().connection, ConnectionState::Connected);
+    assert_eq!(
+        controller.snapshot().session.as_ref().unwrap().kernel.id,
+        "original"
+    );
+    assert_eq!(controller.snapshot().document.to_json(), before);
+    finish.send(()).unwrap();
+    server.await.unwrap();
+}

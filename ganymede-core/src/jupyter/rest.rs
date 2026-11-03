@@ -76,6 +76,15 @@ impl JupyterRestClient {
     pub async fn get_session(&self, id: &str) -> Result<Session> {
         self.json(Method::GET, &["api", "sessions", id], None).await
     }
+    /// Replace a session's kernel. The server shuts down the previous kernel.
+    pub async fn change_session_kernel(&self, id: &str, name: &str) -> Result<Session> {
+        self.json(
+            Method::PATCH,
+            &["api", "sessions", id],
+            Some(json!({"kernel": {"name": name}})),
+        )
+        .await
+    }
     pub async fn create_session(&self, request: &CreateSession) -> Result<Session> {
         self.json(
             Method::POST,

@@ -33,6 +33,11 @@ macro_rules! define_icons {
 }
 
 define_icons! {
+    Broom => "regular/broom.svg",
+    Collapse => "regular/minus-square.svg",
+    List => "regular/list.svg",
+    Tree => "regular/tree-structure.svg",
+    Power => "regular/power.svg",
     Plus => "regular/plus.svg",
     Play => "regular/play.svg",
     Stop => "regular/stop.svg",

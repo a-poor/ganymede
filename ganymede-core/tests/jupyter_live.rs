@@ -419,3 +419,69 @@ async fn notebook_lifecycle() {
     );
     rest.shutdown_kernel(&standalone.id).await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires disposable Jupyter server; run scripts/test_jupyter.py"]
+async fn switching_kernels_preserves_notebooks_and_isolates_sessions() {
+    let config = ServerConfig::new(&std::env::var("GANYMEDE_JUPYTER_URL").unwrap())
+        .unwrap()
+        .with_token(&std::env::var("GANYMEDE_JUPYTER_TOKEN").unwrap())
+        .unwrap();
+    let rest = JupyterRestClient::new(config.clone()).unwrap();
+    let mut document = NotebookDocument::new();
+    let cell = document
+        .insert_cell(0, CellKind::Code, "answer = 42\nanswer")
+        .unwrap();
+    document.set_metadata(
+        serde_json::from_value(json!({"vendor": {"keep": true}, "kernelspec": {"custom": 17}}))
+            .unwrap(),
+    );
+    let first = NotebookController::new(config.clone(), "switch-first.ipynb", document).unwrap();
+    let second =
+        NotebookController::new(config, "switch-second.ipynb", NotebookDocument::new()).unwrap();
+    first.connect("python3").await.unwrap();
+    second.connect("python3").await.unwrap();
+    let original = first.snapshot().session.clone().unwrap();
+    let other = second.snapshot().session.clone().unwrap();
+    assert_ne!(original.kernel.id, other.kernel.id);
+    run_notebook_cell(&first, &cell, "answer = 42\nanswer").await;
+    let before = first.snapshot().document.to_json();
+    assert!(
+        first
+            .change_kernel("missing-ganymede-kernel".into())
+            .await
+            .is_err()
+    );
+    assert_eq!(first.snapshot().connection, ConnectionState::Connected);
+    assert_eq!(
+        first.snapshot().session.as_ref().unwrap().kernel.id,
+        original.kernel.id
+    );
+    assert_eq!(first.snapshot().document.to_json(), before);
+    first.change_kernel("python3".into()).await.unwrap();
+    let replacement = first.snapshot().session.clone().unwrap();
+    assert_eq!(replacement.id, original.id);
+    assert_ne!(replacement.kernel.id, original.kernel.id);
+    assert!(rest.get_kernel(&original.kernel.id).await.is_err());
+    assert!(rest.get_kernel(&other.kernel.id).await.is_ok());
+    let after = first.snapshot().document.to_json();
+    assert_eq!(after["cells"], before["cells"]);
+    assert_eq!(after["metadata"]["vendor"], before["metadata"]["vendor"]);
+    assert_eq!(after["metadata"]["kernelspec"]["custom"], 17);
+    assert_eq!(after["metadata"]["kernelspec"]["name"], "python3");
+    run_notebook_cell(&first, &cell, "'answer' not in globals()").await;
+    assert_eq!(
+        first.snapshot().document.to_json()["cells"][0]["outputs"][0]["data"]["text/plain"],
+        "True"
+    );
+    // A server-side shutdown must be recoverable by an explicit reconnect.
+    rest.shutdown_kernel(&replacement.kernel.id).await.unwrap();
+    first.disconnect().await.unwrap();
+    first.connect("python3").await.unwrap();
+    assert_ne!(
+        first.snapshot().session.as_ref().unwrap().kernel.id,
+        replacement.kernel.id
+    );
+    first.shutdown_session().await.unwrap();
+    second.shutdown_session().await.unwrap();
+}

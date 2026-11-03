@@ -1,5 +1,6 @@
 //! Server file browser, notebook tabs, and launcher.
 mod file_management;
+mod kernels;
 mod selection;
 use crate::execution::{Runtime, Session};
 use crate::{
@@ -246,6 +247,7 @@ pub struct Workspace {
     file_menu: Option<FileMenu>,
     file_menu_focus: gpui::FocusHandle,
     tree_generation: u64,
+    kernels: kernels::KernelList,
 }
 impl Workspace {
     pub fn new(
@@ -301,18 +303,26 @@ impl Workspace {
             file_menu: None,
             file_menu_focus: cx.focus_handle(),
             tree_generation: 0,
+            kernels: Default::default(),
         };
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(10))
                     .await;
-                if this.update(cx, |this, cx| this.refresh_files(cx)).is_err() {
+                if this
+                    .update(cx, |this, cx| {
+                        this.refresh_files(cx);
+                        this.refresh_kernels(false, cx);
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
         })
         .detach();
+        this.refresh_kernels(false, cx);
         this.refresh_directory(String::new(), cx);
         this.open_launcher(window, cx);
         this

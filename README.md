@@ -152,6 +152,8 @@ Connection lifecycle is explicit:
 - `detach_session()` additionally forgets the association, leaving any server
   session/kernel alive. Use it to recover from an externally deleted session.
 - `restart_kernel()` restarts and reconnects without rerunning cells.
+- `change_kernel(name)` replaces the session's kernel and records the installed
+  kernelspec in notebook metadata, preserving cells, outputs, and custom metadata.
 - `shutdown_session()` explicitly deletes the server session and its kernel.
 
 Transport loss marks unfinished executions `Unknown`, preserving edits and
@@ -187,6 +189,13 @@ Python environments need `jupyter-server` and `ipykernel`. Relative environment 
 resolve from the project folder. You can also connect to
 an existing HTTP(S) server with its URL and optional token. Deployment prefixes
 and pasted `/lab?token=…` URLs are supported.
+
+Click the notebook's kernel status to choose an installed kernel. Switching asks
+for confirmation before replacing the kernel and clearing its variables. The
+Kernels sidebar lists running kernels and associated notebook paths, refreshes
+periodically, and provides an explicit shutdown action with confirmation.
+Closing a notebook leaves its kernel running. After shutdown, use Reconnect or
+run a cell to start a new kernel using the notebook's selected kernelspec.
 
 Each workspace connects to one server. **File → New Window** (`Cmd+Shift+N` on
 macOS) opens another picker. Recent connections are remembered without tokens;

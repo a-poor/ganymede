@@ -1,5 +1,6 @@
 //! Server-backed notebook editor.
 mod history;
+mod kernel;
 mod list_row;
 use std::collections::VecDeque;
 
@@ -114,6 +115,7 @@ pub struct Notebook {
     selected: usize,
     largest_count: u64,
     applied_count_hint: Option<u64>,
+    kernel_menu: kernel::Picker,
     type_menu_open: bool,
     type_menu_index: usize,
     type_focus: gpui::FocusHandle,
@@ -177,6 +179,7 @@ impl Notebook {
             selected: 0,
             largest_count: 0,
             applied_count_hint: None,
+            kernel_menu: kernel::Picker::new(cx),
             type_menu_open: false,
             type_menu_index: 0,
             type_focus: cx.focus_handle(),
@@ -1369,6 +1372,21 @@ impl Notebook {
             )
             .child(
                 div()
+                    .id("kernel-selector")
+                    .relative()
+                    .track_focus(&self.kernel_menu.focus)
+                    .tab_index(0)
+                    .px_2()
+                    .h(gpui::px(26.))
+                    .rounded(t.radius.sm())
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.app.accent).text_color(t.app.accent_fg))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.toggle_kernel_menu(window, cx)),
+                    )
+                    .on_key_down(cx.listener(|this, event, window, cx| {
+                        this.kernel_menu_key(event, window, cx)
+                    }))
                     .text_size(t.font.xs)
                     .text_color(t.app.muted_fg)
                     .flex_shrink_0()
@@ -1397,7 +1415,16 @@ impl Notebook {
                             .when(!muted && activity == KernelActivity::Busy, |circle| {
                                 circle.bg(t.app.fg).text_color(t.app.bg)
                             }),
-                    ),
+                    )
+                    .when(self.kernel_menu.open, |control| {
+                        control.child(
+                            div()
+                                .absolute()
+                                .top_full()
+                                .left_0()
+                                .child(self.render_kernel_menu(cx)),
+                        )
+                    }),
             )
     }
 

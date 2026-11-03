@@ -169,13 +169,7 @@ impl Ganymede {
                     .text_color(surface.muted_fg)
                     .child("Git integration is coming later."),
             ),
-            SidebarTab::Kernels => {
-                panel
-                    .child(div().pt_3().child("Kernel management"))
-                    .child(div().text_color(surface.muted_fg).child(
-                    "Notebooks connect automatically. Kernel management will be added here later.",
-                ))
-            }
+            SidebarTab::Kernels => panel.child(workspace::Workspace::kernels(&self.workspace, cx)),
         }
     }
 
@@ -329,6 +323,9 @@ impl Render for Ganymede {
                                 .on_click(cx.listener(
                                     |this, _, _, cx| {
                                         this.sidebar_tab = SidebarTab::Kernels;
+                                        this.workspace.update(cx, |workspace, cx| {
+                                            workspace.refresh_kernels(false, cx)
+                                        });
                                         this.set_sidebar_open(true, cx);
                                     },
                                 )),

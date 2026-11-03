@@ -364,7 +364,8 @@ impl Render for Confirmation {
                             .justify_end()
                             .gap_2()
                             .children(self.buttons.iter().enumerate().map(|(index, label)| {
-                                let destructive = matches!(label.as_ref(), "Overwrite" | "Delete");
+                                let destructive =
+                                    matches!(label.as_ref(), "Overwrite" | "Delete" | "Shut Down");
                                 let primary = index == self.buttons.len() - 1 && !destructive;
                                 div()
                                     .id(("confirm-answer", index))

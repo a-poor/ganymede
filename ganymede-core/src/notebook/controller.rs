@@ -475,7 +475,18 @@ impl NotebookController {
             }
             let snapshot = this.snapshot();
             let session = match &snapshot.session {
-                Some(session) => this.inner.rest.get_session(&session.id).await?,
+                Some(session) => match this.inner.rest.get_session(&session.id).await {
+                    Ok(session) => session,
+                    Err(crate::jupyter::Error::Api { status, .. })
+                        if status == reqwest::StatusCode::NOT_FOUND =>
+                    {
+                        this.inner
+                            .rest
+                            .create_session(&CreateSession::notebook(&snapshot.path, kernel_name))
+                            .await?
+                    }
+                    Err(error) => return Err(error.into()),
+                },
                 None => {
                     this.inner
                         .rest
@@ -664,6 +675,60 @@ impl NotebookController {
                 .ok_or_else(|| Error::Unavailable("no session".into()))?;
             this.disconnect_inner().await?;
             session.kernel = this.inner.rest.restart_kernel(&session.kernel.id).await?;
+            this.attach_inner(session).await
+        })
+        .await
+    }
+    /// Explicitly replace this notebook's kernel, preserving its cells and outputs.
+    /// A rejected replacement leaves the existing connection intact.
+    pub async fn change_kernel(&self, name: String) -> Result<()> {
+        let this = self.clone();
+        finish(async move {
+            let _op = this.inner.operations.lock().await;
+            let specs = this.inner.rest.list_kernel_specs().await?;
+            let spec = specs
+                .kernelspecs
+                .get(&name)
+                .ok_or_else(|| Error::Invalid("kernel is not installed on this server".into()))?;
+            let snapshot = this.snapshot();
+            let session = match &snapshot.session {
+                Some(session) => match this
+                    .inner
+                    .rest
+                    .change_session_kernel(&session.id, &name)
+                    .await
+                {
+                    Ok(session) => session,
+                    Err(crate::jupyter::Error::Api { status, .. })
+                        if status == reqwest::StatusCode::NOT_FOUND =>
+                    {
+                        this.inner
+                            .rest
+                            .create_session(&CreateSession::notebook(&snapshot.path, &name))
+                            .await?
+                    }
+                    Err(error) => return Err(error.into()),
+                },
+                None => {
+                    this.inner
+                        .rest
+                        .create_session(&CreateSession::notebook(&snapshot.path, &name))
+                        .await?
+                }
+            };
+            this.disconnect_inner().await?;
+            // Record the accepted choice even if the subsequent WebSocket handshake fails.
+            let mut metadata = this.snapshot().document.metadata().clone();
+            let mut kernel_metadata = metadata
+                .get("kernelspec")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            kernel_metadata.insert("name".into(), name.into());
+            kernel_metadata.insert("display_name".into(), spec.spec.display_name.clone().into());
+            kernel_metadata.insert("language".into(), spec.spec.language.clone().into());
+            metadata.insert("kernelspec".into(), Value::Object(kernel_metadata));
+            this.set_metadata(metadata)?;
             this.attach_inner(session).await
         })
         .await

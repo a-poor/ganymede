@@ -237,7 +237,67 @@ impl Session {
             let _submission = this.submission.lock().await;
             let controller = this.controller.as_ref().map_err(Clone::clone)?;
             controller
-                .connect(this.kernel)
+                .connect(this.kernel_name())
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    pub fn kernel_name(&self) -> String {
+        if let Ok(controller) = &self.controller {
+            let snapshot = controller.snapshot();
+            if let Some(session) = &snapshot.session {
+                return session.kernel.name.clone();
+            }
+            if let Some(name) = snapshot
+                .document
+                .metadata()
+                .get("kernelspec")
+                .and_then(|v| v.get("name"))
+                .and_then(|v| v.as_str())
+            {
+                return name.to_owned();
+            }
+        }
+        self.kernel.clone()
+    }
+
+    pub fn kernel_specs(
+        &self,
+    ) -> tokio::task::JoinHandle<Result<ganymede_core::jupyter::models::KernelSpecs, String>> {
+        let controller = self.controller.clone();
+        self.handle.spawn(async move {
+            let client =
+                ganymede_core::jupyter::JupyterRestClient::new(controller?.server_config())
+                    .map_err(|e| e.to_string())?;
+            client.list_kernel_specs().await.map_err(|e| e.to_string())
+        })
+    }
+
+    pub fn cancel_pending(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+    pub fn detach(&self) -> tokio::task::JoinHandle<Result<(), String>> {
+        let this = self.clone();
+        self.handle.spawn(async move {
+            let _submission = this.submission.lock().await;
+            this.controller
+                .as_ref()
+                .map_err(Clone::clone)?
+                .detach_session()
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+    pub fn change_kernel(&self, name: String) -> tokio::task::JoinHandle<Result<(), String>> {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        let this = self.clone();
+        self.handle.spawn(async move {
+            let _submission = this.submission.lock().await;
+            this.controller
+                .as_ref()
+                .map_err(Clone::clone)?
+                .change_kernel(name)
                 .await
                 .map_err(|e| e.to_string())
         })
@@ -268,11 +328,13 @@ impl Session {
                 match snapshot.connection {
                     ConnectionState::Connected => format!(
                         "{} · {}",
-                        self.kernel,
+                        self.kernel_name(),
                         snapshot.kernel_status.as_deref().unwrap_or("idle")
                     ),
-                    _ if snapshot.session.is_some() => "Disconnected".into(),
-                    _ => "Python · not connected".into(),
+                    _ if snapshot.session.is_some() => {
+                        format!("{} · disconnected", self.kernel_name())
+                    }
+                    _ => format!("{} · not connected", self.kernel_name()),
                 }
             }
             Err(_) => "Configuration required".into(),
@@ -291,7 +353,7 @@ impl Session {
                     return Err("Execution cancelled before submission".into());
                 }
                 // Explicit Run may reconnect. No failed request is automatically replayed.
-                controller.connect(this.kernel.clone()).await.map_err(|e| e.to_string())?;
+                controller.connect(this.kernel_name()).await.map_err(|e| e.to_string())?;
                 if this.generation.load(Ordering::SeqCst) != generation {
                     return Err("Execution cancelled before submission".into());
                 }
