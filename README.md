@@ -223,7 +223,15 @@ build reads this file from the repository root even when launched elsewhere.
 Restart the app after changing configuration. The connection appears under
 Recent connections as “Configured server”.
 
-After connecting, the workspace starts on the launcher without creating
+Reopening a server restores notebook and text-file tabs in order, the active tab,
+sidebar visibility and section, expanded folders, and document scroll positions.
+Layouts are stored locally per server URL (including its base path), alongside the
+recent-connections file. They contain neither credentials nor document contents;
+unsaved-edit recovery is not included. Restored notebooks attach only to existing
+sessions at the same path. They do not start kernels or execute cells. Files that
+cannot be reopened remain in the saved layout for a later attempt.
+
+A new connection without a saved layout starts on the launcher without creating
 a server notebook. Creating a notebook explicitly uses Jupyter’s unused `Untitled`
 name. The file tree starts at the server root; folders
 load on expansion. Within each directory, folders sort before files using

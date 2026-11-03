@@ -1,6 +1,7 @@
 //! Server file browser, notebook tabs, and launcher.
 mod file_management;
 mod kernels;
+mod persistence;
 mod selection;
 mod server;
 use crate::execution::{Runtime, Session};
@@ -219,6 +220,10 @@ enum FileAction {
 
 pub struct Workspace {
     runtime: Runtime,
+    saved_layout: persistence::Layout,
+    last_written: Option<persistence::Layout>,
+    unrestored: Vec<(usize, persistence::SavedTab)>,
+    restoring: bool,
     toasts: Entity<crate::toast::ToastHost>,
     documents: Vec<Document>,
     tabs: Tabs,
@@ -274,7 +279,12 @@ impl Workspace {
             },
         )
         .detach();
+        let saved_layout = Self::load_layout(&runtime);
         let mut this = Self {
+            saved_layout,
+            last_written: None,
+            unrestored: Vec::new(),
+            restoring: false,
             runtime,
             toasts,
             documents: vec![],
@@ -330,6 +340,7 @@ impl Workspace {
         this.refresh_kernels(false, cx);
         this.refresh_directory(String::new(), cx);
         this.open_launcher(window, cx);
+        this.begin_restore(window, cx);
         this
     }
     fn create(&mut self, kind: DocumentKind, window: &mut Window, cx: &mut Context<Self>) {
@@ -647,6 +658,8 @@ impl Workspace {
                 }
                 match result {
                     Ok(Ok((path, controller))) => {
+                        this.unrestored
+                            .retain(|(_, tab)| tab.path.as_ref() != Some(&path));
                         this.reveal_file_parent(&path);
                         let editor =
                             cx.new(|cx| TextFile::new(controller, this.toasts.clone(), window, cx));
@@ -677,6 +690,7 @@ impl Workspace {
                         cx,
                     ),
                 }
+                this.finish_restore(window, cx);
                 cx.notify();
             })
             .ok();
@@ -708,6 +722,7 @@ impl Workspace {
         self.file_error = None;
         let runtime = &self.runtime;
         let config = runtime.config.clone();
+        let restoring = self.restoring;
         let requested = path.clone();
         let directory = self.file_directory.clone();
         let task = runtime.handle.spawn(async move {
@@ -723,9 +738,13 @@ impl Workspace {
                         .path
                 }
             };
-            let controller = NotebookController::open(config, &path)
+            let controller = NotebookController::open(config.clone(), &path)
                 .await
                 .map_err(|e| e.to_string())?;
+            if restoring {
+                // A stopped or unavailable kernel must not prevent restoring the document.
+                let _ = controller.attach_existing_session().await;
+            }
             Ok::<_, String>((path, controller))
         });
         cx.spawn_in(window, async move |this, cx| {
@@ -739,10 +758,23 @@ impl Workspace {
                 }
                 match result {
                     Ok(Ok((path, controller))) => {
+                        this.unrestored
+                            .retain(|(_, tab)| tab.path.as_ref() != Some(&path));
                         this.reveal_file_parent(&path);
                         let session = Session::from_controller(controller, &this.runtime);
-                        let notebook =
-                            cx.new(|cx| Notebook::new(session, this.toasts.clone(), window, cx));
+                        let notebook = cx.new(|cx| {
+                            if restoring {
+                                Notebook::new_with_connection(
+                                    session,
+                                    this.toasts.clone(),
+                                    false,
+                                    window,
+                                    cx,
+                                )
+                            } else {
+                                Notebook::new(session, this.toasts.clone(), window, cx)
+                            }
+                        });
                         notebook.update(cx, |view, _| view.set_file_busy(this.file_busy));
                         cx.observe(&notebook, |_, _, cx| cx.notify()).detach();
                         this.next_id += 1;
@@ -766,6 +798,7 @@ impl Workspace {
                     Ok(Err(error)) => this.file_error = Some(error),
                     Err(_) => this.file_error = Some("Could not open notebook".into()),
                 }
+                this.finish_restore(window, cx);
                 cx.notify();
             })
             .ok();
@@ -908,8 +941,10 @@ impl Workspace {
         self.close_pending = false;
         match target {
             CloseTarget::Tab(id) => self.finish_close(id, window, cx),
-            CloseTarget::Window => window.remove_window(),
-            CloseTarget::Quit => window.remove_window(),
+            CloseTarget::Window | CloseTarget::Quit => {
+                self.persist_layout(cx);
+                window.remove_window();
+            }
         }
     }
     fn finish_close(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {

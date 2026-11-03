@@ -2254,6 +2254,7 @@ dependencies = [
  "reqwest",
  "rust-embed",
  "scraper",
+ "serde",
  "serde_json",
  "tokio",
  "tree-sitter-highlight",

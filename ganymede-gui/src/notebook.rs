@@ -141,6 +141,16 @@ impl Notebook {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_with_connection(session, toasts, true, window, cx)
+    }
+
+    pub fn new_with_connection(
+        session: crate::execution::Session,
+        toasts: Entity<crate::toast::ToastHost>,
+        connect: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let find_input = cx.new(|cx| CodeCell::new_search(window, cx));
         cx.subscribe_in(
             &find_input,
@@ -173,7 +183,7 @@ impl Notebook {
             save_error: None,
             control_pending: false,
             control_label: "",
-            connecting: true,
+            connecting: connect,
             restart_run_all: false,
             execution_error: None,
             selected: 0,
@@ -259,25 +269,27 @@ impl Notebook {
             }
         })
         .detach();
-        let connection = notebook.session.connect();
-        cx.spawn(async move |this, cx| {
-            let result = connection.await;
-            this.update(cx, |this, cx| {
-                this.connecting = false;
-                this.execution_error = match result {
-                    Ok(Ok(())) => None,
-                    Ok(Err(error)) => Some(error),
-                    Err(_) => Some("Could not connect to the kernel".into()),
-                };
-                if this.execution_error.is_some() {
-                    this.runs.pending.clear();
-                }
-                this.start_next_run(cx);
-                cx.notify();
+        if connect {
+            let connection = notebook.session.connect();
+            cx.spawn(async move |this, cx| {
+                let result = connection.await;
+                this.update(cx, |this, cx| {
+                    this.connecting = false;
+                    this.execution_error = match result {
+                        Ok(Ok(())) => None,
+                        Ok(Err(error)) => Some(error),
+                        Err(_) => Some("Could not connect to the kernel".into()),
+                    };
+                    if this.execution_error.is_some() {
+                        this.runs.pending.clear();
+                    }
+                    this.start_next_run(cx);
+                    cx.notify();
+                })
+                .ok();
             })
-            .ok();
-        })
-        .detach();
+            .detach();
+        }
         let document = notebook.session.document();
         for loaded in document.cells() {
             notebook.append_cell(window, cx);
@@ -299,6 +311,28 @@ impl Notebook {
             .focus_handle(cx)
             .focus(window, cx);
         notebook
+    }
+
+    pub fn view_position(&self) -> (usize, f32, usize) {
+        let top = self.scroll.logical_scroll_top();
+        (top.item_ix, top.offset_in_item.into(), self.selected)
+    }
+
+    pub fn restore_position(
+        &mut self,
+        item: usize,
+        offset: f32,
+        selected: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected = selected.min(self.cells.len().saturating_sub(1));
+        self.reveal_cell = None;
+        self.sync_list(cx);
+        self.scroll.scroll_to(gpui::ListOffset {
+            item_ix: item.min(self.cells.len().saturating_sub(1)),
+            offset_in_item: gpui::px(offset.max(0.)),
+        });
+        cx.notify();
     }
 
     fn append_cell(&mut self, window: &mut Window, cx: &mut Context<Self>) {

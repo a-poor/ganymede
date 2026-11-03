@@ -23,7 +23,7 @@ struct Connections {
 }
 impl gpui::Global for Connections {}
 
-fn history_path() -> PathBuf {
+pub(crate) fn history_path() -> PathBuf {
     if let Some(path) = std::env::var_os("GANYMEDE_CONNECTIONS_FILE") {
         return path.into();
     }

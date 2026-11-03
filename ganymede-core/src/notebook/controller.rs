@@ -498,6 +498,29 @@ impl NotebookController {
         })
         .await
     }
+    /// Find and attach to a running notebook session at this document's path.
+    /// Used for workspace restoration: never creates a session or executes code.
+    pub async fn attach_existing_session(&self) -> Result<bool> {
+        let this = self.clone();
+        finish(async move {
+            let _op = this.inner.operations.lock().await;
+            if this.inner.data.lock().unwrap().live.is_some() {
+                return Ok(true);
+            }
+            let path = this.snapshot().path.clone();
+            let sessions = this.inner.rest.list_sessions().await?;
+            let Some(session) = sessions
+                .into_iter()
+                .find(|s| s.path == path && s.session_type == "notebook")
+            else {
+                return Ok(false);
+            };
+            this.attach_inner(session).await?;
+            Ok(true)
+        })
+        .await
+    }
+
     /// Recover only the previously associated session. Never creates a kernel,
     /// reloads the document, or replays execution requests.
     pub async fn reconnect_existing_session(&self) -> Result<bool> {

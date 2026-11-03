@@ -534,3 +534,69 @@ async fn server_reconnect_preserves_edits_and_never_creates_or_executes() {
     assert!(!controller.reconnect_existing_session().await.unwrap());
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn workspace_restore_only_attaches_matching_existing_sessions() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let session = json!({"id":"session","path":"test.ipynb","name":"test.ipynb","type":"notebook","kernel":{"id":"kernel","name":"python3"}});
+        for found in [false, true] {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let (header, _) = read_http(&mut socket).await;
+            assert!(header.starts_with("GET /api/sessions "));
+            let mut other = session.clone();
+            other["path"] = json!("other.ipynb");
+            reply_json(
+                &mut socket,
+                "200 OK",
+                if found {
+                    json!([other, session])
+                } else {
+                    json!([other])
+                },
+            )
+            .await;
+        }
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+        let Message::Text(text) = ws.next().await.unwrap().unwrap() else {
+            panic!()
+        };
+        let info: KernelMessage = serde_json::from_str(&text).unwrap();
+        assert_eq!(info.header.msg_type, "kernel_info_request");
+        let mut reply = KernelMessage::request("server", "shell", "kernel_info_reply", json!({}));
+        reply.parent_header = serde_json::to_value(info.header).unwrap();
+        ws.send(Message::Text(serde_json::to_string(&reply).unwrap().into()))
+            .await
+            .unwrap();
+        while let Some(message) = ws.next().await {
+            match message {
+                Ok(Message::Close(_)) | Err(_) => break,
+                Ok(Message::Text(_)) | Ok(Message::Binary(_)) => panic!("restore executed code"),
+                _ => (),
+            }
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+    });
+    let controller = NotebookController::new(
+        ServerConfig::new(&format!("http://{address}")).unwrap(),
+        "test.ipynb",
+        NotebookDocument::new(),
+    )
+    .unwrap();
+    assert!(!controller.attach_existing_session().await.unwrap());
+    assert!(controller.snapshot().session.is_none());
+    assert!(controller.attach_existing_session().await.unwrap());
+    assert_eq!(
+        controller.snapshot().session.as_ref().unwrap().id,
+        "session"
+    );
+    assert!(controller.attach_existing_session().await.unwrap());
+    controller.disconnect().await.unwrap();
+    server.await.unwrap();
+}

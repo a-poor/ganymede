@@ -34,6 +34,15 @@ pub struct TextFile {
     suspended: bool,
 }
 impl TextFile {
+    pub fn view_offset(&self, cx: &gpui::App) -> (f32, f32) {
+        self.editor.read(cx).view_offset()
+    }
+
+    pub fn restore_offset(&self, x: f32, y: f32, cx: &mut gpui::App) {
+        self.editor
+            .update(cx, |editor, _| editor.restore_offset(x, y));
+    }
+
     pub fn new(
         controller: TextFileController,
         toasts: Entity<ToastHost>,

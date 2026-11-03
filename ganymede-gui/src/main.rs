@@ -86,25 +86,29 @@ impl Ganymede {
         let workspace = cx.new(|cx| workspace::Workspace::new(runtime, toasts.clone(), window, cx));
         workspace.update(cx, |workspace, _| workspace.set_server_label(label));
         cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
+        let (sidebar_open, sidebar_tab) = workspace.read(cx).sidebar_state();
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         Self {
             focus,
             workspace,
             toasts,
-            sidebar_open: true,
+            sidebar_open,
             sidebar_motion: SidebarMotion {
-                from: 1.,
-                to: 1.,
+                from: if sidebar_open { 1. } else { 0. },
+                to: if sidebar_open { 1. } else { 0. },
                 started: Instant::now(),
             },
-            sidebar_tab: SidebarTab::Files,
+            sidebar_tab,
         }
     }
 
     fn set_sidebar_open(&mut self, open: bool, cx: &mut Context<Self>) {
         self.sidebar_open = open;
         self.sidebar_motion.set_open(open, Instant::now());
+        self.workspace.update(cx, |workspace, _| {
+            workspace.set_sidebar_state(open, self.sidebar_tab)
+        });
         cx.notify();
     }
 

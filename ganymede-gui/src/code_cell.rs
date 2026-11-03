@@ -277,6 +277,15 @@ pub struct CodeCell {
 }
 
 impl CodeCell {
+    pub fn view_offset(&self) -> (f32, f32) {
+        let offset = self.scroll.offset();
+        (offset.x.into(), offset.y.into())
+    }
+
+    pub fn restore_offset(&mut self, x: f32, y: f32) {
+        self.scroll.set_offset(point(px(x.min(0.)), px(y.min(0.))));
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         let cell_focus = cx.focus_handle();
