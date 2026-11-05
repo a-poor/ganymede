@@ -115,7 +115,7 @@ pub fn init(cx: &mut App) {
         recent.insert(
             0,
             Recent {
-                label: "Configured server".into(),
+                label: address.clone(),
                 address,
                 config: Some(config.clone()),
                 local_info: None,
@@ -1125,6 +1125,10 @@ impl Render for ConnectionWindow {
                         let remove = recent.clone();
                         let edit_key = recent.clone();
                         let remove_key = recent.key();
+                        let address_only = recent.ssh_host.is_none()
+                            && recent.local_info.is_none()
+                            && recent.local_id.is_none()
+                            && (recent.label == "Configured server" || recent.label == recent.address);
                         div()
                             .id(("recent", i))
                             .tab_index(0)
@@ -1149,9 +1153,9 @@ impl Render for ConnectionWindow {
                                         div()
                                             .text_size(t.font.sm)
                                             .truncate()
-                                            .child(if recent.ssh_host.is_some() { recent.address.clone() } else { recent.label.clone() }),
+                                            .child(if address_only || recent.ssh_host.is_some() { recent.address.clone() } else { recent.label.clone() }),
                                     )
-                                    .child(
+                                    .when(!address_only, |v| v.child(
                                         div()
                                             .text_size(t.font.xs)
                                             .text_color(surface.muted_fg)
@@ -1181,7 +1185,7 @@ impl Render for ConnectionWindow {
                                                         .unwrap_or_else(|| recent.address.clone()),
                                                 },
                                             ),
-                                    ),
+                                    )),
                             )
                             .when(!self.busy, |v| v.child(
                                 div().relative().child(
