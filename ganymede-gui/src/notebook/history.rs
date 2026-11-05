@@ -212,6 +212,7 @@ mod tests {
             let controller =
                 NotebookController::new(config.clone(), "test.ipynb", document).unwrap();
             let bridge = crate::execution::Runtime {
+                tunnel: None,
                 handle: runtime.handle().clone(),
                 config: Ok(config),
                 kernel: "python3".into(),

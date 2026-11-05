@@ -11,3 +11,5 @@ pub use config::ServerConfig;
 pub use error::{Error, Result};
 pub use kernel::{KernelClient, KernelEvent, KernelEvents};
 pub use rest::JupyterRestClient;
+
+mod socks;

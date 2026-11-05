@@ -524,6 +524,15 @@ pub(crate) enum LocalState {
     Busy,
 }
 impl ManagedServer {
+    pub(super) fn launch_options(&self) -> (Environment, String, String) {
+        let server = self.0.lock().unwrap();
+        (
+            server.launch.mode,
+            server.launch.python.clone(),
+            server.launch.folder.clone(),
+        )
+    }
+
     pub fn connection(&self) -> (ServerConfig, PathBuf) {
         let server = self.0.lock().unwrap();
         (server.config.clone(), server.info.clone())

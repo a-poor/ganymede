@@ -1556,13 +1556,51 @@ impl Workspace {
                 },
             )
             .when_some(this.file_error.as_ref(), |view, error| {
-                view.child(div().text_size(t.font.xs).text_color(t.destructive).child(
-                    if this.server_unavailable() {
-                        "Server unavailable. Showing cached files.".to_owned()
-                    } else {
-                        error.clone()
-                    },
-                ))
+                view.child(
+                    div()
+                        .mx(-px(8.))
+                        .p_2()
+                        .flex()
+                        .items_start()
+                        .gap_2()
+                        .bg(t.dialog_destructive_bg)
+                        .text_color(t.dialog_destructive_fg)
+                        .child(
+                            div()
+                                .h(t.font.line_height_normal)
+                                .flex()
+                                .items_center()
+                                .child(
+                                    Icon::WarningCircle
+                                        .svg()
+                                        .size(px(14.))
+                                        .text_color(t.dialog_destructive_fg),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .text_size(t.font.xs)
+                                .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(
+                                    if this.server_unavailable() {
+                                        "Server unavailable"
+                                    } else {
+                                        "Unable to load files"
+                                    },
+                                ))
+                                .child(div().text_size(t.font.xs).opacity(0.8).child(
+                                    if this.server_unavailable() {
+                                        "Showing cached files.".to_owned()
+                                    } else {
+                                        error.clone()
+                                    },
+                                )),
+                        ),
+                )
             })
             .child(
                 div()

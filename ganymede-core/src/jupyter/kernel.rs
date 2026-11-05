@@ -81,10 +81,25 @@ impl KernelClient {
         let ws_config = WebSocketConfig::default()
             .max_message_size(Some(config.max_message_bytes))
             .max_frame_size(Some(config.max_message_bytes));
-        let (socket, _) = tokio::time::timeout(
-            config.connect_timeout,
-            connect_async_with_config(request, Some(ws_config), false),
-        )
+        let (socket, _) = tokio::time::timeout(config.connect_timeout, async {
+            if let Some(proxy) = config.socks_proxy() {
+                let stream =
+                    super::socks::connect(proxy, &config.websocket_url(kernel_id, &session_id)?)
+                        .await
+                        .map_err(tokio_tungstenite::tungstenite::Error::Io)?;
+                Ok::<_, Error>(
+                    tokio_tungstenite::client_async_tls_with_config(
+                        request,
+                        stream,
+                        Some(ws_config),
+                        None,
+                    )
+                    .await?,
+                )
+            } else {
+                Ok(connect_async_with_config(request, Some(ws_config), false).await?)
+            }
+        })
         .await
         .map_err(|_| Error::Timeout)??;
         let (commands, mut command_rx) = mpsc::channel::<Command>(32);

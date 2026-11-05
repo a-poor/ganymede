@@ -12,10 +12,16 @@ use super::{Error, Result};
 pub struct ServerConfig {
     base_url: Url,
     authorization: Option<HeaderValue>,
+    transport: Option<std::sync::Arc<SshTransport>>,
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
     pub event_capacity: usize,
     pub max_message_bytes: usize,
+}
+
+struct SshTransport {
+    proxy: std::net::SocketAddr,
+    identity: String,
 }
 
 impl fmt::Debug for ServerConfig {
@@ -50,6 +56,7 @@ impl ServerConfig {
         Ok(Self {
             base_url: url,
             authorization: None,
+            transport: None,
             connect_timeout: Duration::from_secs(10),
             request_timeout: Duration::from_secs(30),
             event_capacity: 256,
@@ -60,6 +67,34 @@ impl ServerConfig {
     /// Sanitized server root; authentication is held separately.
     pub fn base_url(&self) -> &Url {
         &self.base_url
+    }
+
+    /// Route all REST and WebSocket traffic through a local SSH SOCKS5 forward.
+    /// Keep the original hostname for HTTP Host and TLS certificate validation.
+    pub fn with_socks_proxy(
+        mut self,
+        proxy: std::net::SocketAddr,
+        identity: String,
+    ) -> Result<Self> {
+        if !proxy.ip().is_loopback() || proxy.port() == 0 {
+            return Err(Error::Config(
+                "SSH proxy must be a loopback endpoint".into(),
+            ));
+        }
+        self.transport = Some(std::sync::Arc::new(SshTransport { proxy, identity }));
+        Ok(self)
+    }
+
+    pub(crate) fn socks_proxy(&self) -> Option<std::net::SocketAddr> {
+        self.transport.as_ref().map(|t| t.proxy)
+    }
+
+    /// Stable workspace identity, independent of ephemeral local forwarding ports.
+    pub fn connection_key(&self) -> &str {
+        self.transport
+            .as_ref()
+            .map(|t| t.identity.as_str())
+            .unwrap_or(self.base_url.as_str())
     }
 
     pub fn with_token(mut self, token: &str) -> Result<Self> {

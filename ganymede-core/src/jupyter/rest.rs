@@ -12,13 +12,18 @@ pub struct JupyterRestClient {
 
 impl JupyterRestClient {
     pub fn new(config: ServerConfig) -> Result<Self> {
-        let http = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .default_headers(config.headers())
             .connect_timeout(config.connect_timeout)
             .timeout(config.request_timeout)
             // A login redirect should surface as an error, not an HTML success.
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
+            .redirect(reqwest::redirect::Policy::none());
+        if let Some(proxy) = config.socks_proxy() {
+            builder = builder
+                .no_proxy()
+                .proxy(reqwest::Proxy::all(format!("socks5h://{proxy}"))?);
+        }
+        let http = builder.build()?;
         Ok(Self { config, http })
     }
 

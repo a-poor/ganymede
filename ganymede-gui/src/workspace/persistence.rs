@@ -83,7 +83,7 @@ impl Workspace {
             .config
             .as_ref()
             .ok()
-            .and_then(|config| read(&state_path(config.base_url().as_str())))
+            .and_then(|config| read(&state_path(config.connection_key())))
             .unwrap_or_default()
     }
 
@@ -284,7 +284,7 @@ impl Workspace {
         if self.last_written.as_ref() == Some(&layout) {
             return;
         }
-        if write(&state_path(config.base_url().as_str()), &layout).is_ok() {
+        if write(&state_path(config.connection_key()), &layout).is_ok() {
             self.last_written = Some(layout);
         }
     }

@@ -190,6 +190,24 @@ resolve from the project folder. You can also connect to
 an existing HTTP(S) server with its URL and optional token. Deployment prefixes
 and pasted `/lab?token=…` URLs are supported.
 
+For an existing server reached over SSH, enter an **SSH host** (an SSH config alias
+or `user@host`) and the Jupyter URL as seen from that host, for example
+`http://127.0.0.1:8888/`. Ganymede uses OpenSSH with your existing config, keys,
+and agent. Custom SSH ports and jump hosts belong in `~/.ssh/config`. Password
+prompts are not supported; unlock encrypted keys with `ssh-add`, and verify new
+host keys in Terminal first. Unknown or changed host keys are rejected.
+
+The app owns a loopback-only SOCKS tunnel for each connected workspace. REST and
+kernel WebSocket traffic use remote DNS through that tunnel; HTTPS retains its
+original hostname and certificate checks. There is no direct fallback. Recent
+connections, Keychain entries, and workspace layouts are scoped to both the SSH
+host and server URL. The server card shows the SSH host; **Reconnect** reopens a
+lost tunnel without replaying cells. Closing the workspace or quitting closes the
+tunnel and leaves the remote server and kernels running. Click the server address
+in the server card to copy it. Opening a browser is unavailable for SSH connections,
+since external browsers do not share the app's proxy. This connects to existing
+servers only.
+
 Click the notebook's kernel status to choose an installed kernel. Switching asks
 for confirmation before replacing the kernel and clearing its variables. The
 Kernels sidebar lists running kernels and associated notebook paths, refreshes

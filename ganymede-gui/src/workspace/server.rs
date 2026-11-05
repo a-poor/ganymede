@@ -52,6 +52,9 @@ impl Server {
 }
 impl Workspace {
     fn local_server(&self, cx: &App) -> Option<crate::connection::server::ManagedServer> {
+        if self.runtime.tunnel.is_some() {
+            return None;
+        }
         self.runtime
             .config
             .as_ref()
@@ -148,7 +151,11 @@ impl Workspace {
         }
         let config = self.runtime.config.clone();
         let local = self.local_server(cx);
+        let tunnel = self.runtime.tunnel.clone();
         let task = self.runtime.handle.spawn(async move {
+            if let Some(tunnel) = tunnel {
+                tunnel.check(reconnect).await?;
+            }
             if let Some(local) = local {
                 local.reconcile().await;
             }
@@ -196,9 +203,9 @@ impl Workspace {
                             this.refresh_files(cx);
                             this.refresh_kernels(false, cx);
                         }
-                        Err(_) => this.toasts.update(cx, |host, cx| {
+                        Err(error) => this.toasts.update(cx, |host, cx| {
                             host.push(crate::toast::Toast::new("Could not reconnect")
-                                .description("Check that the server is running and reachable. If its address or token changed, open a new connection window.")
+                                .description(if this.runtime.tunnel.is_some() { error } else { "Check that the server is running and reachable. If its address or token changed, open a new connection window.".into() })
                                 .kind(crate::toast::ToastKind::Error), cx);
                         }),
                     }
@@ -216,7 +223,13 @@ impl Workspace {
             0 => self.check_server(true, cx),
             1 => {
                 if let Ok(config) = &self.runtime.config {
-                    cx.open_url(config.base_url().as_str());
+                    if self.runtime.tunnel.is_some() {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                            config.base_url().to_string(),
+                        ));
+                    } else {
+                        cx.open_url(config.base_url().as_str());
+                    }
                 }
             }
             2 => crate::connection::open(cx),
@@ -237,7 +250,11 @@ impl Workspace {
         };
         let mut actions = vec![
             ("Reconnect", Icon::Restart),
-            ("Open server in browser", Icon::Browsers),
+            if this.runtime.tunnel.is_some() {
+                ("Copy server address", Icon::Copy)
+            } else {
+                ("Open server in browser", Icon::Browsers)
+            },
             ("New connection window…", Icon::AppWindow),
         ];
         if let Some(state) = local.filter(|s| *s != LocalState::Unverified) {
@@ -248,6 +265,7 @@ impl Workspace {
             });
         }
         let action_count = actions.len();
+        let ssh = this.runtime.tunnel.is_some();
         let t = cx.theme();
         let surface = t.sidebar;
         let pending = matches!(local, Some(LocalState::Busy | LocalState::Unverified))
@@ -331,9 +349,19 @@ impl Workspace {
                                     this.server.selected = Some(match this.server.selected {
                                         None => 0,
                                         Some(i) if event.keystroke.key == "down" => {
-                                            (i + 1) % action_count
+                                            if ssh && i == 0 {
+                                                2
+                                            } else {
+                                                (i + 1) % action_count
+                                            }
                                         }
-                                        Some(i) => (i + action_count - 1) % action_count,
+                                        Some(i) => {
+                                            if ssh && i == 2 {
+                                                0
+                                            } else {
+                                                (i + action_count - 1) % action_count
+                                            }
+                                        }
                                     });
                                 }
                                 "enter" | "space" => {
@@ -408,128 +436,177 @@ impl Workspace {
                             .child(
                                 div()
                                     .px_2()
-                                    .pt_1()
-                                    .text_size(t.font.xs)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(this.server.label.clone()),
-                            )
-                            .child(
-                                div().px_2().py_1().flex().child(
-                                    div()
-                                        .px_2()
-                                        .py(px(1.))
-                                        .rounded_full()
-                                        .text_size(t.font.xs)
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .bg(badge_bg)
-                                        .text_color(badge_fg)
-                                        .child(status_label),
-                                ),
-                            )
-                            .child(
-                                div()
-                                    .px_2()
                                     .py_1()
                                     .flex()
-                                    .items_start()
-                                    .gap_1()
+                                    .flex_col()
+                                    .gap_2()
+                                    .text_size(t.font.xs)
                                     .child(
                                         div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .whitespace_normal()
-                                            .text_size(t.font.xs)
-                                            .text_color(t.popover.muted_fg)
-                                            .child(wrappable_address(&address)),
+                                            .flex()
+                                            .items_start()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .w(px(42.))
+                                                    .flex_shrink_0()
+                                                    .text_color(t.popover.muted_fg)
+                                                    .child("Server"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("copy-server-address")
+                                                    .tab_index(0)
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .whitespace_normal()
+                                                    .cursor_pointer()
+                                                    .rounded(t.radius.sm())
+                                                    .hover(|s| {
+                                                        s.bg(t.popover.accent)
+                                                            .text_color(t.popover.accent_fg)
+                                                    })
+                                                    .font_family(t.font.mono.clone())
+                                                    .child(wrappable_address(&address))
+                                                    .on_click(move |_, _, cx| {
+                                                        cx.stop_propagation();
+                                                        cx.write_to_clipboard(
+                                                            gpui::ClipboardItem::new_string(
+                                                                copy_address.clone(),
+                                                            ),
+                                                        );
+                                                    })
+                                                    .on_key_down(
+                                                        move |event: &gpui::KeyDownEvent, _, cx| {
+                                                            if matches!(
+                                                                event.keystroke.key.as_str(),
+                                                                "enter" | "space"
+                                                            ) {
+                                                                cx.stop_propagation();
+                                                                cx.write_to_clipboard(
+                                                                    gpui::ClipboardItem::new_string(
+                                                                        keyboard_address.clone(),
+                                                                    ),
+                                                                );
+                                                            }
+                                                        },
+                                                    ),
+                                            ),
                                     )
                                     .child(
-                                        icon_button(
-                                            "copy-server-address",
-                                            "Copy server address",
-                                            Icon::Copy,
-                                            cx,
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .w(px(42.))
+                                                    .text_color(t.popover.muted_fg)
+                                                    .child("Status"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .px_2()
+                                                    .py(px(1.))
+                                                    .rounded_full()
+                                                    .bg(badge_bg)
+                                                    .text_color(badge_fg)
+                                                    .child(status_label),
+                                            ),
+                                    )
+                                    .when_some(this.runtime.tunnel.as_ref(), |v, tunnel| {
+                                        v.child(
+                                            div()
+                                                .flex()
+                                                .items_start()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .w(px(42.))
+                                                        .flex_shrink_0()
+                                                        .text_color(t.popover.muted_fg)
+                                                        .child("SSH"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .whitespace_normal()
+                                                        .font_family(t.font.mono.clone())
+                                                        .child(tunnel.host()),
+                                                ),
                                         )
-                                        .on_click(move |_, _, cx| {
-                                            cx.stop_propagation();
-                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                                copy_address.clone(),
-                                            ));
-                                        })
-                                        .on_key_down(
-                                            move |event: &gpui::KeyDownEvent, _, cx| {
-                                                if matches!(
-                                                    event.keystroke.key.as_str(),
-                                                    "enter" | "space"
-                                                ) {
-                                                    cx.stop_propagation();
-                                                    cx.write_to_clipboard(
-                                                        gpui::ClipboardItem::new_string(
-                                                            keyboard_address.clone(),
-                                                        ),
-                                                    );
-                                                }
-                                            },
-                                        ),
-                                    ),
+                                    }),
                             )
-                            .children(actions.into_iter().enumerate().map(
-                                |(index, (label, icon))| {
-                                    let click = entity.downgrade();
-                                    let hover = click.clone();
-                                    let selected = this.server.selected == Some(index);
-                                    let fg = if selected {
-                                        t.popover.accent_fg
-                                    } else {
-                                        t.popover.fg
-                                    };
-                                    div()
-                                        .id(("server-action", index))
-                                        .h(px(28.))
-                                        .px_2()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .rounded(t.radius.sm())
-                                        .text_size(t.font.xs)
-                                        .text_color(fg)
-                                        .cursor_pointer()
-                                        .when(selected, |v| v.bg(t.popover.accent))
-                                        .when(
-                                            (index == 0
-                                                && (this.server.checking
-                                                    || local.is_some_and(|s| {
-                                                        matches!(
-                                                            s,
-                                                            LocalState::Stopped | LocalState::Busy
-                                                        )
-                                                    })))
-                                                || (index == 3 && local == Some(LocalState::Busy)),
-                                            |v| v.opacity(0.4),
-                                        )
-                                        .child(icon.svg().size(px(14.)).text_color(fg))
-                                        .child(label)
-                                        .on_hover(move |over, _, cx| {
-                                            hover
-                                                .update(cx, |this, cx| {
-                                                    if *over {
-                                                        this.server.selected = Some(index);
-                                                    } else if this.server.selected == Some(index) {
-                                                        this.server.selected = None;
-                                                    }
-                                                    cx.notify();
-                                                })
-                                                .ok();
-                                        })
-                                        .on_click(move |_, window, cx| {
-                                            cx.stop_propagation();
-                                            click
-                                                .update(cx, |this, cx| {
-                                                    this.server_action(index, window, cx)
-                                                })
-                                                .ok();
-                                        })
-                                },
-                            )),
+                            .child(div().mx_1().my_1().h(px(1.)).bg(t.popover.border))
+                            .children(
+                                actions
+                                    .into_iter()
+                                    .enumerate()
+                                    .filter(|(index, _)| {
+                                        *index != 1 || this.runtime.tunnel.is_none()
+                                    })
+                                    .map(|(index, (label, icon))| {
+                                        let click = entity.downgrade();
+                                        let hover = click.clone();
+                                        let selected = this.server.selected == Some(index);
+                                        let fg = if selected {
+                                            t.popover.accent_fg
+                                        } else {
+                                            t.popover.fg
+                                        };
+                                        div()
+                                            .id(("server-action", index))
+                                            .h(px(26.))
+                                            .px_2()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .rounded(t.radius.sm())
+                                            .text_size(t.font.xs)
+                                            .text_color(fg)
+                                            .cursor_pointer()
+                                            .when(selected, |v| v.bg(t.popover.accent))
+                                            .when(
+                                                (index == 0
+                                                    && (this.server.checking
+                                                        || local.is_some_and(|s| {
+                                                            matches!(
+                                                                s,
+                                                                LocalState::Stopped
+                                                                    | LocalState::Busy
+                                                            )
+                                                        })))
+                                                    || (index == 3
+                                                        && local == Some(LocalState::Busy)),
+                                                |v| v.opacity(0.4),
+                                            )
+                                            .child(icon.svg().size(px(12.)).text_color(fg))
+                                            .child(label)
+                                            .on_hover(move |over, _, cx| {
+                                                hover
+                                                    .update(cx, |this, cx| {
+                                                        if *over {
+                                                            this.server.selected = Some(index);
+                                                        } else if this.server.selected
+                                                            == Some(index)
+                                                        {
+                                                            this.server.selected = None;
+                                                        }
+                                                        cx.notify();
+                                                    })
+                                                    .ok();
+                                            })
+                                            .on_click(move |_, window, cx| {
+                                                cx.stop_propagation();
+                                                click
+                                                    .update(cx, |this, cx| {
+                                                        this.server_action(index, window, cx)
+                                                    })
+                                                    .ok();
+                                            })
+                                    }),
+                            ),
                     ),
             ));
         }

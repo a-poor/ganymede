@@ -625,6 +625,7 @@ mod tests {
             let session = crate::execution::Session::from_controller(
                 controller,
                 &crate::execution::Runtime {
+                    tunnel: None,
                     handle: runtime.handle().clone(),
                     config: Ok(config),
                     kernel: "python3".into(),

@@ -491,10 +491,20 @@ impl ThemeSpec {
             chart: self.chart,
             toast_shadow: BoxShadow::new(px(0.), px(4.), alpha(gpui::black(), 0.10))
                 .blur_radius(px(14.)),
-            launcher_sidebar: if self.is_dark { card } else { app },
+            launcher_sidebar: if self.is_dark {
+                card
+            } else {
+                Surface {
+                    bg: self.secondary,
+                    ..sidebar
+                }
+            },
             launcher_recent_hover_bg: {
-                let surface = if self.is_dark { card } else { app };
-                surface.bg.blend(alpha(surface.fg, 0.035))
+                if self.is_dark {
+                    card.bg.blend(alpha(card.fg, 0.035))
+                } else {
+                    app.bg
+                }
             },
             launcher_border: app.bg.blend(alpha(app.border, 0.55)),
             launcher_shadow: BoxShadow::new(

@@ -20,6 +20,7 @@ pub struct Runtime {
     pub handle: Handle,
     pub config: Result<ServerConfig, String>,
     pub kernel: String,
+    pub(crate) tunnel: Option<crate::connection::ssh::Tunnel>,
 }
 impl gpui::Global for Runtime {}
 impl Runtime {
@@ -48,6 +49,7 @@ impl Runtime {
         Self {
             handle,
             config,
+            tunnel: None,
             kernel: get("GANYMEDE_JUPYTER_KERNEL").unwrap_or_else(|| "python3".into()),
         }
     }

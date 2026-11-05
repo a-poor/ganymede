@@ -105,7 +105,7 @@ fn remove(path: &Path) -> std::io::Result<()> {
     }
 }
 enum Command {
-    Save(PathBuf, Controller),
+    Save(PathBuf, Box<Controller>),
     Remove(PathBuf),
     Flush(mpsc::Sender<()>),
 }
@@ -132,7 +132,7 @@ impl Recovery {
             .config
             .as_ref()
             .ok()
-            .map(|c| persistence::state_path(c.base_url().as_str()).with_file_name("recovery"));
+            .map(|c| persistence::state_path(c.connection_key()).with_file_name("recovery"));
         let mut entries = Vec::new();
         let mut claimed = HashSet::new();
         if let Some(directory) = &directory {
@@ -370,7 +370,7 @@ impl Workspace {
             let status = controller.status();
             if tracked.status.as_ref() != Some(&status) {
                 let command = if status.2 {
-                    Command::Save(tracked.file.clone(), controller)
+                    Command::Save(tracked.file.clone(), Box::new(controller))
                 } else {
                     Command::Remove(tracked.file.clone())
                 };
@@ -410,6 +410,7 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("ganymede-recovery-{}", uuid::Uuid::new_v4()));
         let runtime = Runtime {
+            tunnel: None,
             handle: tokio::runtime::Handle::current(),
             config: Err("test".into()),
             kernel: "python3".into(),
@@ -436,21 +437,24 @@ mod tests {
             .sender
             .send(Command::Save(
                 a.clone(),
-                Controller::Text(controller.clone()),
+                Box::new(Controller::Text(controller.clone())),
             ))
             .unwrap();
         recovery
             .sender
             .send(Command::Save(
                 b.clone(),
-                Controller::Text(controller.clone()),
+                Box::new(Controller::Text(controller.clone())),
             ))
             .unwrap();
         recovery.flush();
         controller.update_text("newest edit".into());
         recovery
             .sender
-            .send(Command::Save(a.clone(), Controller::Text(controller)))
+            .send(Command::Save(
+                a.clone(),
+                Box::new(Controller::Text(controller)),
+            ))
             .unwrap();
         recovery.discard(1);
         recovery.flush();

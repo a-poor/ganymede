@@ -1,6 +1,7 @@
 //! One connection picker / workspace per native window.
 mod credentials;
 pub(crate) mod server;
+pub(crate) mod ssh;
 use crate::{
     code_cell::stdin_prompt::{FieldSubmit, StdinPrompt as Field},
     execution::Runtime,
@@ -18,6 +19,12 @@ struct Recent {
     local_info: Option<PathBuf>,
     local_id: Option<String>,
     saved_token: bool,
+    ssh_host: Option<String>,
+}
+impl Recent {
+    fn key(&self) -> String {
+        ssh::identity(&self.address, self.ssh_host.as_deref())
+    }
 }
 #[derive(Default)]
 struct Connections {
@@ -53,6 +60,10 @@ fn load_recent() -> Vec<Recent> {
                 label: item.get("label")?.as_str()?.into(),
                 address,
                 config: None,
+                ssh_host: match item.get("ssh_host").and_then(|v| v.as_str()) {
+                    Some(value) => ssh::host(value).ok()?,
+                    None => None,
+                },
                 saved_token: item
                     .get("saved_token")
                     .and_then(|v| v.as_bool())
@@ -74,16 +85,14 @@ fn history_data(recent: &[Recent]) -> serde_json::Value {
     serde_json::Value::Array(
         recent
             .iter()
-            .map(|r| serde_json::json!({"label":r.label,"url":r.address,"local_info":r.local_info,"local_id":r.local_id,"saved_token":r.saved_token}))
+            .map(|r| serde_json::json!({"label":r.label,"url":r.address,"local_info":r.local_info,"local_id":r.local_id,"saved_token":r.saved_token,"ssh_host":r.ssh_host}))
             .collect(),
     )
 }
 
 fn remember(recent: Recent, cx: &mut App) {
     let connections = cx.global_mut::<Connections>();
-    connections
-        .recent
-        .retain(|item| item.address != recent.address);
+    connections.recent.retain(|item| item.key() != recent.key());
     connections.recent.insert(0, recent);
     connections.recent.truncate(10);
     // Never persist tokens. Local Jupyter servers maintain their own protected runtime file.
@@ -102,7 +111,7 @@ pub fn init(cx: &mut App) {
     let mut recent = load_recent();
     if let Ok(config) = &cx.global::<Runtime>().config {
         let address = config.base_url().to_string();
-        recent.retain(|r| r.address != address);
+        recent.retain(|r| r.address != address || r.ssh_host.is_some());
         recent.insert(
             0,
             Recent {
@@ -112,6 +121,7 @@ pub fn init(cx: &mut App) {
                 local_info: None,
                 local_id: None,
                 saved_token: false,
+                ssh_host: None,
             },
         );
     }
@@ -260,7 +270,11 @@ struct ConnectionWindow {
     page: Page,
     address: Entity<Field>,
     token: Entity<Field>,
+    ssh_host: Entity<Field>,
     remember_token: bool,
+    reading_token: bool,
+    advanced: bool,
+    recent_menu: Option<usize>,
     save_token: Option<(String, String)>,
     python: Entity<Field>,
     environment: server::Environment,
@@ -282,6 +296,7 @@ impl ConnectionWindow {
         .detach();
         let address =
             cx.new(|cx| Field::field("http://127.0.0.1:8888/".into(), false, "Server URL", cx));
+        let ssh_host = cx.new(|cx| Field::field(String::new(), false, "SSH host (optional)", cx));
         let token = cx.new(|cx| Field::field(String::new(), true, "Token", cx));
         let python = cx.new(|cx| Field::field("python3".into(), false, "Python executable", cx));
         let folder = cx.new(|cx| {
@@ -295,7 +310,7 @@ impl ConnectionWindow {
                 cx,
             )
         });
-        for input in [&address, &token, &python, &folder] {
+        for input in [&address, &token, &ssh_host, &python, &folder] {
             cx.subscribe_in(input, window, |this, _, _: &FieldSubmit, window, cx| {
                 this.submit(window, cx)
             })
@@ -313,7 +328,11 @@ impl ConnectionWindow {
             page: Page::Recent,
             address,
             token,
-            remember_token: false,
+            ssh_host,
+            remember_token: true,
+            reading_token: false,
+            advanced: false,
+            recent_menu: None,
             save_token: None,
             python,
             environment: server::Environment::Global,
@@ -367,18 +386,39 @@ impl ConnectionWindow {
         if self.busy {
             return;
         }
+        let ssh_host = match ssh::host(self.ssh_host.read(cx).value()) {
+            Ok(host) => host,
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
         self.busy = true;
         self.error = None;
         let handle = cx.global::<Runtime>().handle.clone();
-        let managed = managed_server(&address, cx);
+        let managed = if ssh_host.is_none() {
+            managed_server(&address, cx)
+        } else {
+            None
+        };
         let task = handle.spawn(async move {
             if let Some(managed) = managed
                 && managed.reconcile().await == server::LocalState::Stopped
             {
                 managed.change(true).await?;
             }
-            let kernel = server::validate(config.clone()).await?;
-            Ok::<_, String>((address, config, label, kernel, info, None))
+            let mut config = config;
+            let tunnel = if let Some(host) = ssh_host {
+                let identity = ssh::identity(&address, Some(&host));
+                let tunnel = ssh::Tunnel::open(host).await?;
+                config = config.with_socks_proxy(tunnel.endpoint(), identity).map_err(|_| "Could not configure SSH forwarding.".to_owned())?;
+                Some(tunnel)
+            } else { None };
+            let kernel = server::validate(config.clone()).await.map_err(|error| {
+                if tunnel.is_some() { "SSH connected, but Jupyter is unreachable or rejected the token. Use the server URL as seen from the SSH host.".into() } else { error }
+            })?;
+            Ok::<_, String>((address, config, label, kernel, info, None, tunnel))
         });
         self.finish(task, window, cx);
         cx.notify();
@@ -393,16 +433,28 @@ impl ConnectionWindow {
                 self.token.read(cx).value(),
             ) {
                 Ok((address, config)) => {
+                    let host = match ssh::host(self.ssh_host.read(cx).value()) {
+                        Ok(host) => host,
+                        Err(error) => {
+                            self.error = Some(error);
+                            cx.notify();
+                            return;
+                        }
+                    };
+                    let key = ssh::identity(&address, host.as_deref());
                     self.save_token = if self.remember_token {
                         credentials::token(
                             self.address.read(cx).value(),
                             self.token.read(cx).value(),
                         )
-                        .map(|token| (address.clone(), token))
+                        .map(|token| (key, token))
                     } else {
                         None
                     };
-                    self.connect(address.clone(), config, address, None, window, cx)
+                    let label = host
+                        .map(|host| format!("{address} · {host}"))
+                        .unwrap_or_else(|| address.clone());
+                    self.connect(address.clone(), config, label, None, window, cx)
                 }
                 Err(error) => {
                     self.error = Some(error);
@@ -436,6 +488,7 @@ impl ConnectionWindow {
                         kernel,
                         Some(pending.info.clone()),
                         Some(pending),
+                        None,
                     ))
                 });
                 self.finish(task, window, cx);
@@ -466,9 +519,12 @@ impl ConnectionWindow {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
                 match result {
-                    Ok((address, config, label, kernel, info, pending)) => {
+                    Ok((address, config, label, kernel, info, pending, tunnel)) => {
+                        let ssh_host = tunnel.as_ref().map(|t| t.host());
+                        let key = ssh::identity(&address, ssh_host.as_deref());
+                        if let Some(tunnel) = &tunnel { tunnel.register_quit(cx); }
                         let configured = cx.global::<Runtime>();
-                        let kernel = if configured
+                        let kernel = if ssh_host.is_none() && configured
                             .config
                             .as_ref()
                             .is_ok_and(|c| c.base_url().as_str() == address)
@@ -480,6 +536,7 @@ impl ConnectionWindow {
                         let runtime = Runtime {
                             handle: cx.global::<Runtime>().handle.clone(),
                             config: Ok(config.clone()),
+                            tunnel,
                             kernel,
                         };
                         // Native resize/minimize capabilities are fixed at window creation.
@@ -494,14 +551,13 @@ impl ConnectionWindow {
                                 label: label.clone(),
                                 address: address.clone(),
                                 config: Some(config),
-                                saved_token: saved || cx.global::<Connections>().recent.iter().any(|r| r.address == address && r.saved_token),
-                                local_info: managed_server(&address, cx)
-                                    .map(|s| s.connection().1)
-                                    .or(info),
+                                saved_token: saved || cx.global::<Connections>().recent.iter().any(|r| r.key() == key && r.saved_token),
+                                ssh_host: ssh_host.clone(),
+                                local_info: if ssh_host.is_none() { managed_server(&address, cx).map(|s| s.connection().1).or(info) } else { None },
                                 local_id: pending
                                     .as_ref()
                                     .and_then(|p| p.id())
-                                    .or_else(|| managed_server(&address, cx).and_then(|s| s.id())),
+                                    .or_else(|| if ssh_host.is_none() { managed_server(&address, cx).and_then(|s| s.id()) } else { None }),
                             },
                             cx,
                         );
@@ -527,10 +583,15 @@ impl ConnectionWindow {
             return;
         }
         self.save_token = None;
-        if recent.saved_token && managed_server(&recent.address, cx).is_none() {
+        self.ssh_host.update(cx, |input, cx| {
+            input.set_value(recent.ssh_host.clone().unwrap_or_default(), cx)
+        });
+        if recent.saved_token
+            && (recent.ssh_host.is_some() || managed_server(&recent.address, cx).is_none())
+        {
             self.edit_recent(&recent, window, cx);
             self.busy = true;
-            let read = cx.read_credentials(&credentials::key(&recent.address));
+            let read = cx.read_credentials(&credentials::key(&recent.key()));
             self.task = cx.spawn_in(window, async move |this, cx| {
                 let result = read.await;
                 let _ = this.update_in(cx, |this, window, cx| {
@@ -551,7 +612,9 @@ impl ConnectionWindow {
             cx.notify();
             return;
         }
-        if let Some(server) = managed_server(&recent.address, cx) {
+        if recent.ssh_host.is_none()
+            && let Some(server) = managed_server(&recent.address, cx)
+        {
             let (config, info) = server.connection();
             recent.config = Some(config);
             recent.local_info = Some(info);
@@ -577,13 +640,76 @@ impl ConnectionWindow {
         }
     }
     fn edit_recent(&mut self, recent: &Recent, window: &mut Window, cx: &mut Context<Self>) {
+        self.recent_menu = None;
+        if recent.ssh_host.is_none()
+            && let Some(server) = managed_server(&recent.address, cx)
+        {
+            let (mode, python, folder) = server.launch_options();
+            self.environment = mode;
+            self.python
+                .update(cx, |input, cx| input.set_value(python, cx));
+            self.folder
+                .update(cx, |input, cx| input.set_value(folder, cx));
+            self.page(Page::Local, window, cx);
+            return;
+        }
         self.address
             .update(cx, |input, cx| input.set_value(recent.address.clone(), cx));
         self.token
             .update(cx, |input, cx| input.set_value(String::new(), cx));
-        self.remember_token = recent.saved_token;
+        self.ssh_host.update(cx, |input, cx| {
+            input.set_value(recent.ssh_host.clone().unwrap_or_default(), cx)
+        });
+        self.advanced = recent.ssh_host.is_some();
+        self.remember_token = true;
         self.page(Page::Existing, window, cx);
         self.token.read(cx).focus_handle(cx).focus(window, cx);
+    }
+    fn remove_recent(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.recent_menu = None;
+        let mut recent = cx.global::<Connections>().recent.clone();
+        recent.retain(|r| r.key() != key);
+        let result = serde_json::to_vec_pretty(&history_data(&recent))
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| std::fs::write(history_path(), bytes).map_err(|e| e.to_string()));
+        if result.is_ok() {
+            cx.global_mut::<Connections>().recent = recent;
+        } else {
+            self.error = Some("Could not remove the recent connection. Try again.".into());
+        }
+        cx.refresh_windows();
+    }
+    fn edit_saved(&mut self, recent: &Recent, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit_recent(recent, window, cx);
+        if self.page != Page::Existing || !recent.saved_token {
+            return;
+        }
+        self.busy = true;
+        self.reading_token = true;
+        let read = cx.read_credentials(&credentials::key(&recent.key()));
+        self.task = cx.spawn_in(window, async move |this, cx| {
+            let result = read.await;
+            let _ =
+                this.update_in(cx, |this, window, cx| {
+                    this.busy = false;
+                    this.reading_token = false;
+                    match result
+                        .ok()
+                        .flatten()
+                        .and_then(|(_, bytes)| String::from_utf8(bytes).ok())
+                    {
+                        Some(token) => this
+                            .token
+                            .update(cx, |input, cx| input.set_value(token, cx)),
+                        None => this.error = Some(
+                            "Could not read the saved token. Enter it again or unlock Keychain."
+                                .into(),
+                        ),
+                    }
+                    this.token.read(cx).focus_handle(cx).focus(window, cx);
+                    cx.notify();
+                });
+        });
     }
     fn forget_token(&mut self, address: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy {
@@ -600,7 +726,7 @@ impl ConnectionWindow {
                         .global::<Connections>()
                         .recent
                         .iter()
-                        .find(|r| r.address == address)
+                        .find(|r| r.key() == address)
                         .cloned();
                     if let Some(mut recent) = recent {
                         recent.saved_token = false;
@@ -694,6 +820,7 @@ type Connected = (
     String,
     Option<PathBuf>,
     Option<server::PendingServer>,
+    Option<ssh::Tunnel>,
 );
 
 fn field(label: &'static str, input: Entity<Field>, cx: &App) -> gpui::Div {
@@ -722,16 +849,8 @@ fn button(
         .border_color(t.app.border)
         .shadow(vec![t.body_shadow.clone()])
         .cursor_pointer()
-        .bg(if primary {
-            t.app.primary
-        } else {
-            t.launcher_sidebar.bg
-        })
-        .text_color(if primary {
-            t.app.primary_fg
-        } else {
-            t.launcher_sidebar.fg
-        })
+        .bg(if primary { t.app.primary } else { t.app.bg })
+        .text_color(if primary { t.app.primary_fg } else { t.app.fg })
         .hover(move |s| {
             if id == "connection-back" {
                 s.bg(if t.is_dark { t.app.bg } else { t.card.bg })
@@ -978,7 +1097,8 @@ impl Render for ConnectionWindow {
                     .pt_2()
                     .pb_2()
                     .text_size(t.font.xs)
-                    .text_color(surface.muted_fg)
+                    .text_color(surface.fg)
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child("Recent connections"),
             )
             .child(
@@ -994,13 +1114,17 @@ impl Render for ConnectionWindow {
                                 .px_2()
                                 .py_2()
                                 .text_color(surface.muted_fg)
-                                .child("Your connections will appear here."),
+                                .text_size(t.font.xs)
+                                .opacity(0.85)
+                                .child("Nothing yet"),
                         )
                     })
                     .children(recent.into_iter().enumerate().map(|(i, recent)| {
                         let click = recent.clone();
                         let settings = recent.clone();
-                        let settings_key = recent.clone();
+                        let remove = recent.clone();
+                        let edit_key = recent.clone();
+                        let remove_key = recent.key();
                         div()
                             .id(("recent", i))
                             .tab_index(0)
@@ -1016,23 +1140,6 @@ impl Render for ConnectionWindow {
                             .border_color(surface.bg)
                             .child(
                                 div()
-                                    .flex_shrink_0()
-                                    .size(px(24.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(t.radius.md())
-                                    .bg(t.secondary)
-                                    .text_color(t.secondary_fg)
-                                    .child(
-                                        crate::icon::Icon::Server
-                                            .svg()
-                                            .size(px(16.))
-                                            .text_color(t.secondary_fg),
-                                    ),
-                            )
-                            .child(
-                                div()
                                     .flex_1()
                                     .min_w_0()
                                     .flex()
@@ -1042,7 +1149,7 @@ impl Render for ConnectionWindow {
                                         div()
                                             .text_size(t.font.sm)
                                             .truncate()
-                                            .child(recent.label.clone()),
+                                            .child(if recent.ssh_host.is_some() { recent.address.clone() } else { recent.label.clone() }),
                                     )
                                     .child(
                                         div()
@@ -1050,9 +1157,12 @@ impl Render for ConnectionWindow {
                                             .text_color(surface.muted_fg)
                                             .truncate()
                                             .child(
-                                                match managed_server(&recent.address, cx)
-                                                    .map(|s| s.state())
-                                                {
+                                                match if recent.ssh_host.is_none() {
+                                                    managed_server(&recent.address, cx)
+                                                        .map(|s| s.state())
+                                                } else {
+                                                    None
+                                                } {
                                                     Some(server::LocalState::Stopped) => {
                                                         "Stopped · Click to start".to_owned()
                                                     }
@@ -1062,45 +1172,54 @@ impl Render for ConnectionWindow {
                                                     Some(server::LocalState::Unverified) => {
                                                         "Local server · Not verified".to_owned()
                                                     }
-                                                    _ => recent.address.clone(),
+                                                    _ => recent
+                                                        .ssh_host
+                                                        .as_ref()
+                                                        .map(|host| {
+                                                            format!("SSH · {host}")
+                                                        })
+                                                        .unwrap_or_else(|| recent.address.clone()),
                                                 },
                                             ),
                                     ),
                             )
-                            .when(recent.saved_token && !self.busy, |v| {
-                                v.child(
-                                    div()
-                                        .id(("recent-settings", i))
-                                        .tab_index(0)
-                                        .p_1()
-                                        .rounded(t.radius.md())
-                                        .cursor_pointer()
-                                        .hover(|s| {
-                                            s.bg(surface.accent).text_color(surface.accent_fg)
-                                        })
-                                        .child(
-                                            crate::icon::Icon::Gear
-                                                .svg()
-                                                .size(px(14.))
-                                                .text_color(surface.muted_fg),
-                                        )
-                                        .on_click(cx.listener(move |this, _, window, cx| {
+                            .when(!self.busy, |v| v.child(
+                                div().relative().child(
+                                    div().id(("recent-settings", i)).tab_index(0).p_1()
+                                        .rounded(t.radius.md()).cursor_pointer()
+                                        .hover(|s| s.bg(surface.accent).text_color(surface.accent_fg))
+                                        .child(crate::icon::Icon::DotsThree.svg().size(px(16.)).text_color(surface.muted_fg))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
                                             cx.stop_propagation();
-                                            this.edit_recent(&settings, window, cx);
+                                            this.recent_menu = if this.recent_menu == Some(i) { None } else { Some(i) };
+                                            cx.notify();
                                         }))
-                                        .on_key_down(cx.listener(
-                                            move |this, event: &gpui::KeyDownEvent, window, cx| {
-                                                if matches!(
-                                                    event.keystroke.key.as_str(),
-                                                    "enter" | "space"
-                                                ) {
-                                                    cx.stop_propagation();
-                                                    this.edit_recent(&settings_key, window, cx);
-                                                }
-                                            },
-                                        )),
-                                )
-                            })
+                                        .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                                cx.stop_propagation(); this.recent_menu = Some(i); cx.notify();
+                                            }
+                                        }))
+                                ).when(self.recent_menu == Some(i), |v| v.child(gpui::deferred(
+                                    gpui::anchored().snap_to_window_with_margin(px(8.)).child(
+                                        div().id(("recent-menu", i)).occlude().w(px(160.)).p_1()
+                                            .rounded(t.radius.md()).bg(t.popover.bg).text_color(t.popover.fg)
+                                            .border_1().border_color(t.popover.border).shadow(vec![t.toast_shadow.clone()])
+                                            .on_mouse_down_out(cx.listener(|this, _, _, cx| { this.recent_menu = None; cx.notify(); }))
+                                            .child(div().id("edit-recent").tab_index(0).px_2().py_1().text_size(t.font.xs)
+                                                .rounded(t.radius.sm()).cursor_pointer().hover(|s| s.bg(t.popover.accent).text_color(t.popover.accent_fg))
+                                                .child("Edit connection…")
+                                                .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| { if matches!(event.keystroke.key.as_str(), "enter" | "space") { cx.stop_propagation(); this.edit_saved(&edit_key, window, cx); } }))
+                                                .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.edit_saved(&settings, window, cx); })))
+                                            .child(div().id("remove-recent").tab_index(0).px_2().py_1().text_size(t.font.xs)
+                                                .rounded(t.radius.sm()).cursor_pointer().hover(|s| s.bg(t.popover.accent).text_color(t.popover.accent_fg))
+                                                .child("Remove from recents")
+                                                .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| { if matches!(event.keystroke.key.as_str(), "enter" | "space") { cx.stop_propagation(); this.remove_recent(&remove_key, cx); } }))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    cx.stop_propagation(); this.remove_recent(&remove.key(), cx);
+                                                })))
+                                    )
+                                )))
+                            ))
                             .when(!self.busy, |v| {
                                 v.cursor_pointer()
                                     .hover(|s| {
@@ -1128,8 +1247,8 @@ impl Render for ConnectionWindow {
         let group = || {
             div()
                 .w_full()
-                .bg(t.secondary)
-                .text_color(t.secondary_fg)
+                .bg(if t.is_dark { t.card.bg } else { t.app.bg })
+                .text_color(if t.is_dark { t.card.fg } else { t.app.fg })
                 .border_1()
                 .border_color(t.launcher_border)
                 .rounded(t.radius.xl2())
@@ -1146,19 +1265,25 @@ impl Render for ConnectionWindow {
                         .child(if self.page == Page::Local {
                             "Starting Jupyter…"
                         } else {
-                            "Connecting…"
+                            if self.reading_token {
+                                "Loading saved token…"
+                            } else {
+                                "Connecting…"
+                            }
                         }),
                 )
                 .child(
                     button("cancel-connect", "Cancel", false, cx)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.task = gpui::Task::ready(());
+                            this.reading_token = false;
                             this.busy = false;
                             cx.notify();
                         }))
                         .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                             if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                                 this.task = gpui::Task::ready(());
+                                this.reading_token = false;
                                 this.busy = false;
                                 cx.notify();
                                 cx.stop_propagation();
@@ -1236,13 +1361,14 @@ impl Render for ConnectionWindow {
                             .p_3()
                             .flex()
                             .flex_col()
-                            .gap_3()
+                            .gap_2()
                             .child(field("Server URL", self.address.clone(), cx))
                             .child(field("Token (optional)", self.token.clone(), cx))
+                            .child(div().w_full().max_w(px(420.)).flex().items_center().justify_between()
                             .when(cfg!(target_os = "macos"), |v| v.child(self.remember_control(cx)))
-                            .when_some(server::parse_connection(self.address.read(cx).value(), "").ok().map(|(a, _)| a).filter(|address| cx.global::<Connections>().recent.iter().any(|r| r.address == *address && r.saved_token)), |v, address| {
+                            .when_some(server::parse_connection(self.address.read(cx).value(), "").ok().and_then(|(a, _)| ssh::host(self.ssh_host.read(cx).value()).ok().map(|host| ssh::identity(&a, host.as_deref()))).filter(|address| cx.global::<Connections>().recent.iter().any(|r| r.key() == *address && r.saved_token)), |v, address| {
                                 let key_address = address.clone();
-                                v.child(div().flex().child(button("forget-token", "Forget token", false, cx)
+                                v.child(div().flex().child(div().id("forget-token").tab_index(0).py_1().text_size(t.font.xs).text_color(t.app.muted_fg).cursor_pointer().hover(|s| s.underline().text_color(t.app.fg)).focus_visible(|s| s.underline().text_color(t.app.fg)).child("Forget token")
                                     .on_click(cx.listener(move |this, _, window, cx| this.forget_token(address.clone(), window, cx)))
                                     .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
                                         if matches!(event.keystroke.key.as_str(), "enter" | "space") {
@@ -1250,13 +1376,24 @@ impl Render for ConnectionWindow {
                                         }
                                     }))))
                             })
+                            )
                             .child(
                                 div()
                                     .text_size(t.font.xs)
                                     .text_color(t.card.muted_fg)
-                                    .child("Saved tokens stay in macOS Keychain until you choose Forget token."),
+                                    .child("Tokens are saved in macOS Keychain. You can forget them anytime."),
                             ),
                     )
+                    .child(div().flex().flex_col().gap_2()
+                        .child(div().id("advanced-connection").tab_index(0).flex().items_center().gap_1().cursor_pointer()
+                            .text_size(t.font.xs).text_color(t.app.muted_fg)
+                            .child(if self.advanced { crate::icon::Icon::CaretDown } else { crate::icon::Icon::CaretRight }.svg().size(px(12.)).text_color(t.app.muted_fg))
+                            .child(if self.ssh_host.read(cx).value().trim().is_empty() { "Advanced" } else { "Advanced · SSH enabled" })
+                            .on_click(cx.listener(|this, _, _, cx| { this.advanced = !this.advanced; cx.notify(); }))
+                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| { if matches!(event.keystroke.key.as_str(), "enter" | "space") { cx.stop_propagation(); this.advanced = !this.advanced; cx.notify(); } })))
+                        .when(self.advanced, |v| v.child(group().p_3().flex().flex_col().gap_2()
+                            .child(field("SSH host (optional)", self.ssh_host.clone(), cx))
+                            .child(div().text_size(t.font.xs).text_color(t.card.muted_fg).child("SSH alias or user@host. Server URL is relative to this host.")))))
                     .child(
                         div()
                             .flex()
@@ -1289,7 +1426,10 @@ impl Render for ConnectionWindow {
                     }
                     cx.stop_propagation();
                 } else if event.keystroke.key == "escape" && !this.busy {
-                    this.page(Page::Recent, window, cx);
+                    if this.recent_menu.take().is_none() {
+                        this.page(Page::Recent, window, cx);
+                    }
+                    cx.notify();
                     cx.stop_propagation();
                 }
             }))
@@ -1358,7 +1498,7 @@ pub(crate) fn update_local_history(address: &str, cx: &mut App) {
         .global::<Connections>()
         .recent
         .iter()
-        .find(|r| r.address == address)
+        .find(|r| r.key() == address)
         .cloned();
     if let Some(mut recent) = recent {
         recent.config = Some(config);
@@ -1382,6 +1522,7 @@ mod tests {
             local_info: None,
             local_id: None,
             saved_token: true,
+            ssh_host: None,
         }]);
         assert_eq!(data[0]["url"], "https://example.test/");
         assert!(!data.to_string().contains("private-token"));
@@ -1403,6 +1544,7 @@ mod tests {
             cx.set_global(crate::theme::AppearancePreference::default());
             cx.set_global(crate::autosave::AutosavePreference(false));
             cx.set_global(Runtime {
+                tunnel: None,
                 handle: runtime.handle().clone(),
                 config: Err("No test network".into()),
                 kernel: "python3".into(),
