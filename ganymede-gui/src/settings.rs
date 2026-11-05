@@ -8,21 +8,14 @@ use crate::{
     theme::{self, ActiveTheme, AppearancePreference, Theme},
 };
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Section {
-    Appearance,
-    Notebooks,
-}
-pub struct Settings {
-    section: Section,
-}
+pub struct Settings;
 
 pub fn open(cx: &mut App) -> anyhow::Result<WindowHandle<Settings>> {
-    let bounds = Bounds::centered(None, size(px(620.), px(400.)), cx);
+    let bounds = Bounds::centered(None, size(px(520.), px(240.)), cx);
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(560.), px(300.))),
+            window_min_size: Some(size(px(480.), px(220.))),
             titlebar: Some(TitlebarOptions {
                 title: Some("Settings".into()),
                 appears_transparent: true,
@@ -41,9 +34,9 @@ pub fn open(cx: &mut App) -> anyhow::Result<WindowHandle<Settings>> {
                 .detach();
                 cx.observe_global::<crate::autosave::AutosavePreference>(|_, cx| cx.notify())
                     .detach();
-                Settings {
-                    section: Section::Appearance,
-                }
+                cx.observe_global::<crate::preferences::Persistence>(|_, cx| cx.notify())
+                    .detach();
+                Settings
             })
         },
     )
@@ -81,13 +74,15 @@ impl Settings {
             .on_click(|_, _, cx| {
                 cx.update_global::<crate::autosave::AutosavePreference, _>(|setting, _| {
                     setting.0 = !setting.0
-                })
+                });
+                crate::preferences::save(cx);
             })
             .on_key_down(|event, _, cx| {
                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                     cx.update_global::<crate::autosave::AutosavePreference, _>(|setting, _| {
                         setting.0 = !setting.0
                     });
+                    crate::preferences::save(cx);
                     cx.stop_propagation();
                 }
             })
@@ -151,7 +146,10 @@ impl Settings {
                             .when(!selected, |s| {
                                 s.hover(|s| s.bg(t.sidebar.bg).text_color(t.sidebar.fg))
                             })
-                            .on_click(move |_, window, cx| choice.apply(window.appearance(), cx))
+                            .on_click(move |_, window, cx| {
+                                choice.apply(window.appearance(), cx);
+                                crate::preferences::save(cx);
+                            })
                             .on_key_down(move |event, window, cx| {
                                 let selected_index = options
                                     .iter()
@@ -167,6 +165,7 @@ impl Settings {
                                 };
                                 if let Some(next) = next {
                                     next.apply(window.appearance(), cx);
+                                    crate::preferences::save(cx);
                                     cx.stop_propagation();
                                 }
                             })
@@ -194,141 +193,80 @@ impl Render for Settings {
             })
             .size_full()
             .flex()
-            .gap_1()
-            .p_1()
+            .flex_col()
             .bg(t.app.bg)
             .text_color(t.app.fg)
             .font_family(t.font.sans.clone())
             .text_size(t.font.sm)
             .child(
                 div()
-                    .w(px(152.))
-                    .h_full()
+                    .h(px(48.))
                     .flex_shrink_0()
                     .flex()
-                    .flex_col()
-                    .bg(t.sidebar.bg)
-                    .text_color(t.sidebar.fg)
-                    .border_1()
-                    .border_color(t.sidebar.border)
-                    .rounded(t.radius.xl2())
-                    .child(
-                        div()
-                            .h(px(44.))
-                            .flex_shrink_0()
-                            .window_control_area(WindowControlArea::Drag),
-                    )
-                    .children(
-                        [
-                            (Section::Appearance, "Appearance", Icon::Palette),
-                            (Section::Notebooks, "Notebooks", Icon::Notebook),
-                        ]
-                        .into_iter()
-                        .map(|(section, label, icon)| {
-                            let selected = section == self.section;
-                            div()
-                                .id(label)
-                                .mx_1()
-                                .h(px(28.))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .gap_1p5()
-                                .rounded(t.radius.md())
-                                .cursor_pointer()
-                                .tab_index(0)
-                                .when(selected, |s| {
-                                    s.bg(t.active_file_bg).text_color(t.active_file_fg)
-                                })
-                                .when(!selected, |s| {
-                                    s.text_color(t.sidebar.fg).hover(|s| s.bg(t.rail_hover_bg))
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.section = section;
-                                    cx.notify();
-                                }))
-                                .on_key_down(cx.listener(
-                                    move |this, event: &gpui::KeyDownEvent, _, cx| {
-                                        if matches!(event.keystroke.key.as_str(), "enter" | "space")
-                                        {
-                                            this.section = section;
-                                            cx.notify();
-                                        }
-                                    },
-                                ))
-                                .child(icon.svg().size(px(14.)).text_color(if selected {
-                                    t.active_file_fg
-                                } else {
-                                    t.sidebar.fg
-                                }))
-                                .child(label)
-                        }),
-                    ),
+                    .items_center()
+                    .pl(px(84.))
+                    .window_control_area(WindowControlArea::Drag)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Settings"),
             )
             .child(
                 div()
+                    .id("settings-content")
                     .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p_3()
                     .child(
                         div()
-                            .h(px(44.))
-                            .flex_shrink_0()
-                            .px_2()
                             .flex()
-                            .items_center()
-                            .window_control_area(WindowControlArea::Drag)
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(if self.section == Section::Appearance {
-                                "Appearance"
-                            } else {
-                                "Notebooks"
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("appearance-content")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .px_2()
-                            .pb_2()
+                            .flex_col()
+                            .rounded(t.radius.lg())
+                            .bg(t.card.bg)
+                            .text_color(t.card.fg)
+                            .border_1()
+                            .border_color(t.card.border)
                             .child(
                                 div()
-                                    .p_2()
+                                    .p_3()
                                     .flex()
                                     .items_center()
                                     .justify_between()
                                     .gap_2()
-                                    .rounded(t.radius.lg())
-                                    .bg(t.card.bg)
-                                    .text_color(t.card.fg)
-                                    .border_1()
-                                    .border_color(t.card.border)
-                                    .when(self.section == Section::Appearance, |view| {
-                                        view.child("Theme").child(self.appearance_selector(cx))
-                                    })
-                                    .when(self.section == Section::Notebooks, |view| {
-                                        view.child(
+                                    .child("Theme")
+                                    .child(self.appearance_selector(cx)),
+                            )
+                            .child(div().mx_3().h(px(1.)).bg(t.card.border))
+                            .child(
+                                div()
+                                    .p_3()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(
+                                        div().flex().flex_col().gap_1().child("Autosave").child(
                                             div()
-                                                .flex()
-                                                .flex_col()
-                                                .gap_1()
-                                                .child("Autosave")
-                                                .child(
-                                                    div()
-                                                        .text_size(t.font.xs)
-                                                        .text_color(t.card.muted_fg)
-                                                        .child(
-                                                            "Save after a short pause in editing.",
-                                                        ),
-                                                ),
-                                        )
-                                        .child(self.autosave_toggle(cx))
-                                    }),
+                                                .text_size(t.font.xs)
+                                                .text_color(t.card.muted_fg)
+                                                .child("Save after a short pause in editing."),
+                                        ),
+                                    )
+                                    .child(self.autosave_toggle(cx)),
                             ),
                     ),
+            )
+            .when_some(
+                cx.global::<crate::preferences::Persistence>().error.clone(),
+                |view, error| {
+                    view.child(
+                        div()
+                            .px_3()
+                            .pb_3()
+                            .text_size(t.font.xs)
+                            .text_color(t.destructive)
+                            .child(error),
+                    )
+                },
             )
     }
 }

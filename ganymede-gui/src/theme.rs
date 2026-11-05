@@ -691,7 +691,8 @@ impl ThemeSpec {
 
 /// Kept independently from the resolved palette so System remains selected
 /// when the operating system changes appearance. Preserved across settings windows.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AppearancePreference {
     System,
     #[default]

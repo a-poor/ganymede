@@ -38,6 +38,10 @@ pub enum DocumentKind {
     Console,
 }
 impl DocumentKind {
+    fn is_available(self) -> bool {
+        !matches!(self, Self::Terminal | Self::Console) || crate::features::UNFINISHED
+    }
+
     fn for_text_path(path: &str) -> Self {
         match path
             .rsplit('.')
@@ -348,7 +352,7 @@ impl Workspace {
         this
     }
     fn create(&mut self, kind: DocumentKind, window: &mut Window, cx: &mut Context<Self>) {
-        if self.file_busy {
+        if self.file_busy || !kind.is_available() {
             return;
         }
         if kind == DocumentKind::Notebook {
@@ -1839,6 +1843,10 @@ impl Workspace {
                 ],
             ),
         ];
+        let groups = groups.into_iter().filter_map(|(heading, mut items)| {
+            items.retain(|(kind, _, _)| kind.is_available());
+            (!items.is_empty()).then_some((heading, items))
+        });
         div()
             .id("launcher")
             .size_full()
@@ -1850,7 +1858,7 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap_6()
-                    .children(groups.into_iter().map(|(heading, items)| {
+                    .children(groups.map(|(heading, items)| {
                         div()
                             .flex()
                             .flex_col()

@@ -219,7 +219,7 @@ pub fn open(cx: &mut App) {
             is_minimizable: false,
             window_min_size: Some(gpui::size(px(480.), px(320.))),
             titlebar: Some(gpui::TitlebarOptions {
-                title: Some("Connect to Jupyter".into()),
+                title: Some("Ganymede".into()),
                 appears_transparent: true,
                 traffic_light_position: Some(gpui::point(px(18.), px(18.))),
             }),

@@ -4,10 +4,12 @@ mod code_cell;
 mod confirm;
 mod connection;
 mod execution;
+mod features;
 mod find;
 pub mod icon;
 mod image_loader;
 mod notebook;
+mod preferences;
 mod rich;
 mod settings;
 mod syntax;
@@ -345,20 +347,22 @@ impl Render for Ganymede {
                                     },
                                 )),
                             )
-                            .child(
-                                self.rail_button(
-                                    "Git",
-                                    Icon::GitBranch,
-                                    self.sidebar_open && self.sidebar_tab == SidebarTab::Git,
-                                    cx,
+                            .when(features::UNFINISHED, |rail| {
+                                rail.child(
+                                    self.rail_button(
+                                        "Git",
+                                        Icon::GitBranch,
+                                        self.sidebar_open && self.sidebar_tab == SidebarTab::Git,
+                                        cx,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.sidebar_tab = SidebarTab::Git;
+                                            this.set_sidebar_open(true, cx);
+                                        },
+                                    )),
                                 )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.sidebar_tab = SidebarTab::Git;
-                                        this.set_sidebar_open(true, cx);
-                                    },
-                                )),
-                            )
+                            })
                             .child(div().flex_1())
                             .child(
                                 self.rail_button("Settings", Icon::Gear, false, cx)
@@ -430,10 +434,9 @@ fn main() {
     let app = gpui_platform::application().with_assets(assets::Assets);
     app.on_reopen(connection::reopen);
     app.run(move |cx: &mut App| {
-        theme::AppearancePreference::default().apply(cx.window_appearance(), cx);
+        preferences::init(cx);
         cx.set_global(execution);
         cx.set_global(SettingsWindow::default());
-        cx.set_global(autosave::AutosavePreference::default());
         confirm::init(cx);
         assets::register_fonts(cx).expect("failed to register embedded fonts");
         code_cell::init(cx);

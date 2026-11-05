@@ -36,6 +36,8 @@ pub(super) struct Server {
     checking: bool,
     menu: bool,
     selected: Option<usize>,
+    hovered: [bool; 2],
+    dismiss: Option<gpui::Task<()>>,
     focus: gpui::FocusHandle,
 }
 impl Server {
@@ -46,11 +48,42 @@ impl Server {
             checking: false,
             menu: false,
             selected: None,
+            hovered: [false; 2],
+            dismiss: None,
             focus: cx.focus_handle(),
         }
     }
 }
 impl Workspace {
+    fn hover_server(&mut self, region: usize, over: bool, cx: &mut Context<Self>) {
+        self.server.hovered[region] = over;
+        self.server.dismiss = None;
+        if over {
+            if region == 0 && !self.server.menu {
+                self.server.hovered[1] = false;
+                self.server.menu = true;
+                self.server.selected = None;
+                cx.notify();
+            }
+        } else if !self.server.hovered.iter().any(|over| *over) {
+            // Allow crossing the small gap between the trigger and the popover.
+            self.server.dismiss = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(150))
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.server.dismiss = None;
+                    if !this.server.hovered.iter().any(|over| *over) && this.server.menu {
+                        this.server.menu = false;
+                        this.server.selected = None;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }));
+        }
+    }
+
     fn local_server(&self, cx: &App) -> Option<crate::connection::server::ManagedServer> {
         if self.runtime.tunnel.is_some() {
             return None;
@@ -286,6 +319,7 @@ impl Workspace {
         let weak = entity.downgrade();
         let keys = weak.clone();
         let hover = weak.clone();
+        let card_hover = weak.clone();
         let outside = weak.clone();
         let mut result = div()
             .relative()
@@ -318,17 +352,9 @@ impl Workspace {
                     .cursor_pointer()
                     .hover(|s| s.bg(surface.accent))
                     .on_hover(move |over, _, cx| {
-                        if *over {
-                            hover
-                                .update(cx, |this, cx| {
-                                    if !this.server.menu {
-                                        this.server.menu = true;
-                                        this.server.selected = None;
-                                        cx.notify();
-                                    }
-                                })
-                                .ok();
-                        }
+                        hover
+                            .update(cx, |this, cx| this.hover_server(0, *over, cx))
+                            .ok();
                     })
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
@@ -342,6 +368,7 @@ impl Workspace {
                     })
                     .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
                         keys.update(cx, |this, cx| {
+                            this.server.dismiss = None;
                             match event.keystroke.key.as_str() {
                                 "escape" | "tab" => this.server.menu = false,
                                 "down" | "up" => {
@@ -421,6 +448,11 @@ impl Workspace {
                     .child(
                         div()
                             .id("server-menu")
+                            .on_hover(move |over, _, cx| {
+                                card_hover
+                                    .update(cx, |this, cx| this.hover_server(1, *over, cx))
+                                    .ok();
+                            })
                             .occlude()
                             .w(px(250.))
                             .p_1()

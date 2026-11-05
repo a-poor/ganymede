@@ -382,7 +382,7 @@ copy. Closing tabs or the app does not delete server sessions or kernels.
 
 Autosave is enabled by default and saves after about two seconds without document
 changes (including execution outputs). Toggle it in Settings → Notebooks; this
-preference currently applies for the app session, like appearance settings.
+preference and the selected theme persist across app launches.
 Saves are silent; failures show an error toast and pause autosave until a manual
 save or toggling autosave off/on. ⌘S / Ctrl+S always remains available.
 
@@ -446,8 +446,12 @@ closes affected tabs only after server deletion succeeds. Non-empty-folder delet
 follows the Jupyter server's policy; rejection appears in an error toast.
 
 All mutations use the Jupyter Contents API. Uploads currently use the OS picker;
-Finder-to-sidebar drops are not implemented. Terminal/console launcher items remain
-demos.
+Finder-to-sidebar drops are not implemented. Git integration and Terminal/Console launcher items remain prototypes. They are
+visible in development builds (`cargo run`) and hidden in ordinary release builds
+(`cargo run --release`). Saved Git sidebar selections fall back to Files when
+prototypes are disabled. To include prototypes in an optimized development build,
+use `cargo run --release --features unfinished`. Do not enable that feature
+for distributed releases (including through `--all-features`).
 
 To exercise the GUI execution adapter against the configured server:
 
@@ -473,3 +477,32 @@ Undo never executes code; changes that would remove or replace a running cell
 are blocked until execution finishes or is interrupted. New structural edits clear
 redo. History lasts until the notebook closes or is reloaded from the server;
 undo/redo changes participate in normal saving and autosave.
+
+## Checks and preview builds
+
+GitHub Actions runs formatting, Clippy, workspace tests, and a check of the
+`unfinished` feature on pushes and pull requests. Live Jupyter tests remain a
+separate opt-in check via `scripts/test_jupyter.py`. Rust is pinned in
+`rust-toolchain.toml`.
+
+After checks pass, CI builds an optimized macOS app with unfinished features
+disabled and uploads an unsigned, architecture-specific ZIP artifact. This is
+a testing artifact, not a signed or notarized public release. It requires macOS
+15 or later. To build the same bundle locally, fetch assets, then run:
+
+```sh
+bash scripts/package-macos.sh
+```
+
+The result is `target/dist/Ganymede-macOS.zip`. Signing, notarization, an app
+icon, and automatic updates are not included yet.
+
+Theme and Autosave preferences are stored in
+`~/Library/Application Support/Ganymede/connections.preferences.json` on macOS
+(`~/.config/ganymede/connections.preferences.json` elsewhere). Changing a setting
+writes the small file atomically; write failures appear in Settings. Missing
+files use the existing Light-theme/Autosave-on defaults. Invalid or unsupported
+files are left untouched at startup, with a message in Settings.
+`GANYMEDE_PREFERENCES_FILE` overrides the path. Otherwise it follows the
+`GANYMEDE_CONNECTIONS_FILE` location with a `.preferences.json` extension, keeping
+isolated previews separate from normal preferences.

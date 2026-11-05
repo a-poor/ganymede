@@ -71,7 +71,19 @@ impl Inline {
     }
     fn render(&self, id: usize, cx: &App) -> AnyElement {
         let t = cx.theme();
-        let highlights = self.spans.iter().map(|(range, style)| {
+        // Display-only spacing keeps source and saved notebook content untouched.
+        let mut display = Inline::default();
+        for (range, style) in &self.spans {
+            if style.code {
+                display.push(
+                    &format!("\u{202f}{}\u{202f}", &self.text[range.clone()]),
+                    style,
+                );
+            } else {
+                display.push(&self.text[range.clone()], style);
+            }
+        }
+        let highlights = display.spans.iter().map(|(range, style)| {
             let color = style
                 .color
                 .map(|c| match c % 8 {
@@ -91,19 +103,37 @@ impl Inline {
                     color,
                     font_weight: style.bold.then_some(FontWeight::BOLD),
                     font_style: style.italic.then_some(FontStyle::Italic),
-                    background_color: style.code.then_some(t.muted),
                     ..Default::default()
                 },
             )
         });
         // Resolve runs during layout, after parent font styles have been applied.
-        let text = StyledText::new(self.text.clone()).with_highlights(highlights);
-        let links: Vec<_> = self
+        let text = StyledText::new(display.text.clone())
+            .with_highlights(highlights)
+            .with_font_family_overrides(
+                display
+                    .spans
+                    .iter()
+                    .filter(|(_, style)| style.code)
+                    .map(|(range, _)| (range.clone(), t.font.mono.clone())),
+            );
+        let layout = text.layout().clone();
+        let code_ranges: Vec<_> = display
+            .spans
+            .iter()
+            .filter(|(_, style)| style.code)
+            .map(|(range, _)| range.clone())
+            .collect();
+        let source = display.text.clone();
+        let bg = t.muted;
+        let radius = t.radius.sm();
+        let has_code = !code_ranges.is_empty();
+        let links: Vec<_> = display
             .spans
             .iter()
             .filter_map(|(r, s)| s.link.as_ref().map(|u| (r.clone(), u.clone())))
             .collect();
-        InteractiveText::new(("rich-inline", id), text)
+        let text = InteractiveText::new(("rich-inline", id), text)
             .on_click(
                 links.iter().map(|(r, _)| r.clone()).collect(),
                 move |i, _, cx| {
@@ -111,6 +141,52 @@ impl Inline {
                     cx.open_url(&links[i].1);
                 },
             )
+            .into_any_element();
+        div()
+            .relative()
+            .when(has_code, |v| v.py(px(2.)))
+            .child(
+                gpui::canvas(
+                    move |_, _, _| {},
+                    move |_, _, window, _| {
+                        let mut line_start = 0;
+                        let mut y = layout.bounds().origin.y;
+                        for line in layout.line_layouts() {
+                            let mut boundaries = vec![(0, px(0.))];
+                            boundaries.extend(line.wrap_boundaries.iter().map(|boundary| {
+                                let glyph = &line.unwrapped_layout.runs[boundary.run_ix].glyphs
+                                    [boundary.glyph_ix];
+                                (glyph.index, glyph.position.x)
+                            }));
+                            boundaries.push((line.len(), line.unwrapped_layout.width));
+                            for row in boundaries.windows(2) {
+                                for range in &code_ranges {
+                                    let start = range.start.max(line_start + row[0].0);
+                                    let end = range.end.min(line_start + row[1].0);
+                                    if start >= end || source[start..end].trim().is_empty() {
+                                        continue;
+                                    }
+                                    let x = layout.bounds().origin.x
+                                        + line.unwrapped_layout.x_for_index(start - line_start)
+                                        - row[0].1;
+                                    let width = line.unwrapped_layout.x_for_index(end - line_start)
+                                        - line.unwrapped_layout.x_for_index(start - line_start);
+                                    let bounds = gpui::Bounds::new(
+                                        gpui::point(x, y),
+                                        gpui::size(width, layout.line_height()),
+                                    );
+                                    window.paint_quad(gpui::fill(bounds, bg).corner_radii(radius));
+                                }
+                                y += layout.line_height();
+                            }
+                            line_start += line.len() + 1;
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .child(text)
             .into_any_element()
     }
 }
@@ -299,8 +375,8 @@ impl Rich {
                         .overflow_x_scroll()
                         .px_2()
                         .py_1()
-                        .bg(t.card.bg)
-                        .text_color(t.card.fg)
+                        .bg(t.muted)
+                        .text_color(t.app.fg)
                         .rounded(t.radius.sm())
                         .font_family(t.font.mono.clone())
                         .text_size(t.font.code)

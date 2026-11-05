@@ -90,7 +90,7 @@ impl Workspace {
     pub fn sidebar_state(&self) -> (bool, crate::SidebarTab) {
         let tab = match self.saved_layout.sidebar_tab.as_str() {
             "kernels" => crate::SidebarTab::Kernels,
-            "git" => crate::SidebarTab::Git,
+            "git" if crate::features::UNFINISHED => crate::SidebarTab::Git,
             _ => crate::SidebarTab::Files,
         };
         (self.saved_layout.sidebar_open, tab)

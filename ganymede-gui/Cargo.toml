@@ -3,6 +3,10 @@ name = "ganymede-gui"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Opt into unfinished UI in optimized development builds.
+unfinished = []
+
 [dependencies]
 anyhow = "1"
 libc = "0.2"
