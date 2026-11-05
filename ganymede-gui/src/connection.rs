@@ -10,7 +10,10 @@ use crate::{
 };
 use ganymede_core::jupyter::ServerConfig;
 use gpui::{App, Context, Entity, Focusable, Window, div, prelude::*, px};
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 #[derive(Clone)]
 struct Recent {
@@ -266,10 +269,17 @@ enum Page {
     Existing,
     Local,
 }
+const PAGE_TRANSITION_DURATION: Duration = Duration::from_millis(240);
+#[derive(Clone, Copy)]
+struct PageTransition {
+    from: Page,
+    started: Instant,
+}
 struct ConnectionWindow {
     workspace: Option<Entity<crate::Ganymede>>,
     planet: Option<Entity<planet::Planet>>,
     page: Page,
+    transition: Option<PageTransition>,
     address: Entity<Field>,
     token: Entity<Field>,
     ssh_host: Entity<Field>,
@@ -330,6 +340,7 @@ impl ConnectionWindow {
             workspace: None,
             planet: None,
             page: Page::Recent,
+            transition: None,
             address,
             token,
             ssh_host,
@@ -369,10 +380,27 @@ impl ConnectionWindow {
         }
     }
     fn page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        if page == self.page || self.transition.is_some() {
+            return;
+        }
+        if !cx.reduce_motion() {
+            self.transition = Some(PageTransition {
+                from: self.page,
+                started: Instant::now(),
+            });
+        }
         self.page = page;
         self.environment_open = false;
         self.error = None;
-        match page {
+        if self.transition.is_some() {
+            self.focus.focus(window, cx);
+        } else {
+            self.focus_page(window, cx);
+        }
+        cx.notify();
+    }
+    fn focus_page(&self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.page {
             Page::Existing => self.address.read(cx).focus_handle(cx).focus(window, cx),
             Page::Local => self.folder.read(cx).focus_handle(cx).focus(window, cx),
             Page::Recent => self.focus.focus(window, cx),
@@ -1087,6 +1115,246 @@ impl ConnectionWindow {
             })
     }
 }
+impl ConnectionWindow {
+    fn page_layer(
+        &self,
+        page: Page,
+        offset: f32,
+        opacity: f32,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        let t = cx.theme();
+        let group = || {
+            div()
+                .w_full()
+                .bg(if t.is_dark { t.card.bg } else { t.app.bg })
+                .text_color(if t.is_dark { t.card.fg } else { t.app.fg })
+                .border_1()
+                .border_color(t.launcher_border)
+                .rounded(t.radius.xl2())
+                .overflow_hidden()
+        };
+        let divider = || div().mx_3().h(px(1.)).bg(t.launcher_border);
+        let mut body = div().w_full().flex().flex_col().gap_3();
+        if self.busy {
+            body = body
+                .items_center()
+                .child(
+                    div()
+                        .text_color(t.app.muted_fg)
+                        .child(if page == Page::Local {
+                            "Starting Jupyter…"
+                        } else {
+                            if self.reading_token {
+                                "Loading saved token…"
+                            } else {
+                                "Connecting…"
+                            }
+                        }),
+                )
+                .child(
+                    button("cancel-connect", "Cancel", false, cx)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.task = gpui::Task::ready(());
+                            this.reading_token = false;
+                            this.busy = false;
+                            cx.notify();
+                        }))
+                        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                this.task = gpui::Task::ready(());
+                                this.reading_token = false;
+                                this.busy = false;
+                                cx.notify();
+                                cx.stop_propagation();
+                            }
+                        })),
+                );
+        } else if page == Page::Recent {
+            body = body.child(
+                group()
+                    .child(choice_row(
+                        "Start a local server",
+                        "Work in a folder using Python or a virtual environment.",
+                        self.page_button("new-local", "Create", Page::Local, true, cx),
+                        cx,
+                    ))
+                    .child(divider())
+                    .child(choice_row(
+                        "Connect to a server",
+                        "Open an existing Jupyter server using its URL and token.",
+                        self.page_button("new-existing", "Connect", Page::Existing, false, cx),
+                        cx,
+                    )),
+            );
+        } else {
+            body = body
+                .child(
+                    div().flex().child(
+                        self.page_button("connection-back", "Back", Page::Recent, false, cx)
+                            .flex()
+                            .flex_row_reverse()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                crate::icon::Icon::CaretLeft
+                                    .svg()
+                                    .size(px(12.))
+                                    .text_color(t.secondary_fg),
+                            ),
+                    ),
+                )
+                .child(
+                    div()
+                        .text_size(t.font.base)
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(if page == Page::Local {
+                            "Start a local server"
+                        } else {
+                            "Connect to a server"
+                        }),
+                );
+            if page == Page::Local {
+                body = body.child(group().p_3().flex().flex_col().gap_3()
+                    .child(div().flex().items_center().gap_2()
+                        .child(div().flex_1().min_w_0().child(field("Project folder", self.folder.clone(), cx)))
+                        .child(button("choose-folder", "Browse…", false, cx).mt(px(18.))
+                            .on_click(cx.listener(|this, _, window, cx| this.choose_folder(window, cx)))
+                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                                if matches!(event.keystroke.key.as_str(), "enter" | "space") { this.choose_folder(window, cx); cx.stop_propagation(); }
+                            }))))
+                    .child(div().h(px(1.)).bg(t.launcher_border))
+                    .child(div().text_size(t.font.xs).text_color(t.card.muted_fg).child("Environment"))
+                    .child(self.environment_control(cx))
+                    .when(matches!(self.environment, server::Environment::Venv | server::Environment::Custom), |v| v.child(field(
+                        if self.environment == server::Environment::Venv { "Virtual environment folder" } else { "Python executable" }, self.python.clone(), cx)))
+                    .child(div().text_size(t.font.xs).text_color(t.card.muted_fg).child(match self.environment {
+                        server::Environment::Global => "Uses python3 from PATH. Requires jupyter-server and ipykernel.",
+                        server::Environment::Venv => "Relative paths start at the project folder. Requires jupyter-server and ipykernel.",
+                        server::Environment::Custom => "Choose a Python executable with jupyter-server and ipykernel installed.",
+                    })))
+                    .child(div().flex().justify_end().child(self.submit_button("Start server", cx)));
+            } else {
+                body = body
+                    .child(
+                        group()
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(field("Server URL", self.address.clone(), cx))
+                            .child(field("Token (optional)", self.token.clone(), cx))
+                            .child(div().w_full().max_w(px(420.)).flex().items_center().justify_between()
+                            .when(cfg!(target_os = "macos"), |v| v.child(self.remember_control(cx)))
+                            .when_some(server::parse_connection(self.address.read(cx).value(), "").ok().and_then(|(a, _)| ssh::host(self.ssh_host.read(cx).value()).ok().map(|host| ssh::identity(&a, host.as_deref()))).filter(|address| cx.global::<Connections>().recent.iter().any(|r| r.key() == *address && r.saved_token)), |v, address| {
+                                let key_address = address.clone();
+                                v.child(div().flex().child(div().id("forget-token").tab_index(0).py_1().text_size(t.font.xs).text_color(t.app.muted_fg).cursor_pointer().hover(|s| s.underline().text_color(t.app.fg)).focus_visible(|s| s.underline().text_color(t.app.fg)).child("Forget token")
+                                    .on_click(cx.listener(move |this, _, window, cx| this.forget_token(address.clone(), window, cx)))
+                                    .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                            cx.stop_propagation(); this.forget_token(key_address.clone(), window, cx);
+                                        }
+                                    }))))
+                            })
+                            )
+                            .child(
+                                div()
+                                    .text_size(t.font.xs)
+                                    .text_color(t.card.muted_fg)
+                                    .child("Tokens are saved in macOS Keychain. You can forget them anytime."),
+                            ),
+                    )
+                    .child(div().flex().flex_col().gap_2()
+                        .child(div().id("advanced-connection").tab_index(0).flex().items_center().gap_1().cursor_pointer()
+                            .text_size(t.font.xs).text_color(t.app.muted_fg)
+                            .child(if self.advanced { crate::icon::Icon::CaretDown } else { crate::icon::Icon::CaretRight }.svg().size(px(12.)).text_color(t.app.muted_fg))
+                            .child(if self.ssh_host.read(cx).value().trim().is_empty() { "Advanced" } else { "Advanced · SSH enabled" })
+                            .on_click(cx.listener(|this, _, _, cx| { this.advanced = !this.advanced; cx.notify(); }))
+                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| { if matches!(event.keystroke.key.as_str(), "enter" | "space") { cx.stop_propagation(); this.advanced = !this.advanced; cx.notify(); } })))
+                        .when(self.advanced, |v| v.child(group().p_3().flex().flex_col().gap_2()
+                            .child(field("SSH host (optional)", self.ssh_host.clone(), cx))
+                            .child(div().text_size(t.font.xs).text_color(t.card.muted_fg).child("SSH alias or user@host. Server URL is relative to this host.")))))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .child(self.submit_button("Connect", cx)),
+                    );
+            }
+        }
+        if let Some(error) = &self.error {
+            body = body.child(div().text_color(t.destructive).child(error.clone()));
+        }
+        div()
+            .id(match page {
+                Page::Recent => "welcome-page",
+                Page::Local => "local-page",
+                Page::Existing => "existing-page",
+            })
+            .absolute()
+            .inset_0()
+            .left(px(offset))
+            .right(px(-offset))
+            .opacity(opacity)
+            .flex()
+            .flex_col()
+            .when(page == Page::Recent && !self.busy, |v| {
+                v.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(px(40.))
+                        .flex()
+                        .justify_center()
+                        .font_family(t.font.brand.clone())
+                        .text_size(t.font.brand_size)
+                        .text_color(t.launcher_art_fg)
+                        .children("Ganymede".chars().enumerate().map(|(i, ch)| {
+                            div()
+                                .relative()
+                                .when(i < 7, |v| v.mr(t.font.brand_tracking))
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(2.))
+                                        .top(px(3.))
+                                        .text_color(t.launcher_art_bg)
+                                        .child(ch.to_string()),
+                                )
+                                .child(div().relative().child(ch.to_string()))
+                        })),
+                )
+            })
+            .child(
+                div()
+                    .h(px(28.))
+                    .flex_shrink_0()
+                    .window_control_area(gpui::WindowControlArea::Drag),
+            )
+            .child(
+                div()
+                    .id("connection-content")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_6()
+                    .pb_6()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(480.))
+                            .mx_auto()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .when(page == Page::Recent && !self.busy, |v| v.pt(px(240.)))
+                            .child(body),
+                    ),
+            )
+            .into_any_element()
+    }
+}
 impl Render for ConnectionWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(workspace) = &self.workspace {
@@ -1097,6 +1365,28 @@ impl Render for ConnectionWindow {
                 .child(workspace.clone())
                 .into_any_element();
         }
+        let progress = self
+            .transition
+            .map(|transition| {
+                let linear = (transition.started.elapsed().as_secs_f32()
+                    / PAGE_TRANSITION_DURATION.as_secs_f32())
+                .min(1.);
+                1. - (1. - linear).powi(3)
+            })
+            .unwrap_or(1.);
+        if self.transition.is_some() {
+            if progress >= 1. || cx.reduce_motion() || self.busy {
+                self.transition = None;
+                self.focus_page(window, cx);
+            } else {
+                window.request_animation_frame();
+            }
+        }
+        let progress = if self.transition.is_none() {
+            1.
+        } else {
+            progress
+        };
         let planet = self
             .planet
             .get_or_insert_with(|| cx.new(|cx| planet::Planet::new(window, cx)))
@@ -1280,167 +1570,6 @@ impl Render for ConnectionWindow {
                             })
                     })),
             );
-        let group = || {
-            div()
-                .w_full()
-                .bg(if t.is_dark { t.card.bg } else { t.app.bg })
-                .text_color(if t.is_dark { t.card.fg } else { t.app.fg })
-                .border_1()
-                .border_color(t.launcher_border)
-                .rounded(t.radius.xl2())
-                .overflow_hidden()
-        };
-        let divider = || div().mx_3().h(px(1.)).bg(t.launcher_border);
-        let mut body = div().w_full().flex().flex_col().gap_3();
-        if self.busy {
-            body = body
-                .items_center()
-                .child(
-                    div()
-                        .text_color(t.app.muted_fg)
-                        .child(if self.page == Page::Local {
-                            "Starting Jupyter…"
-                        } else {
-                            if self.reading_token {
-                                "Loading saved token…"
-                            } else {
-                                "Connecting…"
-                            }
-                        }),
-                )
-                .child(
-                    button("cancel-connect", "Cancel", false, cx)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.task = gpui::Task::ready(());
-                            this.reading_token = false;
-                            this.busy = false;
-                            cx.notify();
-                        }))
-                        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                this.task = gpui::Task::ready(());
-                                this.reading_token = false;
-                                this.busy = false;
-                                cx.notify();
-                                cx.stop_propagation();
-                            }
-                        })),
-                );
-        } else if self.page == Page::Recent {
-            body = body.child(
-                group()
-                    .child(choice_row(
-                        "Start a local server",
-                        "Work in a folder using Python or a virtual environment.",
-                        self.page_button("new-local", "Start…", Page::Local, true, cx),
-                        cx,
-                    ))
-                    .child(divider())
-                    .child(choice_row(
-                        "Connect to a server",
-                        "Open an existing Jupyter server using its URL and token.",
-                        self.page_button("new-existing", "Connect…", Page::Existing, false, cx),
-                        cx,
-                    )),
-            );
-        } else {
-            body = body
-                .child(
-                    div().flex().child(
-                        self.page_button("connection-back", "Back", Page::Recent, false, cx)
-                            .flex()
-                            .flex_row_reverse()
-                            .items_center()
-                            .gap_1()
-                            .child(
-                                crate::icon::Icon::CaretLeft
-                                    .svg()
-                                    .size(px(12.))
-                                    .text_color(t.secondary_fg),
-                            ),
-                    ),
-                )
-                .child(
-                    div()
-                        .text_size(t.font.base)
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(if self.page == Page::Local {
-                            "Start a local server"
-                        } else {
-                            "Connect to a server"
-                        }),
-                );
-            if self.page == Page::Local {
-                body = body.child(group().p_3().flex().flex_col().gap_3()
-                    .child(div().flex().items_center().gap_2()
-                        .child(div().flex_1().min_w_0().child(field("Project folder", self.folder.clone(), cx)))
-                        .child(button("choose-folder", "Browse…", false, cx).mt(px(18.))
-                            .on_click(cx.listener(|this, _, window, cx| this.choose_folder(window, cx)))
-                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                                if matches!(event.keystroke.key.as_str(), "enter" | "space") { this.choose_folder(window, cx); cx.stop_propagation(); }
-                            }))))
-                    .child(div().h(px(1.)).bg(t.launcher_border))
-                    .child(div().text_size(t.font.xs).text_color(t.card.muted_fg).child("Environment"))
-                    .child(self.environment_control(cx))
-                    .when(matches!(self.environment, server::Environment::Venv | server::Environment::Custom), |v| v.child(field(
-                        if self.environment == server::Environment::Venv { "Virtual environment folder" } else { "Python executable" }, self.python.clone(), cx)))
-                    .child(div().text_size(t.font.xs).text_color(t.card.muted_fg).child(match self.environment {
-                        server::Environment::Global => "Uses python3 from PATH. Requires jupyter-server and ipykernel.",
-                        server::Environment::Venv => "Relative paths start at the project folder. Requires jupyter-server and ipykernel.",
-                        server::Environment::Custom => "Choose a Python executable with jupyter-server and ipykernel installed.",
-                    })))
-                    .child(div().flex().justify_end().child(self.submit_button("Start server", cx)));
-            } else {
-                body = body
-                    .child(
-                        group()
-                            .p_3()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(field("Server URL", self.address.clone(), cx))
-                            .child(field("Token (optional)", self.token.clone(), cx))
-                            .child(div().w_full().max_w(px(420.)).flex().items_center().justify_between()
-                            .when(cfg!(target_os = "macos"), |v| v.child(self.remember_control(cx)))
-                            .when_some(server::parse_connection(self.address.read(cx).value(), "").ok().and_then(|(a, _)| ssh::host(self.ssh_host.read(cx).value()).ok().map(|host| ssh::identity(&a, host.as_deref()))).filter(|address| cx.global::<Connections>().recent.iter().any(|r| r.key() == *address && r.saved_token)), |v, address| {
-                                let key_address = address.clone();
-                                v.child(div().flex().child(div().id("forget-token").tab_index(0).py_1().text_size(t.font.xs).text_color(t.app.muted_fg).cursor_pointer().hover(|s| s.underline().text_color(t.app.fg)).focus_visible(|s| s.underline().text_color(t.app.fg)).child("Forget token")
-                                    .on_click(cx.listener(move |this, _, window, cx| this.forget_token(address.clone(), window, cx)))
-                                    .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
-                                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                            cx.stop_propagation(); this.forget_token(key_address.clone(), window, cx);
-                                        }
-                                    }))))
-                            })
-                            )
-                            .child(
-                                div()
-                                    .text_size(t.font.xs)
-                                    .text_color(t.card.muted_fg)
-                                    .child("Tokens are saved in macOS Keychain. You can forget them anytime."),
-                            ),
-                    )
-                    .child(div().flex().flex_col().gap_2()
-                        .child(div().id("advanced-connection").tab_index(0).flex().items_center().gap_1().cursor_pointer()
-                            .text_size(t.font.xs).text_color(t.app.muted_fg)
-                            .child(if self.advanced { crate::icon::Icon::CaretDown } else { crate::icon::Icon::CaretRight }.svg().size(px(12.)).text_color(t.app.muted_fg))
-                            .child(if self.ssh_host.read(cx).value().trim().is_empty() { "Advanced" } else { "Advanced · SSH enabled" })
-                            .on_click(cx.listener(|this, _, _, cx| { this.advanced = !this.advanced; cx.notify(); }))
-                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| { if matches!(event.keystroke.key.as_str(), "enter" | "space") { cx.stop_propagation(); this.advanced = !this.advanced; cx.notify(); } })))
-                        .when(self.advanced, |v| v.child(group().p_3().flex().flex_col().gap_2()
-                            .child(field("SSH host (optional)", self.ssh_host.clone(), cx))
-                            .child(div().text_size(t.font.xs).text_color(t.card.muted_fg).child("SSH alias or user@host. Server URL is relative to this host.")))))
-                    .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .child(self.submit_button("Connect", cx)),
-                    );
-            }
-        }
-        if let Some(error) = &self.error {
-            body = body.child(div().text_color(t.destructive).child(error.clone()));
-        }
         div()
             .size_full()
             .p_2()
@@ -1456,6 +1585,10 @@ impl Render for ConnectionWindow {
                 cx.listener(|this, _: &crate::CloseTab, window, cx| this.close(false, window, cx)),
             )
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if this.transition.is_some() {
+                    cx.stop_propagation();
+                    return;
+                }
                 if event.keystroke.key == "tab" {
                     if event.keystroke.modifiers.shift {
                         window.focus_prev(cx);
@@ -1480,70 +1613,37 @@ impl Render for ConnectionWindow {
                     .bottom_0()
                     .child(planet),
             )
-            .when(self.page == Page::Recent && !self.busy, |v| {
-                v.child(
-                    div()
-                        .absolute()
-                        .left(px(228.))
-                        .right_0()
-                        .top(px(48.))
-                        .flex()
-                        .justify_center()
-                        .font_family(t.font.brand.clone())
-                        .text_size(t.font.brand_size)
-                        .text_color(t.launcher_art_fg)
-                        .children("Ganymede".chars().enumerate().map(|(i, ch)| {
-                            div()
-                                .relative()
-                                .when(i < 7, |v| v.mr(t.font.brand_tracking))
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .left(px(2.))
-                                        .top(px(3.))
-                                        .text_color(t.launcher_art_bg)
-                                        .child(ch.to_string()),
-                                )
-                                .child(div().relative().child(ch.to_string()))
-                        })),
-                )
-            })
             .child(sidebar.relative())
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .h(px(28.))
-                            .flex_shrink_0()
-                            .window_control_area(gpui::WindowControlArea::Drag),
-                    )
-                    .child(
-                        div()
-                            .id("connection-content")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .px_6()
-                            .pb_6()
-                            .child(
-                                div()
-                                    .w_full()
-                                    .max_w(px(480.))
-                                    .mx_auto()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_3()
-                                    .when(self.page == Page::Recent && !self.busy, |v| {
-                                        v.pt(px(240.))
-                                    })
-                                    .child(body),
-                            ),
-                    ),
+                    .overflow_hidden()
+                    .when_some(self.transition, |v, transition| {
+                        let direction = if self.page == Page::Recent { -1. } else { 1. };
+                        v.child(self.page_layer(
+                            transition.from,
+                            -direction * 36. * progress,
+                            1. - progress,
+                            cx,
+                        ))
+                    })
+                    .child(self.page_layer(
+                        self.page,
+                        if self.transition.is_some() {
+                            let direction = if self.page == Page::Recent { -1. } else { 1. };
+                            direction * 36. * (1. - progress)
+                        } else {
+                            0.
+                        },
+                        progress,
+                        cx,
+                    ))
+                    .when(self.transition.is_some(), |v| {
+                        v.child(div().absolute().inset_0().occlude())
+                    }),
             )
             .into_any_element()
     }
