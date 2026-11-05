@@ -21,6 +21,8 @@ use crate::icon::IconAssets;
 #[include = "jetbrains-mono/JetBrainsMono-Bold.ttf"]
 #[include = "jetbrains-mono/JetBrainsMono-BoldItalic.ttf"]
 #[include = "jetbrains-mono/OFL.txt"]
+#[include = "geist-pixel/GeistPixel-Square.ttf"]
+#[include = "geist-pixel/OFL.txt"]
 struct FontAssets;
 
 pub struct Assets;
@@ -53,7 +55,7 @@ pub fn register_fonts(cx: &App) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
     anyhow::ensure!(
-        fonts.len() == 8,
+        fonts.len() == 9,
         "missing fonts; run `just fetch-assets` and rebuild"
     );
     cx.text_system().add_fonts(fonts)
@@ -83,6 +85,7 @@ mod tests {
         for path in [
             "icons/phosphor/LICENSE",
             "fonts/inter/LICENSE.txt",
+            "fonts/geist-pixel/OFL.txt",
             "fonts/jetbrains-mono/OFL.txt",
         ] {
             assert!(!Assets.load(path).unwrap().unwrap().is_empty());
@@ -97,7 +100,7 @@ mod tests {
             .into_iter()
             .filter(|path| path.ends_with(".ttf"))
             .collect();
-        assert_eq!(fonts.len(), 8);
+        assert_eq!(fonts.len(), 9);
         for path in fonts {
             let bytes = Assets.load(&path).unwrap().unwrap();
             assert!(matches!(bytes, Cow::Borrowed(_)));

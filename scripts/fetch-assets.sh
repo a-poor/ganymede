@@ -5,6 +5,7 @@ set -euo pipefail
 inter_version=4.1
 jetbrains_version=2.304
 phosphor_version=2.0.8
+geist_version=1.7.0
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 assets="$repo_root/ganymede-gui/assets"
@@ -37,4 +38,7 @@ phosphor_additions_revision=2b75f3ad12b420c9504ef05df8d2564a28f8500e
 for icon in rows-plus-top rows-plus-bottom; do
     download "https://raw.githubusercontent.com/phosphor-icons/core/$phosphor_additions_revision/assets/regular/$icon.svg" "$assets/icons/phosphor/regular/$icon.svg"
 done
+mkdir -p "$assets/fonts/geist-pixel"
+download "https://raw.githubusercontent.com/vercel/geist-font/geist%40$geist_version/fonts/GeistPixel/ttf/GeistPixel-Square.ttf" "$assets/fonts/geist-pixel/GeistPixel-Square.ttf"
+download "https://raw.githubusercontent.com/vercel/geist-font/geist%40$geist_version/OFL.txt" "$assets/fonts/geist-pixel/OFL.txt"
 echo "Assets ready in $assets"

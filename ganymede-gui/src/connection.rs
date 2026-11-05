@@ -1480,6 +1480,34 @@ impl Render for ConnectionWindow {
                     .bottom_0()
                     .child(planet),
             )
+            .when(self.page == Page::Recent && !self.busy, |v| {
+                v.child(
+                    div()
+                        .absolute()
+                        .left(px(228.))
+                        .right_0()
+                        .top(px(48.))
+                        .flex()
+                        .justify_center()
+                        .font_family(t.font.brand.clone())
+                        .text_size(t.font.brand_size)
+                        .text_color(t.launcher_art_fg)
+                        .children("Ganymede".chars().enumerate().map(|(i, ch)| {
+                            div()
+                                .relative()
+                                .when(i < 7, |v| v.mr(t.font.brand_tracking))
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(2.))
+                                        .top(px(3.))
+                                        .text_color(t.launcher_art_bg)
+                                        .child(ch.to_string()),
+                                )
+                                .child(div().relative().child(ch.to_string()))
+                        })),
+                )
+            })
             .child(sidebar.relative())
             .child(
                 div()

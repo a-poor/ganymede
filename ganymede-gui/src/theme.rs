@@ -201,6 +201,9 @@ impl Radii {
 pub struct FontTokens {
     pub sans: SharedString,
     pub mono: SharedString,
+    pub brand: SharedString,
+    pub brand_size: Pixels,
+    pub brand_tracking: Pixels,
     pub code: Pixels,
     pub xs: Pixels,
     pub sm: Pixels,
@@ -217,6 +220,9 @@ impl Default for FontTokens {
             // Registered from the embedded asset bundle during startup.
             sans: "Inter".into(),
             mono: "JetBrains Mono".into(),
+            brand: "Geist Pixel".into(),
+            brand_size: px(84.),
+            brand_tracking: px(-2.52),
             code: px(12.),
             xs: px(11.),
             sm: px(13.),
