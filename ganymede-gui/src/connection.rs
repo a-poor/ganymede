@@ -1,5 +1,6 @@
 //! One connection picker / workspace per native window.
 mod credentials;
+mod planet;
 pub(crate) mod server;
 pub(crate) mod ssh;
 use crate::{
@@ -267,6 +268,7 @@ enum Page {
 }
 struct ConnectionWindow {
     workspace: Option<Entity<crate::Ganymede>>,
+    planet: Option<Entity<planet::Planet>>,
     page: Page,
     address: Entity<Field>,
     token: Entity<Field>,
@@ -280,6 +282,7 @@ struct ConnectionWindow {
     environment: server::Environment,
     environment_open: bool,
     environment_index: usize,
+    environment_keyboard: bool,
     environment_focus: gpui::FocusHandle,
     folder: Entity<Field>,
     busy: bool,
@@ -325,6 +328,7 @@ impl ConnectionWindow {
         focus.focus(window, cx);
         Self {
             workspace: None,
+            planet: None,
             page: Page::Recent,
             address,
             token,
@@ -338,6 +342,7 @@ impl ConnectionWindow {
             environment: server::Environment::Global,
             environment_open: false,
             environment_index: 0,
+            environment_keyboard: false,
             environment_focus: cx.focus_handle(),
             folder,
             busy: false,
@@ -966,14 +971,15 @@ impl ConnectionWindow {
                     .items_center()
                     .gap_2()
                     .rounded(t.radius.lg())
-                    .bg(t.launcher_sidebar.bg)
-                    .text_color(t.launcher_sidebar.fg)
+                    .bg(t.card.bg)
+                    .text_color(t.card.fg)
                     .border_1()
                     .border_color(t.app.border)
                     .cursor_pointer()
                     .hover(|s| s.bg(t.app.accent).text_color(t.app.accent_fg))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.environment_open = !this.environment_open;
+                        this.environment_keyboard = false;
                         this.environment_index = server::Environment::ALL
                             .iter()
                             .position(|m| *m == this.environment)
@@ -982,6 +988,7 @@ impl ConnectionWindow {
                         cx.notify();
                     }))
                     .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, window, cx| {
+                        this.environment_keyboard = true;
                         match e.keystroke.key.as_str() {
                             "enter" | "space" if this.environment_open => {
                                 this.choose_environment(this.environment_index, window, cx)
@@ -1019,6 +1026,12 @@ impl ConnectionWindow {
                         .child(
                             div()
                                 .id("environment-menu")
+                                .on_mouse_move(cx.listener(|this, _, _, cx| {
+                                    if this.environment_keyboard {
+                                        this.environment_keyboard = false;
+                                        cx.notify();
+                                    }
+                                }))
                                 .w(px(220.))
                                 .p_1()
                                 .rounded(t.radius.lg())
@@ -1043,12 +1056,26 @@ impl ConnectionWindow {
                                             .py_1()
                                             .rounded(t.radius.md())
                                             .cursor_pointer()
-                                            .when(self.environment_index == i, |v| {
-                                                v.bg(t.active_file_bg).text_color(t.active_file_fg)
-                                            })
-                                            .hover(|s| {
-                                                s.bg(t.active_file_bg).text_color(t.active_file_fg)
-                                            })
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .when(
+                                                self.environment_keyboard
+                                                    && self.environment_index == i,
+                                                |v| v.bg(t.launcher_option_hover_bg),
+                                            )
+                                            .hover(|s| s.bg(t.launcher_option_hover_bg))
+                                            .child(div().size(px(12.)).flex_shrink_0().when(
+                                                self.environment == mode,
+                                                |v| {
+                                                    v.child(
+                                                        crate::icon::Icon::Check
+                                                            .svg()
+                                                            .size(px(12.))
+                                                            .text_color(t.popover.fg),
+                                                    )
+                                                },
+                                            ))
                                             .child(mode.label())
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 this.choose_environment(i, window, cx)
@@ -1061,14 +1088,19 @@ impl ConnectionWindow {
     }
 }
 impl Render for ConnectionWindow {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(workspace) = &self.workspace {
+            self.planet = None;
             return div()
                 .size_full()
                 .track_focus(&self.focus)
                 .child(workspace.clone())
                 .into_any_element();
         }
+        let planet = self
+            .planet
+            .get_or_insert_with(|| cx.new(|cx| planet::Planet::new(window, cx)))
+            .clone();
         let t = cx.theme();
         let surface = t.launcher_sidebar;
         let background = if t.is_dark { t.app } else { t.card };
@@ -1412,9 +1444,11 @@ impl Render for ConnectionWindow {
         div()
             .size_full()
             .p_2()
+            .relative()
+            .overflow_hidden()
             .track_focus(&self.focus)
             .flex()
-            .bg(background.bg)
+            .bg(t.launcher_art_bg)
             .text_color(background.fg)
             .font_family(t.font.sans.clone())
             .text_size(t.font.sm)
@@ -1437,7 +1471,16 @@ impl Render for ConnectionWindow {
                     cx.stop_propagation();
                 }
             }))
-            .child(sidebar)
+            .child(
+                div()
+                    .absolute()
+                    .left(px(228.))
+                    .right_0()
+                    .top_0()
+                    .bottom_0()
+                    .child(planet),
+            )
+            .child(sidebar.relative())
             .child(
                 div()
                     .flex_1()
@@ -1467,20 +1510,9 @@ impl Render for ConnectionWindow {
                                     .flex()
                                     .flex_col()
                                     .gap_3()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .items_center()
-                                            .gap_2()
-                                            .py_1()
-                                            .child(
-                                                div()
-                                                    .text_size(t.font.xl)
-                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                    .child("Ganymede"),
-                                            ),
-                                    )
+                                    .when(self.page == Page::Recent && !self.busy, |v| {
+                                        v.pt(px(240.))
+                                    })
                                     .child(body),
                             ),
                     ),

@@ -286,8 +286,11 @@ pub struct Theme {
     pub dialog_destructive_fg: Hsla,
     pub dialog_destructive_hover: Hsla,
     pub dialog_destructive_active: Hsla,
+    pub launcher_art_bg: Hsla,
+    pub launcher_art_fg: Hsla,
     pub launcher_sidebar: Surface,
     pub launcher_recent_hover_bg: Hsla,
+    pub launcher_option_hover_bg: Hsla,
     pub launcher_border: Hsla,
     pub launcher_shadow: BoxShadow,
     pub body_shadow: BoxShadow,
@@ -491,6 +494,17 @@ impl ThemeSpec {
             chart: self.chart,
             toast_shadow: BoxShadow::new(px(0.), px(4.), alpha(gpui::black(), 0.10))
                 .blur_radius(px(14.)),
+            // Preserve PlanetRise at night; reverse its ink/paper relationship in light mode.
+            launcher_art_bg: if self.is_dark {
+                gpui::rgb(0x07080a).into()
+            } else {
+                app.bg
+            },
+            launcher_art_fg: if self.is_dark {
+                gpui::rgb(0xe6e1d6).into()
+            } else {
+                app.fg
+            },
             launcher_sidebar: if self.is_dark {
                 card
             } else {
@@ -499,6 +513,9 @@ impl ThemeSpec {
                     ..sidebar
                 }
             },
+            launcher_option_hover_bg: popover
+                .bg
+                .blend(alpha(self.primary, if self.is_dark { 0.18 } else { 0.08 })),
             launcher_recent_hover_bg: {
                 if self.is_dark {
                     card.bg.blend(alpha(card.fg, 0.035))

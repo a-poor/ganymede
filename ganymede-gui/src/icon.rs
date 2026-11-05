@@ -53,6 +53,7 @@ define_icons! {
     RunAll => "regular/fast-forward.svg",
 
     Info => "regular/info.svg",
+    Check => "regular/check.svg",
     CheckCircle => "regular/check-circle.svg",
     WarningCircle => "regular/warning-circle.svg",
     SpinnerGap => "regular/spinner-gap.svg",
