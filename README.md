@@ -1,6 +1,7 @@
 # Ganymede
 
 [![CI](https://github.com/a-poor/ganymede/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/a-poor/ganymede/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/a-poor/ganymede)](https://github.com/a-poor/ganymede/releases/latest)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
 A native Jupyter client (currently just) for macOS, written in Rust with GPUI.
