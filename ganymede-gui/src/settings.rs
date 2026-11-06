@@ -8,10 +8,69 @@ use crate::{
     theme::{self, ActiveTheme, AppearancePreference, Theme},
 };
 
-pub struct Settings;
+pub struct Settings {
+    dropdown: Option<Setting>,
+    selected: usize,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Setting {
+    Indentation,
+    FontSize,
+    LineNumbers,
+    Console,
+}
+impl Setting {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Indentation => "Indentation",
+            Self::FontSize => "Code font size",
+            Self::LineNumbers => "Line numbers",
+            Self::Console => "Console run shortcut",
+        }
+    }
+    fn choices(self) -> &'static [&'static str] {
+        match self {
+            Self::Indentation => &["2 spaces", "4 spaces", "8 spaces"],
+            Self::FontSize => &["10", "12", "14", "16", "18", "20", "24"],
+            Self::LineNumbers => &["Off", "On"],
+            Self::Console => &["Enter", "Shift+Enter"],
+        }
+    }
+    fn index(self, cx: &App) -> usize {
+        let p = crate::preferences::editor(cx);
+        match self {
+            Self::Indentation => match p.indentation {
+                crate::preferences::Indentation::Two => 0,
+                crate::preferences::Indentation::Four => 1,
+                crate::preferences::Indentation::Eight => 2,
+            },
+            Self::FontSize => [10, 12, 14, 16, 18, 20, 24]
+                .iter()
+                .position(|v| *v == p.font_size)
+                .unwrap_or(2),
+            Self::LineNumbers => usize::from(p.line_numbers),
+            Self::Console => usize::from(!p.console_enter),
+        }
+    }
+    fn apply(self, index: usize, cx: &mut App) {
+        cx.update_global::<crate::preferences::EditorPreferences, _>(|p, _| match self {
+            Self::Indentation => {
+                p.indentation = [
+                    crate::preferences::Indentation::Two,
+                    crate::preferences::Indentation::Four,
+                    crate::preferences::Indentation::Eight,
+                ][index]
+            }
+            Self::FontSize => p.font_size = [10, 12, 14, 16, 18, 20, 24][index],
+            Self::LineNumbers => p.line_numbers = index == 1,
+            Self::Console => p.console_enter = index == 0,
+        });
+        crate::preferences::save(cx);
+    }
+}
 
 pub fn open(cx: &mut App) -> anyhow::Result<WindowHandle<Settings>> {
-    let bounds = Bounds::centered(None, size(px(520.), px(240.)), cx);
+    let bounds = Bounds::centered(None, size(px(520.), px(420.)), cx);
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -36,13 +95,168 @@ pub fn open(cx: &mut App) -> anyhow::Result<WindowHandle<Settings>> {
                     .detach();
                 cx.observe_global::<crate::preferences::Persistence>(|_, cx| cx.notify())
                     .detach();
-                Settings
+                cx.observe_global::<crate::preferences::EditorPreferences>(|_, cx| cx.notify())
+                    .detach();
+                Settings {
+                    dropdown: None,
+                    selected: 0,
+                }
             })
         },
     )
 }
 
 impl Settings {
+    fn setting_row(&self, setting: Setting, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.theme();
+        let open = self.dropdown == Some(setting);
+        let active = setting.index(cx);
+        div()
+            .p_3()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(setting.label())
+            .child(
+                div()
+                    .id(setting.label())
+                    .relative()
+                    .child(
+                        div()
+                            .id("setting-selector")
+                            .aria_label(setting.label())
+                            .tab_index(0)
+                            .w(px(148.))
+                            .h(px(28.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .rounded(t.radius.md())
+                            .border_1()
+                            .border_color(t.input)
+                            .bg(t.card.bg)
+                            .text_color(t.card.fg)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(t.card.accent).text_color(t.card.accent_fg))
+                            .focus_visible(|s| s.border_color(t.card.ring))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.dropdown = if open { None } else { Some(setting) };
+                                this.selected = active;
+                                cx.notify();
+                            }))
+                            .on_key_down(cx.listener(move |this, e: &gpui::KeyDownEvent, _, cx| {
+                                let count = setting.choices().len();
+                                match e.keystroke.key.as_str() {
+                                    "escape" | "tab" => this.dropdown = None,
+                                    "up" | "down" => {
+                                        if this.dropdown != Some(setting) {
+                                            this.dropdown = Some(setting);
+                                            this.selected = active;
+                                        } else {
+                                            this.selected = (this.selected
+                                                + if e.keystroke.key == "up" {
+                                                    count - 1
+                                                } else {
+                                                    1
+                                                })
+                                                % count;
+                                        }
+                                    }
+                                    "enter" | "space" => {
+                                        if this.dropdown == Some(setting) {
+                                            setting.apply(this.selected, cx);
+                                            this.dropdown = None;
+                                        } else {
+                                            this.dropdown = Some(setting);
+                                            this.selected = active;
+                                        }
+                                    }
+                                    _ => return,
+                                }
+                                if e.keystroke.key != "tab" {
+                                    cx.stop_propagation();
+                                }
+                                cx.notify();
+                            }))
+                            .child(setting.choices()[active])
+                            .child(
+                                Icon::CaretDown
+                                    .svg()
+                                    .size(px(12.))
+                                    .text_color(t.card.muted_fg),
+                            ),
+                    )
+                    .when(open, |view| {
+                        view.child(gpui::deferred(
+                            gpui::anchored().snap_to_window_with_margin(px(8.)).child(
+                                div()
+                                    .id("setting-options")
+                                    .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
+                                        if this.dropdown == Some(setting) {
+                                            this.dropdown = None;
+                                            cx.notify();
+                                        }
+                                    }))
+                                    .occlude()
+                                    .w(px(148.))
+                                    .p_1()
+                                    .flex()
+                                    .flex_col()
+                                    .rounded(t.radius.md())
+                                    .bg(t.popover.bg)
+                                    .text_color(t.popover.fg)
+                                    .border_1()
+                                    .border_color(t.popover.border)
+                                    .shadow(vec![t.toast_shadow.clone()])
+                                    .children(setting.choices().iter().enumerate().map(
+                                        |(index, label)| {
+                                            div()
+                                                .id(index)
+                                                .h(px(28.))
+                                                .px_2()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .rounded(t.radius.sm())
+                                                .cursor_pointer()
+                                                .when(self.selected == index, |s| {
+                                                    s.bg(t.popover.accent)
+                                                        .text_color(t.popover.accent_fg)
+                                                })
+                                                .on_hover(cx.listener(
+                                                    move |this, hovered, _, cx| {
+                                                        if *hovered {
+                                                            this.selected = index;
+                                                            cx.notify();
+                                                        }
+                                                    },
+                                                ))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    setting.apply(index, cx);
+                                                    this.dropdown = None;
+                                                    cx.notify();
+                                                }))
+                                                .child(div().w(px(12.)).when(
+                                                    active == index,
+                                                    |s| {
+                                                        s.child(
+                                                            Icon::Check
+                                                                .svg()
+                                                                .size(px(12.))
+                                                                .text_color(t.popover.fg),
+                                                        )
+                                                    },
+                                                ))
+                                                .child(*label)
+                                        },
+                                    )),
+                            ),
+                        ))
+                    }),
+            )
+    }
     fn autosave_toggle(&self, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.theme();
         let enabled = cx.global::<crate::autosave::AutosavePreference>().0;
@@ -252,7 +466,40 @@ impl Render for Settings {
                                         ),
                                     )
                                     .child(self.autosave_toggle(cx)),
-                            ),
+                            )
+                            .children(
+                                [
+                                    Setting::LineNumbers,
+                                    Setting::Indentation,
+                                    Setting::FontSize,
+                                ]
+                                .into_iter()
+                                .map(|setting| {
+                                    div()
+                                        .child(div().mx_3().h(px(1.)).bg(t.card.border))
+                                        .child(self.setting_row(setting, cx))
+                                }),
+                            )
+                            .when(crate::features::UNFINISHED, |view| {
+                                view.child(div().mx_3().h(px(1.)).bg(t.card.border))
+                                    .child(self.setting_row(Setting::Console, cx))
+                                    .child(
+                                        div()
+                                            .px_3()
+                                            .pb_2()
+                                            .text_size(t.font.xs)
+                                            .text_color(t.card.muted_fg)
+                                            .child("Auto close brackets — not available yet"),
+                                    )
+                                    .child(
+                                        div()
+                                            .px_3()
+                                            .pb_3()
+                                            .text_size(t.font.xs)
+                                            .text_color(t.card.muted_fg)
+                                            .child("Console support is in development."),
+                                    )
+                            }),
                     ),
             )
             .when_some(

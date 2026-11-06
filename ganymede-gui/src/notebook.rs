@@ -1,4 +1,5 @@
 //! Server-backed notebook editor.
+pub(crate) mod commands;
 mod history;
 mod kernel;
 mod list_row;

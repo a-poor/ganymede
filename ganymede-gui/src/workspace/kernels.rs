@@ -72,7 +72,12 @@ impl Workspace {
             );
         });
     }
-    fn confirm_kernel_shutdown(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn confirm_kernel_shutdown(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.kernels.shutting_down.contains(&id) || window.has_active_prompt() {
             return;
         }
@@ -186,7 +191,7 @@ impl Workspace {
         .detach();
         cx.notify();
     }
-    fn kernel_toolbar(
+    pub(super) fn kernel_toolbar(
         &mut self,
         action: KernelAction,
         window: &mut Window,
@@ -586,7 +591,7 @@ impl Workspace {
 }
 
 #[derive(Clone, Copy)]
-enum KernelAction {
+pub(super) enum KernelAction {
     Unused,
     Collapse,
     ToggleView,

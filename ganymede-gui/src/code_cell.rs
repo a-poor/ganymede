@@ -103,7 +103,7 @@ struct Buffer {
 }
 
 impl Buffer {
-    fn indented(&self, outdent: bool) -> Self {
+    fn indented(&self, outdent: bool, indentation: &str) -> Self {
         let mut result = self.clone();
         let selection = self.selection();
         let first = self.text[..selection.start]
@@ -117,7 +117,10 @@ impl Buffer {
                 if line.starts_with('\t') {
                     1
                 } else {
-                    line.bytes().take(4).take_while(|b| *b == b' ').count()
+                    line.bytes()
+                        .take(indentation.len())
+                        .take_while(|b| *b == b' ')
+                        .count()
                 }
             } else {
                 0
@@ -133,7 +136,7 @@ impl Buffer {
             start = next;
         }
         for (start, remove) in edits.into_iter().rev() {
-            let insert = if outdent { "" } else { "    " };
+            let insert = if outdent { "" } else { indentation };
             result.text.replace_range(start..start + remove, insert);
             for position in [&mut result.anchor, &mut result.head] {
                 if *position >= start {
@@ -287,6 +290,8 @@ impl CodeCell {
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        cx.observe_global::<crate::preferences::EditorPreferences>(|_, cx| cx.notify())
+            .detach();
         let focus = cx.focus_handle();
         let cell_focus = cx.focus_handle();
         let subscriptions = vec![
@@ -725,7 +730,9 @@ impl CodeCell {
 
     fn indent(&mut self, outdent: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_composition();
-        let next = self.buffer.indented(outdent);
+        let next = self
+            .buffer
+            .indented(outdent, crate::preferences::editor(cx).indentation.text());
         if next == self.buffer {
             return;
         }
@@ -752,7 +759,7 @@ impl CodeCell {
         let font_size = if self.filter_input {
             theme.font.xs
         } else {
-            theme.font.code
+            px(crate::preferences::editor(cx).font_size as f32)
         };
         let run = TextRun {
             len: line.len(),
@@ -897,7 +904,7 @@ impl CodeCell {
                 &text
                     .replace("\r\n", "\n")
                     .replace('\r', "\n")
-                    .replace('\t', "    "),
+                    .replace('\t', crate::preferences::editor(cx).indentation.text()),
                 window,
                 cx,
             );
@@ -1074,7 +1081,12 @@ impl Render for CodeCell {
                 width.max(
                     window
                         .text_system()
-                        .shape_line(text.into(), theme.font.code, &[run], None)
+                        .shape_line(
+                            text.into(),
+                            px(crate::preferences::editor(cx).font_size as f32),
+                            &[run],
+                            None,
+                        )
                         .width
                         + px(1.),
                 )
@@ -1098,8 +1110,13 @@ impl Render for CodeCell {
             .rounded(theme.radius.md())
             .focus(|style| style.border_color(surface.ring))
             .font_family(theme.font.mono.clone())
-            .text_size(theme.font.code)
-            .line_height(theme.font.line_height_tight)
+            .text_size(px(crate::preferences::editor(cx).font_size as f32))
+            .line_height(
+                theme
+                    .font
+                    .line_height_tight
+                    .max(px(crate::preferences::editor(cx).font_size as f32 * 1.5)),
+            )
             .p_3()
             .pr(px(44.))
             .on_action(cx.listener(|this, _: &Left, w, cx| {
@@ -1151,7 +1168,10 @@ impl Render for CodeCell {
                         && !prefix.is_empty()
                         && prefix.bytes().all(|b| b == b' ')
                     {
-                        this.buffer.head - ((prefix.len() - 1) % 4 + 1)
+                        this.buffer.head
+                            - ((prefix.len() - 1)
+                                % crate::preferences::editor(cx).indentation.width()
+                                + 1)
                     } else {
                         this.buffer.previous()
                     };
@@ -1184,16 +1204,22 @@ impl Render for CodeCell {
                     w.focus_next(cx);
                 } else {
                     if this.buffer.selection().is_empty() {
+                        let width = crate::preferences::editor(cx).indentation.width();
                         let column = this.buffer.text[this.buffer.line_start()..this.buffer.head]
                             .chars()
                             .fold(0, |col, ch| {
                                 if ch == '\t' {
-                                    col + 4 - col % 4
+                                    col + width - col % width
                                 } else {
                                     col + 1
                                 }
                             });
-                        this.replace_text_in_range(None, &" ".repeat(4 - column % 4), w, cx);
+                        this.replace_text_in_range(
+                            None,
+                            &" ".repeat(width - column % width),
+                            w,
+                            cx,
+                        );
                     } else {
                         this.indent(false, w, cx);
                     }
@@ -1276,6 +1302,7 @@ impl Render for CodeCell {
                         .pr_2()
                         .font_family(theme.font.sans.clone())
                         .text_size(theme.font.xs)
+                        .line_height(theme.font.line_height_tight)
                         .when(self.search_input, |view| {
                             view.border_0()
                                 .bg(theme.popover.bg)
@@ -1294,7 +1321,11 @@ impl Render for CodeCell {
                                 .top(px(if self.search_input { 4. } else { 5. }))
                                 .font_family(theme.font.sans.clone())
                                 .text_size(theme.font.xs)
-                                .line_height(theme.font.line_height_tight)
+                                .line_height(
+                                    theme.font.line_height_tight.max(px(
+                                        crate::preferences::editor(cx).font_size as f32 * 1.5,
+                                    )),
+                                )
                                 .text_color(surface.muted_fg)
                                 .child(if self.search_input {
                                     "Find in cell source…"
@@ -1476,8 +1507,13 @@ impl Render for CodeCell {
                     // Align with the editor's first line, including its border.
                     .pt(px(13.))
                     .font_family(theme.font.mono.clone())
-                    .text_size(theme.font.code)
-                    .line_height(theme.font.line_height_tight)
+                    .text_size(px(crate::preferences::editor(cx).font_size as f32))
+                    .line_height(
+                        theme
+                            .font
+                            .line_height_tight
+                            .max(px(crate::preferences::editor(cx).font_size as f32 * 1.5)),
+                    )
                     .text_color(if self.current {
                         surface.primary
                     } else {
@@ -1576,8 +1612,10 @@ impl Render for CodeCell {
                                     .flex()
                                     .items_start()
                                     .font_family(theme.font.mono.clone())
-                                    .text_size(theme.font.code)
-                                    .line_height(theme.font.line_height_tight)
+                                    .text_size(px(crate::preferences::editor(cx).font_size as f32))
+                                    .line_height(theme.font.line_height_tight.max(px(
+                                        crate::preferences::editor(cx).font_size as f32 * 1.5,
+                                    )))
                                     .child(
                                         div()
                                             .w(gutter_width)
@@ -1646,6 +1684,7 @@ struct LayoutKey {
     width: Option<Pixels>,
     marked: Option<Range<usize>>,
     syntax: Option<[gpui::Hsla; 8]>,
+    gutter: Pixels,
 }
 
 #[derive(Default)]
@@ -1685,10 +1724,12 @@ struct CellText {
 struct Layout {
     lines: Rc<Vec<ShapedLine>>,
     starts: Rc<Vec<usize>>,
+    numbers: Vec<Option<usize>>,
     size: gpui::Size<Pixels>,
     line_height: Pixels,
     cap_height: Pixels,
     empty_baseline: Pixels,
+    gutter: Pixels,
 }
 struct Prepaint {
     visible: Range<usize>,
@@ -1748,7 +1789,14 @@ impl Element for CellText {
             .filter(|(key, _)| key.source.as_ref() == cell.buffer.text)
             .map(|(key, _)| key.source.clone())
             .unwrap_or_else(|| Rc::from(cell.buffer.text.as_str()));
+        let gutter = if !cell.filter_input && crate::preferences::editor(cx).line_numbers {
+            let digits = cell.buffer.text.split('\n').count().to_string().len();
+            caret_metrics.width * digits as f32 + px(12.)
+        } else {
+            px(0.)
+        };
         let key = LayoutKey {
+            gutter,
             source: text.clone(),
             style: style.clone(),
             font_size,
@@ -1762,10 +1810,12 @@ impl Element for CellText {
         let state = Rc::new(RefCell::new(Rc::new(Layout {
             lines: Rc::default(),
             starts: Rc::default(),
+            numbers: vec![],
             size: size(px(0.), px(0.)),
             line_height,
             cap_height,
             empty_baseline,
+            gutter,
         })));
         let measured = state.clone();
         let mut layout_style = Style::default();
@@ -1788,9 +1838,10 @@ impl Element for CellText {
                     return size;
                 }
                 let mut starts = vec![];
+                let mut numbers = vec![];
                 let mut start = 0;
                 let mut lines = vec![];
-                for logical in text.split('\n') {
+                for (logical_index, logical) in text.split('\n').enumerate() {
                     let mut ends = vec![];
                     if let Some(width) = wrap_width {
                         let mut wrapper =
@@ -1799,7 +1850,7 @@ impl Element for CellText {
                             wrapper
                                 .wrap_line(
                                     &[gpui::LineFragment::text(logical)],
-                                    (width - px(4.)).max(px(1.)),
+                                    (width - gutter - px(4.)).max(px(1.)),
                                 )
                                 .map(|boundary| boundary.ix),
                         );
@@ -1809,6 +1860,7 @@ impl Element for CellText {
                     for end in ends {
                         let text = &logical[previous..end];
                         starts.push(start);
+                        numbers.push((previous == 0).then_some(logical_index + 1));
                         let base = TextRun {
                             len: text.len(),
                             font: style.font(),
@@ -1847,16 +1899,18 @@ impl Element for CellText {
                     start += 1;
                 }
                 let width = wrap_width.unwrap_or_else(|| {
-                    lines.iter().map(|l| l.width).fold(px(0.), Pixels::max) + px(4.)
+                    lines.iter().map(|l| l.width).fold(px(0.), Pixels::max) + gutter + px(4.)
                 });
                 let height = line_height * lines.len().max(1) as f32;
                 let layout = Rc::new(Layout {
                     lines: Rc::new(lines),
                     starts: Rc::new(starts),
+                    numbers,
                     size: size(width, height),
                     line_height,
                     cap_height,
                     empty_baseline,
+                    gutter,
                 });
                 layouts.borrow_mut().insert(key, layout.clone());
                 *measured.borrow_mut() = layout;
@@ -1874,6 +1928,10 @@ impl Element for CellText {
         cx: &mut App,
     ) -> Prepaint {
         let layout = state.borrow();
+        let bounds = Bounds::new(
+            point(bounds.left() + layout.gutter, bounds.top()),
+            size(bounds.size.width - layout.gutter, bounds.size.height),
+        );
         let cell = self.cell.read(cx);
         let selected = cell.buffer.selection();
         let theme = cx.theme();
@@ -1991,6 +2049,38 @@ impl Element for CellText {
         cx: &mut App,
     ) {
         let layout = state.borrow();
+        if layout.gutter > px(0.) {
+            let style = window.text_style();
+            let font_size = style.font_size.to_pixels(window.rem_size());
+            for row in prepaint.visible.clone() {
+                let Some(number) = layout.numbers[row] else {
+                    continue;
+                };
+                let text = number.to_string();
+                let mut run = style.to_run(text.len());
+                run.color = cx.theme().app.muted_fg;
+                let number = window
+                    .text_system()
+                    .shape_line(text.into(), font_size, &[run], None);
+                number
+                    .paint(
+                        point(
+                            bounds.left() + layout.gutter - px(12.) - number.width,
+                            bounds.top() + layout.line_height * row as f32,
+                        ),
+                        layout.line_height,
+                        gpui::TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    )
+                    .expect("paint line number");
+            }
+        }
+        let bounds = Bounds::new(
+            point(bounds.left() + layout.gutter, bounds.top()),
+            size(bounds.size.width - layout.gutter, bounds.size.height),
+        );
         let focus = self.cell.read(cx).focus.clone();
         window.handle_input(
             &focus,
@@ -2141,9 +2231,28 @@ mod tests {
     }
 
     #[test]
+    fn indentation_uses_selected_width_without_changing_source_characters() {
+        for indentation in ["  ", "    ", "        "] {
+            let text = "α = 1\nβ = 2".to_owned();
+            let buffer = Buffer {
+                anchor: 0,
+                head: text.len(),
+                text,
+            };
+            let result = buffer.indented(false, indentation);
+            assert_eq!(
+                result.text,
+                format!("{indentation}α = 1\n{indentation}β = 2")
+            );
+            assert_eq!(result.indented(true, indentation), buffer);
+        }
+    }
+
+    #[test]
     fn scroll_layout_cache_reuses_geometry_and_invalidates_visual_inputs() {
         let key = LayoutKey {
             source: Rc::from("print('hello')"),
+            gutter: px(0.),
             style: gpui::TextStyle::default(),
             font_size: px(14.),
             line_height: px(20.),
@@ -2154,10 +2263,12 @@ mod tests {
         let layout = Rc::new(Layout {
             lines: Rc::default(),
             starts: Rc::default(),
+            numbers: vec![],
             size: size(px(500.), px(20.)),
             line_height: px(20.),
             cap_height: px(10.),
             empty_baseline: px(15.),
+            gutter: px(0.),
         });
         let mut cache = TextLayouts::default();
         cache.insert(key.clone(), layout.clone());
@@ -2220,10 +2331,10 @@ mod tests {
             anchor: buffer.text.find("last").unwrap(),
             ..buffer
         };
-        let indented = buffer.indented(false);
+        let indented = buffer.indented(false, "    ");
         assert_eq!(indented.text, "    é = 1\n    print(é)\nlast");
         assert!(indented.anchor > indented.head);
-        assert_eq!(indented.indented(true), buffer);
+        assert_eq!(indented.indented(true, "    "), buffer);
     }
 
     #[test]
@@ -2237,11 +2348,11 @@ mod tests {
             head: buffer.text.len(),
             ..buffer
         };
-        let result = buffer.indented(true);
+        let result = buffer.indented(true, "    ");
         assert_eq!(result.text, "x\ny\nz");
         assert_eq!(result.head, result.text.len());
         assert_eq!(result.anchor, 0);
-        assert_eq!(result.indented(true), result);
+        assert_eq!(result.indented(true, "    "), result);
     }
 
     #[test]

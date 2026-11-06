@@ -1,4 +1,5 @@
 //! Server file browser, notebook tabs, and launcher.
+pub(crate) mod commands;
 mod file_management;
 mod kernels;
 mod persistence;
@@ -221,6 +222,7 @@ enum FileAction {
     Menu,
     Upload,
     Refresh,
+    RevealActive,
 }
 
 pub struct Workspace {
@@ -236,6 +238,8 @@ pub struct Workspace {
     header_tabs: Vec<HeaderTab>,
     reveal_tab: Option<u64>,
     tab_scroll: ScrollHandle,
+    file_scroll: ScrollHandle,
+    reveal_file: Option<String>,
     next_id: u64,
     directories: HashMap<String, Vec<Contents>>,
     expanded: HashSet<String>,
@@ -300,6 +304,8 @@ impl Workspace {
             header_tabs: Vec::new(),
             reveal_tab: None,
             tab_scroll: ScrollHandle::new(),
+            file_scroll: ScrollHandle::new(),
+            reveal_file: None,
             next_id: 0,
             directories: HashMap::new(),
             expanded: HashSet::new(),
@@ -598,6 +604,14 @@ impl Workspace {
                     Err(_) => this.file_error = Some("Could not list files".into()),
                 }
                 this.scan_filter_folders(cx);
+                if let Some(path) = this.reveal_file.as_ref() {
+                    let mut rows = vec![];
+                    this.tree_rows("", 0, &mut rows);
+                    if let Some(index) = rows.iter().position(|(entry, _)| &entry.path == path) {
+                        this.file_scroll.scroll_to_item(index);
+                        this.reveal_file = None;
+                    }
+                }
                 cx.notify();
             })
             .ok();
@@ -1242,6 +1256,26 @@ impl Workspace {
     }
     fn file_action(&mut self, action: FileAction, window: &mut Window, cx: &mut Context<Self>) {
         match action {
+            FileAction::RevealActive => {
+                self.files_menu_open = false;
+                if let Some(path) = self.active_path() {
+                    self.close_filter(window, cx);
+                    self.file_selection.single(&path);
+                    self.reveal_file = Some(path.clone());
+                    let mut parent = ganymede_core::files::parent(&path).to_owned();
+                    while !parent.is_empty() {
+                        self.expanded.insert(parent.clone());
+                        self.refresh_directory(parent.clone(), cx);
+                        parent = ganymede_core::files::parent(&parent).to_owned();
+                    }
+                    let mut rows = vec![];
+                    self.tree_rows("", 0, &mut rows);
+                    if let Some(index) = rows.iter().position(|(entry, _)| entry.path == path) {
+                        self.file_scroll.scroll_to_item(index);
+                        self.reveal_file = None;
+                    }
+                }
+            }
             FileAction::Launcher => self.open_launcher(window, cx),
             FileAction::Folder => self.prompt_new_folder(window, cx),
             FileAction::Filter => {
@@ -1351,17 +1385,25 @@ impl Workspace {
                                         "up" | "down" => {
                                             this.files_menu_index =
                                                 Some(match this.files_menu_index {
-                                                    Some(index) => 1 - index,
-                                                    None if event.keystroke.key == "up" => 1,
+                                                    Some(index) => {
+                                                        (index
+                                                            + if event.keystroke.key == "up" {
+                                                                2
+                                                            } else {
+                                                                1
+                                                            })
+                                                            % 3
+                                                    }
+                                                    None if event.keystroke.key == "up" => 2,
                                                     None => 0,
                                                 })
                                         }
                                         "enter" | "space" => this.file_action(
-                                            if this.files_menu_index.unwrap_or(0) == 0 {
-                                                FileAction::Upload
-                                            } else {
-                                                FileAction::Refresh
-                                            },
+                                            [
+                                                FileAction::Upload,
+                                                FileAction::Refresh,
+                                                FileAction::RevealActive,
+                                            ][this.files_menu_index.unwrap_or(0)],
                                             window,
                                             cx,
                                         ),
@@ -1406,7 +1448,7 @@ impl Workspace {
                                             div()
                                                 .id("files-menu")
                                                 .occlude()
-                                                .w(px(150.))
+                                                .w(px(190.))
                                                 .p_1()
                                                 .flex()
                                                 .flex_col()
@@ -1428,6 +1470,11 @@ impl Workspace {
                                                             FileAction::Refresh,
                                                             "Refresh",
                                                             Icon::Restart,
+                                                        ),
+                                                        (
+                                                            FileAction::RevealActive,
+                                                            "Show Active File",
+                                                            Icon::FileText,
                                                         ),
                                                     ]
                                                     .into_iter()
@@ -1609,6 +1656,7 @@ impl Workspace {
             .child(
                 div()
                     .id("server-file-tree")
+                    .track_scroll(&this.file_scroll)
                     .on_mouse_down(gpui::MouseButton::Right, move |event, window, cx| {
                         cx.stop_propagation();
                         root_menu.update(cx, |this, cx| {

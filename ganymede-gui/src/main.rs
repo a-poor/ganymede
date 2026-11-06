@@ -1,3 +1,4 @@
+mod about;
 mod assets;
 mod autosave;
 mod code_cell;
@@ -8,6 +9,7 @@ mod features;
 mod find;
 pub mod icon;
 mod image_loader;
+mod menus;
 mod notebook;
 mod preferences;
 mod rich;
@@ -19,8 +21,8 @@ pub mod toast;
 mod workspace;
 
 use gpui::{
-    App, Context, Entity, FontWeight, KeyBinding, Menu, MenuItem, Window, WindowControlArea,
-    actions, div, prelude::*, px,
+    App, Context, Entity, FontWeight, KeyBinding, Window, WindowControlArea, actions, div,
+    prelude::*, px,
 };
 use icon::Icon;
 use std::time::{Duration, Instant};
@@ -184,21 +186,21 @@ impl Ganymede {
             SidebarTab::Kernels => panel.child(workspace::Workspace::kernels(&self.workspace, cx)),
         }
     }
+}
 
-    fn open_settings(&mut self, cx: &mut Context<Self>) {
-        if let Some(handle) = cx.global::<SettingsWindow>().0
-            && handle
-                .update(cx, |_, window, _| window.activate_window())
-                .is_ok()
-        {
-            return;
-        }
-        // A closed window leaves an invalid handle; replace it on the next request.
-        cx.global_mut::<SettingsWindow>().0 = None;
-        match settings::open(cx) {
-            Ok(handle) => cx.global_mut::<SettingsWindow>().0 = Some(handle),
-            Err(error) => eprintln!("Failed to open Settings: {error}"),
-        }
+fn open_settings(cx: &mut App) {
+    if let Some(handle) = cx.global::<SettingsWindow>().0
+        && handle
+            .update(cx, |_, window, _| window.activate_window())
+            .is_ok()
+    {
+        return;
+    }
+    // A closed window leaves an invalid handle; replace it on the next request.
+    cx.global_mut::<SettingsWindow>().0 = None;
+    match settings::open(cx) {
+        Ok(handle) => cx.global_mut::<SettingsWindow>().0 = Some(handle),
+        Err(error) => eprintln!("Failed to open Settings: {error}"),
     }
 }
 
@@ -222,8 +224,7 @@ impl Render for Ganymede {
         let outer = theme.sidebar;
         let sidebar = theme.sidebar_content;
         let body = theme.app;
-        div()
-            .id("main-window")
+        menus::handlers(div().id("main-window"), self, cx)
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &NewTab, window, cx| {
                 this.workspace
@@ -366,8 +367,8 @@ impl Render for Ganymede {
                             .child(div().flex_1())
                             .child(
                                 self.rail_button("Settings", Icon::Gear, false, cx)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.open_settings(cx);
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        open_settings(cx);
                                     })),
                             ),
                     )
@@ -485,15 +486,7 @@ fn main() {
                 None,
             ),
         ]);
-        cx.set_menus(vec![
-            Menu::new("Ganymede").items([MenuItem::action("Quit Ganymede", Quit)]),
-            Menu::new("File").items([
-                MenuItem::action("New Window", NewWindow),
-                MenuItem::action("New Tab", NewTab),
-                MenuItem::action("Save", Save),
-                MenuItem::action("Close Tab", CloseTab),
-            ]),
-        ]);
+        menus::init(cx);
         connection::init(cx);
         connection::open(cx);
         cx.activate(true);

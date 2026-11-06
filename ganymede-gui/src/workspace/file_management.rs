@@ -228,7 +228,7 @@ impl Workspace {
         })
         .detach();
     }
-    fn prompt_rename(
+    pub(super) fn prompt_rename(
         &mut self,
         path: String,
         directory: bool,

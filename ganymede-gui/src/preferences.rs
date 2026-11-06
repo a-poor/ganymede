@@ -13,6 +13,7 @@ struct Preferences {
     version: u32,
     appearance: AppearancePreference,
     autosave: bool,
+    editor: EditorPreferences,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -20,8 +21,58 @@ impl Default for Preferences {
             version: 1,
             appearance: AppearancePreference::default(),
             autosave: true,
+            editor: EditorPreferences::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Indentation {
+    Two,
+    #[default]
+    Four,
+    Eight,
+}
+impl Indentation {
+    pub fn width(self) -> usize {
+        match self {
+            Self::Two => 2,
+            Self::Four => 4,
+            Self::Eight => 8,
+        }
+    }
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::Two => "  ",
+            Self::Four => "    ",
+            Self::Eight => "        ",
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EditorPreferences {
+    pub indentation: Indentation,
+    pub line_numbers: bool,
+    pub font_size: u8,
+    pub console_enter: bool,
+}
+impl Default for EditorPreferences {
+    fn default() -> Self {
+        Self {
+            indentation: Indentation::Four,
+            line_numbers: false,
+            font_size: 12,
+            console_enter: false,
+        }
+    }
+}
+impl gpui::Global for EditorPreferences {}
+pub fn editor(cx: &App) -> EditorPreferences {
+    cx.try_global::<EditorPreferences>()
+        .cloned()
+        .unwrap_or_default()
 }
 
 #[derive(Default)]
@@ -84,6 +135,9 @@ pub fn init(cx: &mut App) {
     };
     preferences.appearance.apply(cx.window_appearance(), cx);
     cx.set_global(AutosavePreference(preferences.autosave));
+    let mut editor = preferences.editor;
+    editor.font_size = editor.font_size.clamp(10, 24);
+    cx.set_global(editor);
     cx.set_global(Persistence { error });
 }
 
@@ -92,6 +146,7 @@ pub fn save(cx: &mut App) {
     let preferences = Preferences {
         appearance: *cx.global::<AppearancePreference>(),
         autosave: cx.global::<AutosavePreference>().0,
+        editor: editor(cx),
         ..Preferences::default()
     };
     let error = write(&path(), &preferences)
@@ -126,6 +181,12 @@ mod tests {
             let expected = Preferences {
                 appearance,
                 autosave: false,
+                editor: EditorPreferences {
+                    font_size: 18,
+                    line_numbers: true,
+                    indentation: Indentation::Two,
+                    console_enter: true,
+                },
                 ..Preferences::default()
             };
             write(&path, &expected).unwrap();
