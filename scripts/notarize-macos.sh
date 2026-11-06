@@ -27,3 +27,13 @@ spctl --assess --type execute --verbose=2 "$bundle"
 # Include the stapled ticket in the distributed archive.
 ditto -c -k --sequesterRsrc --keepParent "$bundle" "$archive"
 echo "Notarized release: $archive"
+# Package the stapled app, then sign/notarize the disk image itself.
+dmg="target/dist/Ganymede-macOS-notarized.dmg"
+bash scripts/create-dmg.sh "$dmg"
+codesign --force --timestamp --sign "$GANYMEDE_SIGNING_IDENTITY" "$dmg"
+codesign --verify --strict --verbose=2 "$dmg"
+xcrun notarytool submit "$dmg" --keychain-profile "$GANYMEDE_NOTARY_PROFILE" --wait
+xcrun stapler staple "$dmg"
+xcrun stapler validate "$dmg"
+spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
+echo "Notarized release: $dmg"

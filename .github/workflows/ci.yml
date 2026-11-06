@@ -88,6 +88,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Ganymede-macOS-${{ runner.arch }}-unsigned
-          path: target/dist/Ganymede-macOS.zip
+          path: |
+            target/dist/Ganymede-macOS.zip
+            target/dist/Ganymede-macOS.dmg
           if-no-files-found: error
           retention-days: 14

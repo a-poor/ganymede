@@ -37,3 +37,4 @@ codesign --force --sign - "$bundle"
 codesign --verify --deep --strict "$bundle"
 ditto -c -k --sequesterRsrc --keepParent "$bundle" target/dist/Ganymede-macOS.zip
 echo "Unsigned preview: target/dist/Ganymede-macOS.zip"
+bash scripts/create-dmg.sh
