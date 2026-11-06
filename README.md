@@ -3,7 +3,7 @@
 [![CI](https://github.com/a-poor/ganymede/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/a-poor/ganymede/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
-A native Jupyter client for macOS, written in Rust with GPUI.
+A native Jupyter client (currently just) for macOS, written in Rust with GPUI.
 Create or connect to a Jupyter server, edit notebooks, run cells, and manage files
 and kernels in a desktop app.
 
@@ -39,7 +39,8 @@ running; server and kernel shutdown are explicit actions.
 
 Ganymede is early software. Jupyter widgets, real-time collaboration, password/cookie
 login, and JupyterHub OAuth are not supported. Terminal, console, and Git features
-are unfinished and excluded from release builds.
+are unfinished and excluded from release builds. Linux and Windows are also on the
+roadmap.
 
 ## Documentation
 
@@ -49,8 +50,10 @@ are unfinished and excluded from release builds.
 - [macOS distribution](docs/development/distribution.md): packaging, signing, and notarization.
 - [Report a bug](https://github.com/a-poor/ganymede/issues).
 
+*(Note: More and better documentation to come.)*
+
 ## License
 
-Licensed under either [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option.
+Dual-licensed under either [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE). Dealer's choice.
 Third-party dependencies and assets retain their own licenses; see
 [third-party acknowledgments](THIRD_PARTY.md).
