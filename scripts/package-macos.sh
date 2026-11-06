@@ -11,6 +11,7 @@ cargo build --locked --release -p ganymede-gui --no-default-features
 bundle="target/dist/Ganymede.app"
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 cp target/release/ganymede-gui "$bundle/Contents/MacOS/Ganymede"
+cp ganymede-gui/branding/AppIcon.icns "$bundle/Contents/Resources/AppIcon.icns"
 cargo metadata --locked --no-deps --format-version 1 | python3 -c '
 import json, plistlib, sys
 from pathlib import Path
@@ -20,6 +21,7 @@ info = {
     "CFBundleName": "Ganymede",
     "CFBundleDisplayName": "Ganymede",
     "CFBundleExecutable": "Ganymede",
+    "CFBundleIconFile": "AppIcon.icns",
     "CFBundlePackageType": "APPL",
     "CFBundleShortVersionString": version,
     "CFBundleVersion": version,
