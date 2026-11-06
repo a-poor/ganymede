@@ -157,7 +157,9 @@ pub fn init(cx: &mut App) {
             return;
         }
         cx.global_mut::<Connections>().quitting = true;
-        continue_quit(cx);
+        // Menu/keyboard dispatch borrows the active window. Close it only after
+        // that dispatch finishes so WindowHandle::update can borrow it again.
+        cx.defer(continue_quit);
     });
     cx.on_window_closed(|cx, _| {
         if cx.global::<Connections>().quitting {
@@ -1752,9 +1754,13 @@ mod tests {
             windows.push(window);
         }
         cx.update(|cx| {
-            cx.global_mut::<Connections>().quitting = true;
-            continue_quit(cx);
+            windows[0]
+                .update(cx, |_, window, cx| {
+                    window.dispatch_action(Box::new(crate::Quit), cx);
+                })
+                .unwrap();
         });
+        cx.run_until_parked();
         assert!(cx.has_pending_prompt());
         cx.simulate_prompt_answer("Discard");
         cx.run_until_parked();

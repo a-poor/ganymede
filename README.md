@@ -494,8 +494,27 @@ a testing artifact, not a signed or notarized public release. It requires macOS
 bash scripts/package-macos.sh
 ```
 
-The result is `target/dist/Ganymede-macOS.zip`. Signing, notarization, an app
-icon, and automatic updates are not included yet.
+The result is `target/dist/Ganymede-macOS.zip`, including the PlanetRise app icon.
+The preview bundle is ad-hoc signed for integrity; it is not Developer ID signed
+or notarized and is not ready for public distribution. Automatic updates are
+not included yet.
+
+For public distribution, install a **Developer ID Application** certificate and
+its private key in Keychain, and store notarization credentials with
+`xcrun notarytool store-credentials`. Then run:
+
+```sh
+GANYMEDE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+GANYMEDE_NOTARY_PROFILE="ganymede-notary" \
+bash scripts/notarize-macos.sh
+```
+
+This signs the built app with the hardened runtime and a timestamp, submits it
+to Apple, staples and validates the ticket, checks Gatekeeper acceptance, and
+creates `target/dist/Ganymede-macOS-notarized.zip`. It fails on any unsuccessful
+step. Credentials are read from Keychain; never commit certificates, private
+keys, or passwords. CI continues producing preview artifacts without credentials.
+See [Apple’s notarization workflow](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution).
 
 Theme and Autosave preferences are stored in
 `~/Library/Application Support/Ganymede/connections.preferences.json` on macOS
