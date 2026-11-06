@@ -16,7 +16,7 @@ download() {
     curl --fail --location --silent --show-error --retry 3 "$1" --output "$2"
 }
 
-echo "Downloading Inter $inter_version, JetBrains Mono $jetbrains_version, and Phosphor ${phosphor_version}..."
+echo "Downloading Inter $inter_version, JetBrains Mono $jetbrains_version, Geist Pixel $geist_version, and Phosphor ${phosphor_version}..."
 download "https://github.com/rsms/inter/releases/download/v$inter_version/Inter-$inter_version.zip" "$temp_dir/inter.zip"
 download "https://github.com/JetBrains/JetBrainsMono/releases/download/v$jetbrains_version/JetBrainsMono-$jetbrains_version.zip" "$temp_dir/jetbrains.zip"
 download "https://codeload.github.com/phosphor-icons/core/tar.gz/refs/tags/v$phosphor_version" "$temp_dir/phosphor.tar.gz"

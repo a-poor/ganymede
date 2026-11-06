@@ -6,6 +6,6 @@ default:
 run-gui:
     cargo run -p ganymede-gui
 
-# Download Inter, JetBrains Mono, and Phosphor assets.
+# Download Inter, JetBrains Mono, Geist Pixel, and Phosphor assets.
 fetch-assets:
     bash scripts/fetch-assets.sh

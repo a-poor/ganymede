@@ -1,4 +1,17 @@
 /target
 
+# Local configuration; keep the documented template.
 .env
-.env.local
+.env.*
+!.env.example
+.DS_Store
+
+# Signing credentials and local distribution artifacts.
+*.p12
+*.pfx
+*.key
+*.pem
+*.cer
+*.certSigningRequest
+*.mobileprovision
+*.dmg

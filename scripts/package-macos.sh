@@ -18,7 +18,7 @@ import json, plistlib, sys
 from pathlib import Path
 version = next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "ganymede-gui")
 info = {
-    "CFBundleIdentifier": "dev.ganymede.app",
+    "CFBundleIdentifier": "com.austinpoor.ganymede",
     "CFBundleName": "Ganymede",
     "CFBundleDisplayName": "Ganymede",
     "CFBundleExecutable": "Ganymede",
