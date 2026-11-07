@@ -43,6 +43,7 @@ gpui::actions!(
         ChangeKernel,
         OpenSettings,
         About,
+        CheckForUpdates,
         Hide,
         HideOthers,
         ShowAll,
@@ -60,6 +61,7 @@ gpui::actions!(
 pub fn init(cx: &mut App) {
     cx.on_action(|_: &OpenSettings, cx| crate::open_settings(cx));
     cx.on_action(|_: &About, cx| crate::about::open(cx));
+    cx.on_action(|_: &CheckForUpdates, cx| cx.defer(crate::connection::check_updates));
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
@@ -101,6 +103,7 @@ pub fn init(cx: &mut App) {
     cx.set_menus(vec![
         Menu::new("Ganymede").items([
             I::action("About Ganymede", About),
+            I::action("Check for Updates…", CheckForUpdates),
             I::separator(),
             I::action("Settings…", OpenSettings),
             I::separator(),

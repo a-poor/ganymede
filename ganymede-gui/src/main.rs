@@ -18,6 +18,7 @@ mod syntax;
 mod text_file;
 pub mod theme;
 pub mod toast;
+mod updates;
 mod workspace;
 
 use gpui::{
@@ -87,6 +88,7 @@ impl Ganymede {
         .detach();
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         let toasts = cx.new(|cx| toast::ToastHost::new(window, cx));
+        cx.observe(&toasts, |_, _, cx| cx.notify()).detach();
         let workspace = cx.new(|cx| workspace::Workspace::new(runtime, toasts.clone(), window, cx));
         workspace.update(cx, |workspace, _| workspace.set_server_label(label));
         cx.observe(&workspace, |_, _, cx| cx.notify()).detach();

@@ -115,6 +115,15 @@ Recovery copies contain notebook or text-file contents, and local server records
 include the credentials needed to manage those servers. Remembered remote tokens
 are stored in Keychain. Treat local app data as private when sharing diagnostics.
 
+## Check for updates
+
+Choose **Ganymede → Check for Updates…**. A toast reports whether a newer stable
+release is available. **Open release** opens its GitHub page so you can download
+and install it. If the check fails, use **Retry** or try again later.
+
+Checks happen only when requested and do not send Jupyter credentials. Updates
+are not downloaded or installed automatically.
+
 ## Report a problem
 
 [Open a GitHub issue](https://github.com/a-poor/ganymede/issues) with your Ganymede

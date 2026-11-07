@@ -192,6 +192,35 @@ fn continue_quit(cx: &mut App) {
         cx.quit();
     }
 }
+pub fn check_updates(cx: &mut App) {
+    let mut target = cx
+        .active_window()
+        .and_then(|w| w.downcast::<ConnectionWindow>())
+        .or_else(|| {
+            cx.windows()
+                .into_iter()
+                .find_map(|w| w.downcast::<ConnectionWindow>())
+        });
+    if target.is_none() {
+        open(cx);
+        target = cx
+            .windows()
+            .into_iter()
+            .find_map(|w| w.downcast::<ConnectionWindow>());
+    }
+    if let Some(target) = target {
+        let _ = target.update(cx, |view, window, cx| {
+            window.activate_window();
+            let host = view
+                .workspace
+                .as_ref()
+                .map(|w| w.read(cx).toasts.clone())
+                .unwrap_or_else(|| view.toasts.clone());
+            crate::updates::check(host, cx);
+        });
+    }
+}
+
 pub fn reopen(cx: &mut App) {
     let windows: Vec<_> = cx
         .windows()
@@ -278,6 +307,7 @@ struct PageTransition {
     started: Instant,
 }
 struct ConnectionWindow {
+    toasts: Entity<crate::toast::ToastHost>,
     workspace: Option<Entity<crate::Ganymede>>,
     planet: Option<Entity<planet::Planet>>,
     page: Page,
@@ -338,7 +368,10 @@ impl ConnectionWindow {
         });
         let focus = cx.focus_handle();
         focus.focus(window, cx);
+        let toasts = cx.new(|cx| crate::toast::ToastHost::new(window, cx));
+        cx.observe(&toasts, |_, _, cx| cx.notify()).detach();
         Self {
+            toasts,
             workspace: None,
             planet: None,
             page: Page::Recent,
@@ -1647,6 +1680,7 @@ impl Render for ConnectionWindow {
                         v.child(div().absolute().inset_0().occlude())
                     }),
             )
+            .child(self.toasts.clone())
             .into_any_element()
     }
 }
@@ -1693,6 +1727,46 @@ mod tests {
         assert_eq!(data[0]["url"], "https://example.test/");
         assert!(!data.to_string().contains("private-token"));
         assert!(data[0].get("config").is_none());
+    }
+
+    #[gpui::test]
+    fn update_menu_starts_a_check_from_the_launcher(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        cx.update(|cx| {
+            cx.set_global(
+                crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+            );
+            cx.set_global(crate::theme::AppearancePreference::default());
+            cx.set_global(Runtime {
+                tunnel: None,
+                handle: runtime.handle().clone(),
+                config: Err("No test network".into()),
+                kernel: "python3".into(),
+            });
+            crate::menus::init(cx);
+            init(cx);
+            open(cx);
+            let window = cx
+                .windows()
+                .into_iter()
+                .find_map(|w| w.downcast::<ConnectionWindow>())
+                .unwrap();
+            window
+                .update(cx, |_, window, cx| {
+                    window.dispatch_action(Box::new(crate::menus::CheckForUpdates), cx)
+                })
+                .unwrap();
+        });
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert!(
+                cx.try_global::<crate::updates::CheckState>()
+                    .is_some_and(|s| s.running)
+            )
+        });
     }
 
     #[gpui::test]

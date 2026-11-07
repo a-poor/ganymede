@@ -12,6 +12,7 @@ publish = false
 unfinished = []
 
 [dependencies]
+semver = "1"
 anyhow = "1"
 libc = "0.2"
 unicode-segmentation = "1"
