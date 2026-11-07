@@ -46,6 +46,8 @@ jobs:
           if ! xcrun --find metal; then
             xcodebuild -downloadComponent MetalToolchain
           fi
+      - name: Test release automation
+        run: python3 -m unittest discover -s scripts/tests -v
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace

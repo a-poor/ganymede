@@ -9,3 +9,7 @@ run-gui:
 # Download Inter, JetBrains Mono, Geist Pixel, and Phosphor assets.
 fetch-assets:
     bash scripts/fetch-assets.sh
+
+# Build, notarize, verify, and upload a draft release (requires signing env vars).
+release-macos notes:
+    python3 scripts/release-macos.py --notes {{quote(notes)}}

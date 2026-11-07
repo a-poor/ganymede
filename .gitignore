@@ -15,3 +15,7 @@
 *.certSigningRequest
 *.mobileprovision
 *.dmg
+
+# Python tooling caches.
+__pycache__/
+*.pyc

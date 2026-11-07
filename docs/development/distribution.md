@@ -4,6 +4,79 @@
 
 Run commands from the repository root.
 
+## Prepare a public release
+
+Use the local release command on an Apple Silicon Mac. Signing stays in macOS
+Keychain; GitHub Actions continues to build unsigned preview artifacts.
+
+One-time setup:
+
+- Install the Developer ID Application certificate and matching private key in Keychain.
+- Store notarization credentials using `xcrun notarytool store-credentials ganymede-notary`.
+- Authenticate `gh` with access to create releases in `a-poor/ganymede`.
+- Install the development prerequisites described in [CONTRIBUTING.md](../../CONTRIBUTING.md).
+
+For each release:
+
+1. Set the stable `X.Y.Z` version in the workspace `Cargo.toml` and refresh
+   `Cargo.lock` with `cargo check --workspace`.
+2. Commit and push the release changes to `main`. The command requires a clean
+   checkout matching remote `main`. It does not commit, push, or bump versions.
+3. Write release notes in a Markdown file. Keep it outside the checkout, or commit
+   it with the release changes.
+4. Run:
+
+```sh
+export GANYMEDE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+export GANYMEDE_NOTARY_PROFILE="ganymede-notary"
+python3 scripts/release-macos.py --notes /path/to/release-notes.md --check
+python3 scripts/release-macos.py --notes /path/to/release-notes.md
+```
+
+`just release-macos /path/to/release-notes.md` is an equivalent shortcut for the
+second command. Set `GANYMEDE_DMG_LAYOUT=1` for the arranged Finder layout on a
+logged-in desktop. Do not run other packaging commands in the same checkout
+while a release is building.
+
+The command fetches pinned assets, runs formatting, Clippy, workspace tests, and
+an `unfinished` feature compile check, then builds with unfinished features disabled.
+It signs and notarizes both app and DMG, validates the bundle version and identifier,
+checks architecture and Gatekeeper acceptance, and verifies an extracted ZIP.
+Artifacts are staged in `target/dist/vX.Y.Z/` with versioned filenames and
+`SHA256SUMS.txt`. It uploads them to a **draft** release targeting the exact source
+commit and checks uploaded asset sizes and SHA-256 digests.
+
+The command never publishes. Review the draft's notes and downloads, perform a
+launch/upgrade smoke test, and publish through GitHub when ready. Full interactive
+upgrade testing and live Jupyter integration tests remain separate checks.
+
+## Failure recovery
+
+A failed check, build, or notarization stops before upload. A failed upload leaves
+an unpublished draft; do not publish it until all three artifacts verify.
+
+Fix local credentials or transient network problems and rerun the same command.
+It rebuilds and reverifies artifacts, then replaces assets only in a draft targeting
+that exact commit. It refuses published versions and mismatched release tags or
+draft commits. If source changes are needed after creating a draft, deliberately
+remove the abandoned draft (and any conflicting tag after inspection), or choose a
+new version. The script never deletes releases or moves existing tags.
+
+Use a fresh version for changes to a published release. Never replace existing
+public binaries in place. No certificates or passwords are written into the
+repository or uploaded to GitHub by this workflow.
+
+Run the release automation regression checks with:
+
+```sh
+python3 -m unittest discover -s scripts/tests -v
+```
+
+## Individual packaging commands
+
+The commands below remain available for previews and troubleshooting; the release
+command above coordinates them for public distribution.
+
 ## Checks and preview builds
 
 GitHub Actions runs formatting, Clippy, workspace tests, and a check of the
