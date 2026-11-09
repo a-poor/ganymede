@@ -58,6 +58,8 @@ define_icons! {
     WarningCircle => "regular/warning-circle.svg",
     SpinnerGap => "regular/spinner-gap.svg",
     X => "regular/x.svg",
+    Minus => "regular/minus.svg",
+    Square => "regular/square.svg",
     FolderPlus => "regular/folder-plus.svg",
     Filter => "regular/funnel.svg",
     Upload => "regular/upload-simple.svg",

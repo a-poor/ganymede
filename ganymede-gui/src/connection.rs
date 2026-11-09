@@ -1,5 +1,7 @@
 //! One connection picker / workspace per native window.
 mod credentials;
+#[cfg(target_os = "linux")]
+mod linux_frame;
 mod planet;
 pub(crate) mod server;
 pub(crate) mod ssh;
@@ -249,6 +251,10 @@ pub fn open(cx: &mut App) {
             is_resizable: false,
             is_minimizable: false,
             window_min_size: Some(gpui::size(px(480.), px(320.))),
+            #[cfg(target_os = "linux")]
+            window_decorations: Some(gpui::WindowDecorations::Client),
+            #[cfg(target_os = "linux")]
+            window_background: gpui::WindowBackgroundAppearance::Transparent,
             titlebar: Some(gpui::TitlebarOptions {
                 title: Some("Ganymede".into()),
                 appears_transparent: true,
@@ -276,6 +282,10 @@ fn open_workspace(
                 cx,
             ))),
             window_min_size: Some(gpui::size(px(480.), px(320.))),
+            #[cfg(target_os = "linux")]
+            window_decorations: Some(gpui::WindowDecorations::Client),
+            #[cfg(target_os = "linux")]
+            window_background: gpui::WindowBackgroundAppearance::Transparent,
             titlebar: Some(gpui::TitlebarOptions {
                 title: Some(format!("{label} — Ganymede").into()),
                 appears_transparent: true,
@@ -1318,7 +1328,14 @@ impl ConnectionWindow {
             }
         }
         if let Some(error) = &self.error {
-            body = body.child(div().text_color(t.destructive).child(error.clone()));
+            body = body.child(
+                div()
+                    .p_3()
+                    .rounded(t.radius.lg())
+                    .bg(t.dialog_destructive_bg)
+                    .text_color(t.dialog_destructive_fg)
+                    .child(error.clone()),
+            );
         }
         div()
             .id(match page {
@@ -1365,7 +1382,12 @@ impl ConnectionWindow {
                 div()
                     .h(px(28.))
                     .flex_shrink_0()
-                    .window_control_area(gpui::WindowControlArea::Drag),
+                    .window_control_area(gpui::WindowControlArea::Drag)
+                    .when(cfg!(target_os = "linux"), |region| {
+                        region.on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                            window.start_window_move();
+                        })
+                    }),
             )
             .child(
                 div()
@@ -1392,6 +1414,16 @@ impl ConnectionWindow {
 }
 impl Render for ConnectionWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = self.render_content(window, cx);
+        #[cfg(target_os = "linux")]
+        return self.linux_frame(content, window, cx);
+        #[cfg(not(target_os = "linux"))]
+        content
+    }
+}
+
+impl ConnectionWindow {
+    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         if let Some(workspace) = &self.workspace {
             self.planet = None;
             return div()
@@ -1446,7 +1478,12 @@ impl Render for ConnectionWindow {
                 div()
                     .h(px(48.))
                     .flex_shrink_0()
-                    .window_control_area(gpui::WindowControlArea::Drag),
+                    .window_control_area(gpui::WindowControlArea::Drag)
+                    .when(cfg!(target_os = "linux"), |region| {
+                        region.on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                            window.start_window_move();
+                        })
+                    }),
             )
             .child(
                 div()

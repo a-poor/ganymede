@@ -262,11 +262,31 @@ impl Render for Ganymede {
                     .flex()
                     .items_center()
                     .pl(px(88.))
+                    .when(
+                        cfg!(target_os = "linux")
+                            && !window.is_fullscreen()
+                            && matches!(
+                                window.window_decorations(),
+                                gpui::Decorations::Client { .. }
+                            ),
+                        |bar| bar.pr(px(128.)),
+                    )
                     .text_size(theme.font.sm)
                     .text_color(outer.muted_fg)
                     .window_control_area(WindowControlArea::Drag)
+                    .when(cfg!(target_os = "linux"), |bar| {
+                        // Linux needs an explicit move request. Toolbar controls
+                        // stop mouse-down propagation so they remain clickable.
+                        bar.on_mouse_down(gpui::MouseButton::Left, |event, window, _| {
+                            if event.click_count == 2 {
+                                window.zoom_window();
+                            } else {
+                                window.start_window_move();
+                            }
+                        })
+                    })
                     .on_click(|event, window, _| {
-                        if event.click_count() == 2 {
+                        if !cfg!(target_os = "linux") && event.click_count() == 2 {
                             window.titlebar_double_click();
                         }
                     })
