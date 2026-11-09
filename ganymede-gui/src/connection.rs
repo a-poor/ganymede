@@ -307,6 +307,7 @@ struct PageTransition {
     started: Instant,
 }
 struct ConnectionWindow {
+    #[cfg(target_os = "linux")]
     app_menu: Entity<crate::menus::in_window::WindowMenu>,
     toasts: Entity<crate::toast::ToastHost>,
     workspace: Option<Entity<crate::Ganymede>>,
@@ -372,6 +373,7 @@ impl ConnectionWindow {
         let toasts = cx.new(|cx| crate::toast::ToastHost::new(window, cx));
         cx.observe(&toasts, |_, _, cx| cx.notify()).detach();
         Self {
+            #[cfg(target_os = "linux")]
             app_menu: cx.new(|cx| {
                 crate::menus::in_window::WindowMenu::new(
                     crate::menus::in_window::Kind::Connection,
