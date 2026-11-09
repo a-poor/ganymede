@@ -4,6 +4,11 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      full:
+        description: Run the full macOS checks and release build
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -17,8 +22,38 @@ env:
   MACOSX_DEPLOYMENT_TARGET: "15.0"
 
 jobs:
+  quick:
+    name: Linux core checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: |
+          toolchain=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+      - name: Cache Rust dependencies and builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-core-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-core-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+      - run: cargo fmt --all -- --check
+      - name: Test release automation
+        run: python3 -m unittest discover -s scripts/tests -v
+      - run: cargo clippy --locked -p ganymede-core --all-targets -- -D warnings
+      - run: cargo test --locked -p ganymede-core
+
   checks:
-    name: Format, lint, and tests
+    name: Full macOS checks
+    needs: quick
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)
     runs-on: macos-15
     timeout-minutes: 45
     steps:
