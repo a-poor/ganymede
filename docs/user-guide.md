@@ -111,9 +111,40 @@ saved tabs and sidebar layout; restoring a layout does not execute cells.
 On macOS, the default storage directory is
 `~/Library/Application Support/Ganymede/`. It contains preferences, recent
 connections, workspace layouts, recovery copies, and local server records.
+
+On Linux, Ganymede follows XDG directory settings:
+
+| Contents | Location | Default base directory |
+| --- | --- | --- |
+| Preferences | `$XDG_CONFIG_HOME/ganymede/preferences.json` | `~/.config` |
+| Recent connections | `$XDG_STATE_HOME/ganymede/connections.json` | `~/.local/state` |
+| Layouts and recovery copies | `$XDG_STATE_HOME/ganymede/connections.workspaces/` | `~/.local/state` |
+| Local server records | `$XDG_STATE_HOME/ganymede/connections.servers/` | `~/.local/state` |
+| Server runtime files | `$XDG_RUNTIME_DIR/ganymede/server-<uuid>/` | Private temporary directory if unavailable |
+
+Empty or relative config/state directory settings use the defaults. Runtime
+directories must be owned by the current user with permissions `0700`.
+Ganymede currently has no separate persistent cache or application-data files
+requiring `XDG_CACHE_HOME` or `XDG_DATA_HOME`.
+
+At startup, Linux builds copy legacy data from `~/.config/ganymede/` to the new
+locations without overwriting existing destination files. Original files remain
+available for recovery, including any conflicting backups. Completion markers
+prevent migration from restoring old state after you delete its new copy.
+If migration fails, startup stops and reports the error; the originals remain.
+Close older Ganymede versions before migrating so they cannot keep writing to
+the legacy locations.
+
+For development and tests, `GANYMEDE_CONNECTIONS_FILE` still overrides connection
+storage and the derived workspace, server, and preference paths, bypassing legacy
+migration. `GANYMEDE_PREFERENCES_FILE` overrides preferences independently. These
+development overrides take precedence over XDG settings; normal Linux use should
+use XDG settings instead.
+
 Recovery copies contain notebook or text-file contents, and local server records
 include the credentials needed to manage those servers. Remembered remote tokens
-are stored in Keychain. Treat local app data as private when sharing diagnostics.
+are stored in the system keyring (Keychain on macOS). Treat local app data as
+private when sharing diagnostics.
 
 ## Check for updates
 

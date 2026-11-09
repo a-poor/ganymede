@@ -41,17 +41,7 @@ struct Connections {
 impl gpui::Global for Connections {}
 
 pub(crate) fn history_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("GANYMEDE_CONNECTIONS_FILE") {
-        return path.into();
-    }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    home.join(if cfg!(target_os = "macos") {
-        "Library/Application Support/Ganymede/connections.json"
-    } else {
-        ".config/ganymede/connections.json"
-    })
+    crate::storage::Paths::current().connections
 }
 fn load_recent() -> Vec<Recent> {
     let data = std::fs::read(history_path())

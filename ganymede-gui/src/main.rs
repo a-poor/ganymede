@@ -14,6 +14,7 @@ mod notebook;
 mod preferences;
 mod rich;
 mod settings;
+mod storage;
 mod syntax;
 mod text_file;
 pub mod theme;
@@ -449,6 +450,10 @@ impl Render for Ganymede {
 }
 
 fn main() {
+    if let Err(error) = storage::Paths::current().migrate() {
+        eprintln!("Could not migrate application storage; original files were retained: {error}");
+        std::process::exit(1);
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
