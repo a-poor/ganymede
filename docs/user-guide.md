@@ -31,8 +31,15 @@ Choose **Connect**, enter the Jupyter server URL and token if required, then cli
 **Connect**. URLs with a deployment prefix are supported, as are pasted Jupyter
 Lab URLs containing a token.
 
-**Remember token** saves a successfully validated token in macOS Keychain. Recent
-connections let you reopen a server. Their overflow menu offers **Edit connection…**
+**Remember token** saves a successfully validated token in the system keyring
+(macOS Keychain on macOS). Turn it off to connect without saving a token. Linux
+credential storage requires an available, unlocked system keyring. If saving
+fails, unlock it and retry, or turn off Remember token and connect again. If a
+saved token cannot be loaded, the form turns remembering off and lets you enter
+the token manually. Turning remembering off does not delete an existing saved
+token; use **Forget token** for that.
+
+Recent connections let you reopen a server. Their overflow menu offers **Edit connection…**
 to review or change the connection before opening it, and **Remove from recents**.
 Use **Forget token** in the connection form to remove a saved credential.
 

@@ -18,6 +18,68 @@ pub(super) fn token(address: &str, explicit: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// The name used in help and errors; backend errors can contain secrets and
+/// should never be shown directly.
+pub(super) fn store_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macOS Keychain"
+    } else {
+        "system keyring"
+    }
+}
+
+pub(super) fn help() -> String {
+    format!(
+        "Remember token saves it in the {}. Turn it off to connect without saving. Use Forget token to remove an existing saved token.",
+        store_name()
+    )
+}
+
+pub(super) fn save_error() -> String {
+    format!(
+        "The server connection worked, but the token could not be saved to the {}. Unlock it and retry, or turn off Remember token and connect again.",
+        store_name()
+    )
+}
+
+pub(super) fn forget_error() -> String {
+    format!(
+        "Could not remove the saved token from the {}. Make sure it is available and unlocked, then try Forget token again. The saved-token record has been kept.",
+        store_name()
+    )
+}
+
+/// Never touch the credential store unless the user requested persistence and
+/// the caller has already validated the server connection.
+pub(super) async fn save<F, Fut>(
+    request: Option<(String, String)>,
+    write: F,
+) -> Result<bool, String>
+where
+    F: FnOnce(String, String) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let Some((address, token)) = request else {
+        return Ok(false);
+    };
+    write(key(&address), token)
+        .await
+        .map_err(|_| save_error())?;
+    Ok(true)
+}
+
+pub(super) type StoredToken = anyhow::Result<Option<(String, Vec<u8>)>>;
+
+pub(super) fn restored(result: StoredToken) -> Result<String, String> {
+    match result {
+        Ok(Some((_, bytes))) => String::from_utf8(bytes)
+            .ok().filter(|token| !token.trim().is_empty())
+            .ok_or_else(|| format!("The saved token is invalid. Enter it again to connect without saving, or enable Remember token to replace it in the {}.", store_name())),
+        Ok(None) => Err("The saved token was not found. Enter it again to connect without saving, or enable Remember token to save a new copy.".into()),
+        Err(_) => Err(format!("Could not read the saved token from the {}. Enter it again to connect without saving, or unlock the credential store and retry the recent connection.", store_name())),
+    }
+}
+
 // GPUI's macOS implementation exposes Security.framework's status in its error.
 // Removing an already absent item is successful too (errSecItemNotFound).
 pub(super) fn deleted(result: &anyhow::Result<()>) -> bool {
@@ -71,5 +133,60 @@ mod tests {
         );
         assert_eq!(token("https://host/", ""), None);
         assert_eq!(token("https://host/?token=", ""), None);
+    }
+
+    #[tokio::test]
+    async fn connecting_without_remembering_never_accesses_the_store() {
+        let saved = save(None, |_, _| async {
+            panic!("The keyring must not be accessed without a save request");
+        })
+        .await
+        .unwrap();
+        assert!(!saved);
+    }
+
+    #[tokio::test]
+    async fn requested_tokens_use_namespaced_keys_and_only_success_counts_as_saved() {
+        let saved = save(
+            Some(("https://host/prefix/".into(), "test-token".into())),
+            |key, token| async move {
+                assert_eq!(key, "ganymede:jupyter:https://host/prefix/");
+                assert_eq!(token, "test-token");
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert!(saved);
+
+        let error = save(
+            Some(("https://host/".into(), "test-token".into())),
+            |_, _| async { Err(anyhow::anyhow!("backend failure containing test-token")) },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("turn off Remember token"));
+        assert!(error.contains(store_name()));
+        assert!(!error.contains("test-token"));
+    }
+
+    #[test]
+    fn restore_distinguishes_missing_invalid_and_unavailable_without_exposing_secrets() {
+        assert_eq!(
+            restored(Ok(Some(("token".into(), b"saved-token".to_vec())))).unwrap(),
+            "saved-token"
+        );
+        assert!(restored(Ok(None)).unwrap_err().contains("not found"));
+        for bytes in [vec![0xff], Vec::new(), b"  ".to_vec()] {
+            assert!(
+                restored(Ok(Some(("token".into(), bytes))))
+                    .unwrap_err()
+                    .contains("invalid")
+            );
+        }
+        let error = restored(Err(anyhow::anyhow!("locked: secret-token"))).unwrap_err();
+        assert!(error.contains("without saving"));
+        assert!(error.contains(store_name()));
+        assert!(!error.contains("secret-token"));
     }
 }

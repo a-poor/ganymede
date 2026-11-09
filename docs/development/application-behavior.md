@@ -43,14 +43,21 @@ run a cell to start a new kernel using the notebook's selected kernelspec.
 
 Each workspace connects to one server. **File → New Window** (`Cmd+Shift+N` on
 macOS) opens another picker. Recent connections are remembered without tokens;
-on macOS, **Remember token** stores a successfully validated token in Keychain.
+**Remember token** stores a successfully validated token in the platform credential
+store (macOS Keychain or the Linux system keyring). The control is visible on both
+platforms.
 Recent connections then reconnect with one click after restarting the app. Keys
 are scoped to the full normalized server URL, including deployment prefixes.
 Use **Edit connection…** in a recent connection’s overflow menu to replace its token or choose
-**Forget token**. Forgetting removes the Keychain item and cached Recent credential;
+**Forget token**. Forgetting removes the keyring item and cached Recent credential;
 already-open workspaces remain connected. Without opt-in, remote credentials must
-be entered again after restarting the app. Keychain access failures leave the
-connection form open for retry or manual entry. Locally
+be entered again after restarting the app. Turning off Remember token skips
+credential writes but does not remove previously saved tokens. Save failures leave
+the connection form open with instructions to retry or connect without saving.
+Read failures distinguish missing, invalid, and unavailable credentials, disable
+remembering, and focus the token field for manual entry. Failed deletions retain
+the saved-token flag and cached credential. Backend error text is not displayed,
+since it can contain secrets. Locally
 started servers remain running when their window closes and can be reconnected
 from Recent connections. Closing or quitting checks every workspace for unsaved
 changes and does not shut down server kernels.
