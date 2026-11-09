@@ -2,6 +2,19 @@
 
 [Back to the README](../README.md)
 
+## Application menus
+
+On Linux, the main window shows File, Edit, View, Run, Kernel, Window, and Help
+menus above the active tab's content, including the launcher. Settings is in File;
+About and Check for Updates are in Help. The connection and Settings windows use
+a hamburger menu beside the close button with commands relevant to those windows.
+macOS continues to use the system menu bar.
+
+Press **F10** on Linux to open the menu. Use Left/Right to switch menus, Up/Down to
+select a command, and Enter to run it. Escape, Tab, or clicking outside dismisses
+the menu. Unavailable commands are dimmed. Text-editing commands operate on the
+editor selection that was active before opening the menu.
+
 ## Create a local server
 
 Choose **Create** on the welcome screen, select your project folder, and choose a

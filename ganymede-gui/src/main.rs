@@ -68,6 +68,7 @@ struct SettingsWindow(Option<gpui::WindowHandle<settings::Settings>>);
 impl gpui::Global for SettingsWindow {}
 
 struct Ganymede {
+    app_menu: Entity<menus::in_window::WindowMenu>,
     focus: gpui::FocusHandle,
     workspace: Entity<workspace::Workspace>,
     toasts: Entity<toast::ToastHost>,
@@ -97,6 +98,8 @@ impl Ganymede {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         Self {
+            app_menu: cx
+                .new(|cx| menus::in_window::WindowMenu::new(menus::in_window::Kind::Workspace, cx)),
             focus,
             workspace,
             toasts,
@@ -229,6 +232,12 @@ impl Render for Ganymede {
         let body = theme.app;
         menus::handlers(div().id("main-window"), self, cx)
             .track_focus(&self.focus)
+            .on_action(
+                cx.listener(|this, _: &menus::in_window::OpenMenu, window, cx| {
+                    this.app_menu
+                        .update(cx, |menu, cx| menu.open_first(window, cx));
+                }),
+            )
             .on_action(cx.listener(|this, _: &NewTab, window, cx| {
                 this.workspace
                     .update(cx, |workspace, cx| workspace.open_launcher(window, cx));
@@ -441,7 +450,10 @@ impl Render for Ganymede {
                                     })
                                     .flex()
                                     .flex_col()
-                                    .child(self.workspace.clone()),
+                                    .when(cfg!(target_os = "linux"), |body| {
+                                        body.child(self.app_menu.clone())
+                                    })
+                                    .child(div().flex_1().min_h_0().child(self.workspace.clone())),
                             ),
                     ),
             )

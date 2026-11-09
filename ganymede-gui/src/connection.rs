@@ -1,7 +1,7 @@
 //! One connection picker / workspace per native window.
 mod credentials;
 #[cfg(target_os = "linux")]
-mod linux_frame;
+pub(crate) mod linux_frame;
 mod planet;
 pub(crate) mod server;
 pub(crate) mod ssh;
@@ -307,6 +307,7 @@ struct PageTransition {
     started: Instant,
 }
 struct ConnectionWindow {
+    app_menu: Entity<crate::menus::in_window::WindowMenu>,
     toasts: Entity<crate::toast::ToastHost>,
     workspace: Option<Entity<crate::Ganymede>>,
     planet: Option<Entity<planet::Planet>>,
@@ -371,6 +372,12 @@ impl ConnectionWindow {
         let toasts = cx.new(|cx| crate::toast::ToastHost::new(window, cx));
         cx.observe(&toasts, |_, _, cx| cx.notify()).detach();
         Self {
+            app_menu: cx.new(|cx| {
+                crate::menus::in_window::WindowMenu::new(
+                    crate::menus::in_window::Kind::Connection,
+                    cx,
+                )
+            }),
             toasts,
             workspace: None,
             planet: None,
@@ -899,7 +906,7 @@ fn field(label: &'static str, input: Entity<Field>, cx: &App) -> gpui::Div {
         .child(div().text_color(cx.theme().app.muted_fg).child(label))
         .child(div().flex().child(input))
 }
-fn button(
+pub(crate) fn button(
     id: &'static str,
     label: &'static str,
     primary: bool,

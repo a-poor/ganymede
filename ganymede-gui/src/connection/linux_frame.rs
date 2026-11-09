@@ -62,7 +62,7 @@ impl ConnectionWindow {
             .top_0()
             .right_0()
             .h(px(48.))
-            .w(px(if workspace { 128. } else { 64. }))
+            .w(px(if workspace { 128. } else { 96. }))
             .on_mouse_down(MouseButton::Left, move |event, window, _| {
                 if workspace && event.click_count == 2 {
                     window.zoom_window();
@@ -80,6 +80,7 @@ impl ConnectionWindow {
                     .right(px(18.))
                     .flex()
                     .gap_1()
+                    .when(!workspace, |row| row.child(self.app_menu.clone()))
                     .children(actions.into_iter().map(|(id, icon, action)| {
                         button(id, "", false, cx)
                             .p_0()
@@ -106,6 +107,15 @@ impl ConnectionWindow {
                     })),
             );
         div()
+            .id("linux-frame")
+            .when(!workspace, |frame| {
+                frame.on_action(cx.listener(
+                    |this, _: &crate::menus::in_window::OpenMenu, window, cx| {
+                        this.app_menu
+                            .update(cx, |menu, cx| menu.open_first(window, cx));
+                    },
+                ))
+            })
             .size_full()
             .p(inset)
             .when(workspace && !tiled, |frame| {
@@ -147,7 +157,11 @@ impl ConnectionWindow {
     }
 }
 
-fn resize_edge(pos: Point<Pixels>, size: Size<Pixels>, inset: Pixels) -> Option<ResizeEdge> {
+pub(crate) fn resize_edge(
+    pos: Point<Pixels>,
+    size: Size<Pixels>,
+    inset: Pixels,
+) -> Option<ResizeEdge> {
     let left = pos.x < inset;
     let right = pos.x > size.width - inset;
     let top = pos.y < inset;
