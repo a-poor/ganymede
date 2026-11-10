@@ -56,7 +56,8 @@ pub struct EditorPreferences {
     pub indentation: Indentation,
     pub line_numbers: bool,
     pub font_size: u8,
-    pub console_enter: bool,
+    #[serde(alias = "console_enter")]
+    pub run_cell_on_enter: bool,
     pub auto_close_brackets: bool,
 }
 impl Default for EditorPreferences {
@@ -65,7 +66,7 @@ impl Default for EditorPreferences {
             indentation: Indentation::Four,
             line_numbers: false,
             font_size: 12,
-            console_enter: false,
+            run_cell_on_enter: false,
             auto_close_brackets: true,
         }
     }
@@ -187,7 +188,7 @@ mod tests {
                     font_size: 18,
                     line_numbers: true,
                     indentation: Indentation::Two,
-                    console_enter: true,
+                    run_cell_on_enter: true,
                     auto_close_brackets: false,
                 },
                 ..Preferences::default()
@@ -210,6 +211,27 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
         }
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_run_shortcut_migrates_and_new_files_use_cell_name() {
+        for enabled in [false, true] {
+            let old = format!(r#"{{"console_enter":{enabled}}}"#);
+            let preferences: EditorPreferences = serde_json::from_str(&old).unwrap();
+            assert_eq!(preferences.run_cell_on_enter, enabled);
+            let saved = serde_json::to_value(&preferences).unwrap();
+            assert_eq!(saved["run_cell_on_enter"], enabled);
+            assert!(saved.get("console_enter").is_none());
+            assert_eq!(
+                serde_json::from_value::<EditorPreferences>(saved).unwrap(),
+                preferences
+            );
+        }
+        assert!(
+            !serde_json::from_str::<EditorPreferences>("{}")
+                .unwrap()
+                .run_cell_on_enter
+        );
     }
 
     #[test]

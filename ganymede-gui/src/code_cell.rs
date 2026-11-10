@@ -1029,6 +1029,32 @@ impl CodeCell {
         self.selecting = None;
     }
 
+    fn editor_enter(&mut self, shifted: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.filter_input {
+            if self.search_input {
+                cx.emit(if shifted {
+                    CellEvent::MoveUp
+                } else {
+                    CellEvent::MoveDown
+                });
+            } else if self.name_input && !shifted {
+                cx.emit(CellEvent::RunAndAdvance);
+            }
+            return;
+        }
+        if !self.document && shifted != crate::preferences::editor(cx).run_cell_on_enter {
+            cx.emit(CellEvent::RunAndAdvance);
+            return;
+        }
+        let offset = self.buffer.selection().start;
+        let newline = if self.document && shifted {
+            "\n".to_owned()
+        } else {
+            crate::syntax::newline(&self.buffer.text, offset, self.python_code())
+        };
+        self.replace_text_in_range(None, &newline, window, cx);
+    }
+
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         if !self.buffer.selection().is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
@@ -1360,19 +1386,7 @@ impl Render for CodeCell {
                 }
                 this.replace_text_in_range(None, "", w, cx);
             }))
-            .on_action(cx.listener(|this, _: &Enter, w, cx| {
-                if this.filter_input {
-                    if this.search_input {
-                        cx.emit(CellEvent::MoveDown);
-                    } else if this.name_input {
-                        cx.emit(CellEvent::RunAndAdvance);
-                    }
-                    return;
-                }
-                let offset = this.buffer.selection().start;
-                let newline = crate::syntax::newline(&this.buffer.text, offset, this.python_code());
-                this.replace_text_in_range(None, &newline, w, cx);
-            }))
+            .on_action(cx.listener(|this, _: &Enter, w, cx| this.editor_enter(false, w, cx)))
             .on_action(cx.listener(|this, _: &Tab, w, cx| {
                 if this.name_input {
                     cx.emit(CellEvent::FocusNext);
@@ -1408,15 +1422,7 @@ impl Render for CodeCell {
                     this.indent(true, w, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &RunAndAdvance, window, cx| {
-                if this.search_input {
-                    cx.emit(CellEvent::MoveUp);
-                } else if this.document {
-                    this.replace_text_in_range(None, "\n", window, cx);
-                } else if !this.filter_input {
-                    cx.emit(CellEvent::RunAndAdvance);
-                }
-            }))
+            .on_action(cx.listener(|this, _: &RunAndAdvance, w, cx| this.editor_enter(true, w, cx)))
             .on_action(cx.listener(|this, _: &SelectCell, window, cx| {
                 if this.filter_input {
                     cx.emit(CellEvent::DeleteCell);
@@ -2538,6 +2544,109 @@ mod tests {
                 });
                 cx.simulate_mouse_up(position, MouseButton::Left, Default::default());
                 cx.update(|_, cx| assert_eq!(cell.read(cx).selected_text(), expected));
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn run_shortcut_swaps_edit_keys_without_affecting_navigation_or_fields(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_global(
+                crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+            );
+            init(cx);
+        });
+        for run_on_enter in [false, true] {
+            for mode in ["cell", "document", "search", "name", "filter", "navigation"] {
+                for shifted in [false, true] {
+                    let events = Rc::new(RefCell::new(Vec::new()));
+                    let window = cx.update(|cx| {
+                        cx.set_global(crate::preferences::EditorPreferences {
+                            run_cell_on_enter: run_on_enter,
+                            ..Default::default()
+                        });
+                        cx.open_window(Default::default(), |window, cx| {
+                            cx.new(|cx| {
+                                let mut cell = CodeCell::new(window, cx);
+                                cell.document = mode == "document";
+                                cell.filter_input = matches!(mode, "search" | "name" | "filter");
+                                cell.search_input = mode == "search";
+                                cell.name_input = mode == "name";
+                                cell.buffer.text = "    value".into();
+                                cell.buffer.head = cell.buffer.text.len();
+                                cell.buffer.anchor = cell.buffer.head;
+                                if mode == "navigation" {
+                                    cell.cell_focus.focus(window, cx);
+                                } else {
+                                    cell.focus.focus(window, cx);
+                                }
+                                cell
+                            })
+                        })
+                        .unwrap()
+                    });
+                    let observed = events.clone();
+                    let _subscription = cx.update(|cx| {
+                        let entity = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+                        cx.subscribe(&entity, move |_, event: &CellEvent, _| {
+                            if let CellEvent::RunAndAdvance
+                            | CellEvent::MoveUp
+                            | CellEvent::MoveDown = event
+                            {
+                                observed.borrow_mut().push(*event);
+                            }
+                        })
+                    });
+                    cx.run_until_parked();
+                    cx.simulate_keystrokes(
+                        window.into(),
+                        if shifted { "shift-enter" } else { "enter" },
+                    );
+                    cx.run_until_parked();
+                    cx.update(|cx| {
+                        window
+                            .update(cx, |cell, window, _| {
+                                let newline = mode == "document"
+                                    || (mode == "cell" && shifted == run_on_enter);
+                                let expected = if newline {
+                                    if mode == "document" && shifted {
+                                        "    value\n"
+                                    } else {
+                                        "    value\n    "
+                                    }
+                                } else {
+                                    "    value"
+                                };
+                                assert_eq!(
+                                    cell.text(),
+                                    expected,
+                                    "{mode} enter={run_on_enter} shifted={shifted}"
+                                );
+                                let should_run = (mode == "cell" && shifted != run_on_enter)
+                                    || (mode == "name" && !shifted)
+                                    || (mode == "navigation" && shifted);
+                                assert_eq!(
+                                    events
+                                        .borrow()
+                                        .iter()
+                                        .any(|event| matches!(event, CellEvent::RunAndAdvance)),
+                                    should_run
+                                );
+                                if mode == "search" {
+                                    assert_eq!(events.borrow().len(), 1);
+                                    assert!(
+                                        matches!(events.borrow()[0], CellEvent::MoveUp) == shifted
+                                    );
+                                }
+                                if mode == "navigation" && !shifted {
+                                    assert!(cell.focus.is_focused(window));
+                                }
+                            })
+                            .unwrap()
+                    });
+                }
             }
         }
     }

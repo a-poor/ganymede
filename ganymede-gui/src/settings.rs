@@ -16,21 +16,21 @@ pub struct Settings {
 enum Setting {
     Indentation,
     FontSize,
-    Console,
+    RunCell,
 }
 impl Setting {
     fn label(self) -> &'static str {
         match self {
             Self::Indentation => "Indentation",
             Self::FontSize => "Code font size",
-            Self::Console => "Console run shortcut",
+            Self::RunCell => "Run cell shortcut",
         }
     }
     fn choices(self) -> &'static [&'static str] {
         match self {
             Self::Indentation => &["2 spaces", "4 spaces", "8 spaces"],
             Self::FontSize => &["10", "12", "14", "16", "18", "20", "24"],
-            Self::Console => &["Enter", "Shift+Enter"],
+            Self::RunCell => &["Enter", "Shift+Enter"],
         }
     }
     fn index(self, cx: &App) -> usize {
@@ -45,7 +45,7 @@ impl Setting {
                 .iter()
                 .position(|v| *v == p.font_size)
                 .unwrap_or(2),
-            Self::Console => usize::from(!p.console_enter),
+            Self::RunCell => usize::from(!p.run_cell_on_enter),
         }
     }
     fn apply(self, index: usize, cx: &mut App) {
@@ -58,7 +58,7 @@ impl Setting {
                 ][index]
             }
             Self::FontSize => p.font_size = [10, 12, 14, 16, 18, 20, 24][index],
-            Self::Console => p.console_enter = index == 0,
+            Self::RunCell => p.run_cell_on_enter = index == 0,
         });
         crate::preferences::save(cx);
     }
@@ -513,18 +513,20 @@ impl Render for Settings {
                                         .child(self.setting_row(setting, cx))
                                 },
                             ))
-                            .when(crate::features::UNFINISHED, |view| {
-                                view.child(div().mx_3().h(px(1.)).bg(t.card.border))
-                                    .child(self.setting_row(Setting::Console, cx))
-                                    .child(
-                                        div()
-                                            .px_3()
-                                            .pb_3()
-                                            .text_size(t.font.xs)
-                                            .text_color(t.card.muted_fg)
-                                            .child("Console support is in development."),
-                                    )
-                            }),
+                            .child(div().mx_3().h(px(1.)).bg(t.card.border))
+                            .child(self.setting_row(Setting::RunCell, cx))
+                            .child(
+                                div()
+                                    .px_3()
+                                    .pb_3()
+                                    .text_size(t.font.xs)
+                                    .text_color(t.card.muted_fg)
+                                    .child(if crate::preferences::editor(cx).run_cell_on_enter {
+                                        "While editing: Enter runs; Shift+Enter adds a line."
+                                    } else {
+                                        "While editing: Shift+Enter runs; Enter adds a line."
+                                    }),
+                            ),
                     ),
             )
             .when_some(

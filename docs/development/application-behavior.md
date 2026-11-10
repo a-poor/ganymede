@@ -337,3 +337,13 @@ text. Pasted cells receive fresh IDs. Structural undo/redo restores the entire
 operation and selection. A group containing a running cell cannot be cut or deleted;
 queued and running cells retain their identities when moved. Shift+Enter runs the
 range in document order and advances to the following cell.
+
+### Cell execution shortcut
+
+The release Settings window exposes Run cell shortcut (Shift+Enter by default,
+or Enter). In notebook edit mode the selected key runs and advances (or renders
+Markdown); the other key inserts an indented newline. Cell navigation mode keeps
+Enter to edit and Shift+Enter to run the selection. Text files, search fields,
+rename dialogs, and kernel input prompts retain their existing key behavior.
+The persisted `run_cell_on_enter` preference reads the old `console_enter` key as
+an alias, preserving its value; subsequent saves use the new name.

@@ -67,6 +67,9 @@ Open a notebook from the Files sidebar or create one from the workspace launcher
 Choose a kernel using the notebook's kernel control.
 
 - **Shift+Enter** runs the selected cell. Variables persist in its kernel between runs.
+  In Settings, **Run cell shortcut** can swap Enter and Shift+Enter while editing;
+  the other shortcut inserts an indented newline. Cell navigation mode keeps
+  Enter to edit and Shift+Enter to run.
 - Double-click a Markdown cell, or select it and press **Enter**, to edit it.
   **Shift+Enter** renders the Markdown again.
 - **Command+S** saves. Autosave is on by default and can be changed in Settings.
