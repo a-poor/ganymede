@@ -847,8 +847,12 @@ impl Workspace {
                         }
                         this.refresh_files(cx);
                     }
-                    Ok(Err(error)) => this.file_error = Some(error),
-                    Err(_) => this.file_error = Some("Could not open notebook".into()),
+                    Ok(Err(error)) => this.file_toast("Could not open notebook", Err(error), cx),
+                    Err(_) => this.file_toast(
+                        "Could not open notebook",
+                        Err("The notebook request failed".into()),
+                        cx,
+                    ),
                 }
                 this.persist_recovery(cx);
                 this.finish_restore(window, cx);
