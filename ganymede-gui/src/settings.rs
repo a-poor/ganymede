@@ -68,6 +68,8 @@ impl Setting {
 
 #[derive(Clone, Copy)]
 enum ToggleSetting {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    MenuBar,
     Autosave,
     LineNumbers,
     AutoCloseBrackets,
@@ -75,6 +77,8 @@ enum ToggleSetting {
 impl ToggleSetting {
     fn enabled(self, cx: &App) -> bool {
         match self {
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            Self::MenuBar => cx.global::<crate::preferences::MenuBarPreference>().0,
             Self::Autosave => cx.global::<crate::autosave::AutosavePreference>().0,
             Self::LineNumbers => crate::preferences::editor(cx).line_numbers,
             Self::AutoCloseBrackets => crate::preferences::editor(cx).auto_close_brackets,
@@ -82,6 +86,11 @@ impl ToggleSetting {
     }
     fn toggle(self, cx: &mut App) {
         match self {
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            Self::MenuBar => {
+                cx.update_global::<crate::preferences::MenuBarPreference, _>(|p, _| p.0 = !p.0);
+                crate::tray::refresh(cx);
+            }
             Self::Autosave => {
                 cx.update_global::<crate::autosave::AutosavePreference, _>(|p, _| p.0 = !p.0)
             }
@@ -305,6 +314,8 @@ impl Settings {
         let t = cx.theme();
         let enabled = setting.enabled(cx);
         let (id, label) = match setting {
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            ToggleSetting::MenuBar => ("menu-bar-toggle", crate::tray::setting_label()),
             ToggleSetting::Autosave => ("autosave-toggle", "Autosave"),
             ToggleSetting::LineNumbers => ("line-numbers-toggle", "Line numbers"),
             ToggleSetting::AutoCloseBrackets => {
@@ -572,6 +583,30 @@ impl Settings {
                                     .child("Theme")
                                     .child(self.appearance_selector(cx)),
                             )
+                            .children({
+                                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                                {
+                                    Some(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .child(div().mx_3().h(px(1.)).bg(t.card.border))
+                                            .child(
+                                                div()
+                                                    .p_3()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .child(crate::tray::setting_label())
+                                                    .child(self.toggle(ToggleSetting::MenuBar, cx)),
+                                            ),
+                                    )
+                                }
+                                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                                {
+                                    None::<gpui::Div>
+                                }
+                            })
                             .child(div().mx_3().h(px(1.)).bg(t.card.border))
                             .child(
                                 div()

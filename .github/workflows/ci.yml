@@ -58,6 +58,8 @@ jobs:
         run: bash scripts/fetch-assets.sh
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
+      - name: Test Linux tray service
+        run: dbus-run-session -- cargo test --locked -p ganymede-gui linux_tray_exports_updates_and_removes_its_dbus_menu -- --ignored
       - name: Check unfinished feature
         run: cargo check --locked -p ganymede-gui --features unfinished
 

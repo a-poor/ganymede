@@ -19,6 +19,8 @@ mod syntax;
 mod text_file;
 pub mod theme;
 pub mod toast;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod tray;
 mod updates;
 mod workspace;
 
@@ -527,6 +529,8 @@ fn main() {
         ]);
         menus::init(cx);
         connection::init(cx);
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        tray::init(cx);
         connection::open(cx);
         cx.activate(true);
     });

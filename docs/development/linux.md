@@ -69,3 +69,24 @@ Before releasing, test on both a Wayland and an X11 desktop:
 
 A real desktop session is needed for this pass. Headless tests cannot establish
 Wayland/X11 parity or the behavior of each desktop's portal backend.
+
+## Tray integration
+
+Linux uses `tray-icon` with its KSNI backend (StatusNotifierItem and D-BusMenu),
+with no GTK/AppIndicator library dependency. A session D-Bus and a compatible
+panel/extension are required to display the icon. GNOME users may need the
+AppIndicator extension. The **Show tray icon** setting uses the same stored
+preference as macOS's **Show menu bar icon** setting.
+
+Normal Linux CI also exercises tray registration, menu updates, and cleanup on
+an isolated D-Bus session:
+
+```sh
+dbus-run-session -- cargo test --locked -p ganymede-gui linux_tray_exports_updates_and_removes_its_dbus_menu -- --ignored
+```
+
+On a real desktop, toggle the tray off and on, open a recent connection, open
+Settings, and inspect the running-server menu. Verify that **Stop…** asks for
+confirmation and that canceling it leaves the server running. Close all windows
+and use **Open Ganymede** to reopen one. Test **Quit Ganymede** with unsaved work.
+The private-bus test does not establish panel rendering or activation behavior.
