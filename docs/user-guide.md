@@ -177,3 +177,37 @@ to the selected group. Shift+Enter runs the group and advances. In cell mode,
 Command+C/X/V (Control on other platforms) copies/cuts/pastes cells and Delete or
 Backspace deletes them. Undo restores a whole group operation, including its
 selection. Copy/paste preserves cell types and saved outputs.
+
+## Export a notebook
+
+Choose **File → Export Notebook → HTML, Markdown, or PDF**. Ganymede sends a
+snapshot of the current notebook to the connected Jupyter server’s `nbconvert`
+endpoint, then opens a native dialog to save the result on your Mac. Unsaved
+edits and existing outputs are included; exporting does not save the notebook,
+change its dirty state, or request cell execution. Edits made after export begins
+are not included. Only one export runs at a time in each workspace.
+
+Install `nbconvert` in the **server’s Python environment** (including for SSH or
+remote connections). PDF uses nbconvert’s Chromium-based WebPDF layout, avoiding
+a LaTeX installation. Set it up in that environment with:
+
+```sh
+python -m pip install 'nbconvert[webpdf]'
+python -m playwright install chromium
+```
+
+Ganymede does not install these dependencies or download browsers automatically.
+Use the default non-executing nbconvert configuration; custom server-side
+preprocessors are controlled by the server administrator. Export needs a live
+connection and permission to use the server’s nbconvert endpoint. Conversion has
+a two-minute timeout and a 128 MB download limit. Failures appear in a toast;
+server logs contain detailed conversion errors.
+
+Markdown without extracted images saves as `.md`. With images, Jupyter returns
+`.zip`; extract it and keep the Markdown document beside its image files. HTML
+and PDF use nbconvert’s layouts. Notebook attachments and saved image outputs are
+supported. Notebook-relative external files are not resolved by the snapshot
+endpoint: use attachments or embedded outputs instead. Interactive widgets and
+JavaScript outputs may not survive static conversion, and HTML equations or
+widgets may need network access to load their rendering libraries. PDF rendering
+also depends on those resources being available to Chromium.

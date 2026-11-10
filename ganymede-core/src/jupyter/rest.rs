@@ -6,7 +6,7 @@ use super::{Error, Result, ServerConfig, models::*};
 
 #[derive(Debug, Clone)]
 pub struct JupyterRestClient {
-    config: ServerConfig,
+    pub(super) config: ServerConfig,
     http: reqwest::Client,
 }
 
@@ -27,7 +27,7 @@ impl JupyterRestClient {
         Ok(Self { config, http })
     }
 
-    async fn request(
+    pub(super) async fn request(
         &self,
         method: Method,
         url: Url,

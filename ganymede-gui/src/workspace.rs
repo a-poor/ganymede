@@ -1,5 +1,6 @@
 //! Server file browser, notebook tabs, and launcher.
 pub(crate) mod commands;
+mod export;
 mod file_management;
 mod kernels;
 mod persistence;
@@ -257,6 +258,7 @@ pub struct Workspace {
     filter_query: String,
     filter_requested: HashSet<String>,
     uploading: bool,
+    exporting: bool,
     file_busy: bool,
     file_directory: String,
     file_selection: FileSelection,
@@ -324,6 +326,7 @@ impl Workspace {
             filter_query: String::new(),
             filter_requested: HashSet::new(),
             uploading: false,
+            exporting: false,
             file_busy: false,
             file_directory: String::new(),
             file_selection: FileSelection::default(),

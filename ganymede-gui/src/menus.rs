@@ -12,6 +12,9 @@ gpui::actions!(
         Upload,
         SaveAll,
         SaveAs,
+        ExportHtml,
+        ExportMarkdown,
+        ExportPdf,
         Rename,
         NextTab,
         PreviousTab,
@@ -131,6 +134,11 @@ pub fn init(cx: &mut App) {
             I::action("Save", crate::Save),
             I::action("Save As…", SaveAs),
             I::action("Save All", SaveAll),
+            I::submenu(Menu::new("Export Notebook").items([
+                I::action("HTML…", ExportHtml),
+                I::action("Markdown…", ExportMarkdown),
+                I::action("PDF…", ExportPdf),
+            ])),
             I::action("Rename…", Rename),
             I::separator(),
             I::action("Close Tab", crate::CloseTab),
@@ -318,7 +326,22 @@ pub fn handlers(
             })
         }))
         .when(notebook.is_some(), |view| {
-            view.on_action(cx.listener(|this, _: &CutCell, window, cx| {
+            view.on_action(cx.listener(|this, _: &ExportHtml, _, cx| {
+                this.workspace.update(cx, |w, cx| {
+                    w.export_notebook(ganymede_core::jupyter::ExportFormat::Html, cx)
+                });
+            }))
+            .on_action(cx.listener(|this, _: &ExportMarkdown, _, cx| {
+                this.workspace.update(cx, |w, cx| {
+                    w.export_notebook(ganymede_core::jupyter::ExportFormat::Markdown, cx)
+                });
+            }))
+            .on_action(cx.listener(|this, _: &ExportPdf, _, cx| {
+                this.workspace.update(cx, |w, cx| {
+                    w.export_notebook(ganymede_core::jupyter::ExportFormat::Pdf, cx)
+                });
+            }))
+            .on_action(cx.listener(|this, _: &CutCell, window, cx| {
                 let n = this.workspace.read(cx).active_notebook(cx);
                 if let Some(n) = n {
                     n.update(cx, |n, cx| {
