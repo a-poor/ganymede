@@ -1957,7 +1957,7 @@ impl ConnectionWindow {
             .shadow(vec![t.launcher_shadow.clone()])
             .child(
                 div()
-                    .h(px(48.))
+                    .h(px(if cfg!(target_os = "linux") { 16. } else { 48. }))
                     .flex_shrink_0()
                     .window_control_area(gpui::WindowControlArea::Drag)
                     .when(cfg!(target_os = "linux"), |region| {
