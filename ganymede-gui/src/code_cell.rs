@@ -1261,7 +1261,7 @@ impl Render for CodeCell {
                     .line_height_tight
                     .max(px(crate::preferences::editor(cx).font_size as f32 * 1.5)),
             )
-            .p_3()
+            .p(px(8.))
             .pr(px(44.))
             .on_action(cx.listener(|this, _: &Left, w, cx| {
                 let offset = if this.buffer.selection().is_empty() {
@@ -1902,7 +1902,7 @@ fn visible_rows(
 
 // Keep a compact document inset that scrolls with the text.
 const DOCUMENT_PADDING: f32 = 8.;
-const DOCUMENT_GUTTER_EXTRA: f32 = 4.;
+const EDITOR_GUTTER_EXTRA: f32 = 4.;
 
 struct CellText {
     cell: Entity<CodeCell>,
@@ -1977,13 +1977,7 @@ impl Element for CellText {
             .unwrap_or_else(|| Rc::from(cell.buffer.text.as_str()));
         let gutter = if !cell.filter_input && crate::preferences::editor(cx).line_numbers {
             let digits = cell.buffer.text.split('\n').count().to_string().len();
-            caret_metrics.width * digits as f32
-                + px(12.)
-                + if cell.document {
-                    px(DOCUMENT_GUTTER_EXTRA)
-                } else {
-                    px(0.)
-                }
+            caret_metrics.width * digits as f32 + px(12.) + px(EDITOR_GUTTER_EXTRA)
         } else {
             px(0.)
         };
@@ -2241,27 +2235,25 @@ impl Element for CellText {
         cx: &mut App,
     ) {
         let layout = state.borrow();
-        let gutter_extra = if self.cell.read(cx).document {
-            px(DOCUMENT_GUTTER_EXTRA)
-        } else {
-            px(0.)
-        };
+        let gutter_extra = px(EDITOR_GUTTER_EXTRA);
         if layout.gutter > px(0.) {
-            if self.cell.read(cx).document {
-                // Share the scrolling text origin, but span the viewport so the
-                // gutter remains a continuous divider at the first/last line.
-                let clip = window.content_mask().bounds;
-                window.paint_quad(fill(
-                    Bounds::new(
-                        point(
-                            bounds.left() + layout.gutter - gutter_extra - px(6.),
-                            clip.top(),
-                        ),
-                        size(px(1.), clip.size.height),
+            // Documents span the scrolling viewport; cells keep the divider
+            // within their own text area, including wrapped continuation lines.
+            let divider_bounds = if self.cell.read(cx).document {
+                window.content_mask().bounds
+            } else {
+                bounds
+            };
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(
+                        bounds.left() + layout.gutter - gutter_extra - px(6.),
+                        divider_bounds.top(),
                     ),
-                    cx.theme().app.border,
-                ));
-            }
+                    size(px(1.), divider_bounds.size.height),
+                ),
+                cx.theme().app.border,
+            ));
             let style = window.text_style();
             let font_size = style.font_size.to_pixels(window.rem_size());
             for row in prepaint.visible.clone() {
