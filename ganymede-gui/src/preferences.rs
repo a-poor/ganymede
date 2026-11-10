@@ -57,6 +57,7 @@ pub struct EditorPreferences {
     pub line_numbers: bool,
     pub font_size: u8,
     pub console_enter: bool,
+    pub auto_close_brackets: bool,
 }
 impl Default for EditorPreferences {
     fn default() -> Self {
@@ -65,6 +66,7 @@ impl Default for EditorPreferences {
             line_numbers: false,
             font_size: 12,
             console_enter: false,
+            auto_close_brackets: true,
         }
     }
 }
@@ -186,6 +188,7 @@ mod tests {
                     line_numbers: true,
                     indentation: Indentation::Two,
                     console_enter: true,
+                    auto_close_brackets: false,
                 },
                 ..Preferences::default()
             };

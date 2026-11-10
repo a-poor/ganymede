@@ -68,12 +68,14 @@ impl Setting {
 enum ToggleSetting {
     Autosave,
     LineNumbers,
+    AutoCloseBrackets,
 }
 impl ToggleSetting {
     fn enabled(self, cx: &App) -> bool {
         match self {
             Self::Autosave => cx.global::<crate::autosave::AutosavePreference>().0,
             Self::LineNumbers => crate::preferences::editor(cx).line_numbers,
+            Self::AutoCloseBrackets => crate::preferences::editor(cx).auto_close_brackets,
         }
     }
     fn toggle(self, cx: &mut App) {
@@ -81,6 +83,10 @@ impl ToggleSetting {
             Self::Autosave => {
                 cx.update_global::<crate::autosave::AutosavePreference, _>(|p, _| p.0 = !p.0)
             }
+            Self::AutoCloseBrackets => cx
+                .update_global::<crate::preferences::EditorPreferences, _>(|p, _| {
+                    p.auto_close_brackets = !p.auto_close_brackets
+                }),
             Self::LineNumbers => {
                 cx.update_global::<crate::preferences::EditorPreferences, _>(|p, _| {
                     p.line_numbers = !p.line_numbers
@@ -285,6 +291,9 @@ impl Settings {
         let (id, label) = match setting {
             ToggleSetting::Autosave => ("autosave-toggle", "Autosave"),
             ToggleSetting::LineNumbers => ("line-numbers-toggle", "Line numbers"),
+            ToggleSetting::AutoCloseBrackets => {
+                ("auto-close-brackets-toggle", "Auto close brackets")
+            }
         };
         div()
             .id(id)
@@ -486,6 +495,17 @@ impl Render for Settings {
                                     .child("Line numbers")
                                     .child(self.toggle(ToggleSetting::LineNumbers, cx)),
                             )
+                            .child(div().mx_3().h(px(1.)).bg(t.card.border))
+                            .child(
+                                div()
+                                    .p_3()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child("Auto close brackets")
+                                    .child(self.toggle(ToggleSetting::AutoCloseBrackets, cx)),
+                            )
                             .children([Setting::Indentation, Setting::FontSize].into_iter().map(
                                 |setting| {
                                     div()
@@ -496,14 +516,6 @@ impl Render for Settings {
                             .when(crate::features::UNFINISHED, |view| {
                                 view.child(div().mx_3().h(px(1.)).bg(t.card.border))
                                     .child(self.setting_row(Setting::Console, cx))
-                                    .child(
-                                        div()
-                                            .px_3()
-                                            .pb_2()
-                                            .text_size(t.font.xs)
-                                            .text_color(t.card.muted_fg)
-                                            .child("Auto close brackets — not available yet"),
-                                    )
                                     .child(
                                         div()
                                             .px_3()

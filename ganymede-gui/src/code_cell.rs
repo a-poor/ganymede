@@ -1,5 +1,6 @@
 //! A standalone, in-memory code cell. Notebook persistence and execution can be
 //! connected later without coupling the text-input machinery to a kernel.
+mod pairing;
 pub(crate) mod stdin_prompt;
 use std::{cell::RefCell, ops::Range, rc::Rc, time::Duration};
 
@@ -1044,7 +1045,7 @@ impl CodeCell {
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.replace_text_in_range(
-                None,
+                Some(self.buffer.to_utf16(self.buffer.selection())),
                 &text
                     .replace("\r\n", "\n")
                     .replace('\r', "\n")
@@ -1103,6 +1104,16 @@ impl EntityInputHandler for CodeCell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let pair = range.is_none()
+            && self.marked.is_none()
+            && self.composition_start.is_none()
+            && !self.filter_input
+            && crate::preferences::editor(cx).auto_close_brackets;
+        if pair && self.insert_pair(text) {
+            self.changed(window, cx);
+            cx.emit(CellEvent::Changed);
+            return;
+        }
         let range = range
             .map(|r| self.buffer.utf16_range(r))
             .or(self.marked.clone())
@@ -1318,6 +1329,15 @@ impl Render for CodeCell {
                 this.move_cursor(this.buffer.text.len(), true, w, cx);
             }))
             .on_action(cx.listener(|this, _: &Backspace, w, cx| {
+                if this.buffer.selection().is_empty()
+                    && !this.filter_input
+                    && crate::preferences::editor(cx).auto_close_brackets
+                    && this.delete_pair()
+                {
+                    cx.emit(CellEvent::Changed);
+                    this.changed(w, cx);
+                    return;
+                }
                 if this.buffer.selection().is_empty() {
                     let prefix = &this.buffer.text[this.buffer.line_start()..this.buffer.head];
                     this.buffer.anchor = if !this.filter_input

@@ -171,6 +171,13 @@ and, in Code cells, indents Python block headers and bracket continuations.
 Backspace in leading spaces removes one indentation step. Block indentation is
 one undoable edit and retains the selection direction.
 
+Auto close brackets is enabled by default and persisted in editor preferences.
+Direct typing pairs brackets and quotes, wraps selections without losing their
+direction, skips matching closers, and deletes empty pairs with one Backspace.
+Pair insertion/wrapping/deletion is one undoable edit. Escaped characters,
+apostrophes after words, explicit replacements, paste, IME composition, and
+search/path fields do not trigger pairing.
+
 Notebook outputs render PNG/JPEG/GIF/WebP images (including plots), inert HTML
 and DataFrame tables, Markdown, LaTeX equations, and ANSI-styled streams/tracebacks.
 MIME selection prefers raster images, then HTML, LaTeX, Markdown, and plain text.

@@ -79,6 +79,11 @@ In notebook source and text files, **Option+Left/Right** moves by word; add
 **Shift** to extend the selection. Double-click selects a word, and triple-click
 selects a full line. Drag after either gesture to select whole words or lines.
 
+**Auto close brackets** in Settings pairs `()`, `[]`, `{}`, and quotes while typing
+in notebook source and text files. Type an opening character to wrap selected text;
+type the existing closing character to move past it. Backspace between an empty
+pair removes both characters. Paste and IME composition remain literal.
+
 Use the Run and Kernel menus for execution, interrupt, restart, and shutdown.
 Restart clears the kernel's variables. Closing a notebook does **not** shut down
 its kernel; use the Kernels sidebar to inspect and explicitly shut down kernels.
