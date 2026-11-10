@@ -4,7 +4,7 @@
 [![Latest release](https://img.shields.io/github/v/release/a-poor/ganymede)](https://github.com/a-poor/ganymede/releases/latest)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
-A native Jupyter client (currently just) for macOS, written in Rust with GPUI.
+A native Jupyter client for macOS and Linux, written in Rust with GPUI.
 Create or connect to a Jupyter server, edit notebooks, run cells, and manage files
 and kernels in a desktop app.
 
@@ -16,7 +16,9 @@ Download the signed and notarized DMG from the
 [latest GitHub release](https://github.com/a-poor/ganymede/releases/latest), open it,
 and drag **Ganymede** into **Applications**. A ZIP is also available.
 
-The current release requires **macOS 15 or later and Apple Silicon (M1 or newer)**.
+The published macOS release requires **macOS 15 or later and Apple Silicon (M1 or newer)**.
+Linux preview packages can be [built from source](docs/development/linux.md) or
+downloaded from full CI workflow artifacts once available.
 Automatic updates are not implemented yet; download new versions from Releases.
 
 ## Get started
@@ -40,7 +42,7 @@ running; server and kernel shutdown are explicit actions.
 
 Ganymede is early software. Jupyter widgets, real-time collaboration, password/cookie
 login, and JupyterHub OAuth are not supported. Terminal, console, and Git features
-are unfinished and excluded from release builds. Linux and Windows are also on the
+are unfinished and excluded from release builds. Windows is also on the
 roadmap.
 
 ## Documentation
@@ -48,6 +50,7 @@ roadmap.
 - [User guide](docs/user-guide.md): connections, notebooks, files, recovery, and storage.
 - [Contributing](CONTRIBUTING.md): build from source, checks, and development conventions.
 - [Core API](docs/development/core-api.md): Rust clients and notebook controllers.
+- [Linux builds and testing](docs/development/linux.md): packages, CI, and desktop verification.
 - [macOS distribution](docs/development/distribution.md): packaging, signing, and notarization.
 - [Report a bug](https://github.com/a-poor/ganymede/issues).
 

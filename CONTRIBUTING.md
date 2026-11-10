@@ -59,7 +59,7 @@ include screenshots for visible changes. Add regression tests for protocol,
 persistence, and concurrency fixes. Never automatically replay execution after a
 disconnect or treat closing a window as permission to shut down a kernel.
 
-For bugs, include the app version, macOS version, reproduction steps, and relevant
+For bugs, include the app version, operating system and desktop environment, reproduction steps, and relevant
 errors. Remove tokens, credentials, private notebook contents, and sensitive server
 addresses before attaching logs or screenshots.
 
@@ -92,3 +92,6 @@ selected explicitly in `ganymede-gui/src/assets.rs`.
 Contributions are provided under the project's dual MIT OR Apache-2.0 license.
 Third-party fonts, icons, and dependencies retain their own licenses.
 See [THIRD_PARTY.md](THIRD_PARTY.md).
+
+For Linux build dependencies, packages, and desktop verification, see
+[Linux builds and testing](docs/development/linux.md).

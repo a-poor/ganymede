@@ -179,15 +179,8 @@ fn start_launch(
         return Err("The project root must be a folder.".into());
     }
     let (executable, arguments) = launch_command(mode, python, &root)?;
-    let directory = std::env::temp_dir().join(format!("ganymede-server-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&directory)
-        .map_err(|_| "Could not create the server runtime directory.".to_owned())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
-            .map_err(|_| "Could not secure the runtime directory.".to_owned())?;
-    }
+    let directory = crate::storage::runtime_directory()
+        .map_err(|_| "Could not create a private server runtime directory.".to_owned())?;
     let token = reuse
         .map(|l| l.token.clone())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -582,6 +575,10 @@ pub(crate) enum LocalState {
     Busy,
 }
 impl ManagedServer {
+    pub fn project_folder(&self) -> PathBuf {
+        self.0.lock().unwrap().launch.folder.clone().into()
+    }
+
     pub(super) fn launch_options(&self) -> (Environment, String, String) {
         let server = self.0.lock().unwrap();
         (

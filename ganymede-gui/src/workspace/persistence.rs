@@ -39,7 +39,7 @@ impl Default for Layout {
 pub(super) fn state_path(address: &str) -> PathBuf {
     // Hex is reversible and collision-free, unlike a process-dependent hash.
     // Use a directory component per chunk to stay below filename limits for long base URLs.
-    let mut path = crate::connection::history_path().with_extension("workspaces");
+    let mut path = crate::storage::Paths::current().workspaces;
     let encoded: String = address.bytes().map(|b| format!("{b:02x}")).collect();
     for chunk in encoded.as_bytes().chunks(120) {
         path.push(std::str::from_utf8(chunk).unwrap());

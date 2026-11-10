@@ -14,11 +14,12 @@ mod notebook;
 mod preferences;
 mod rich;
 mod settings;
+mod storage;
 mod syntax;
 mod text_file;
 pub mod theme;
 pub mod toast;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod tray;
 mod updates;
 mod workspace;
@@ -69,6 +70,7 @@ struct SettingsWindow(Option<gpui::WindowHandle<settings::Settings>>);
 impl gpui::Global for SettingsWindow {}
 
 struct Ganymede {
+    app_menu: Entity<menus::in_window::WindowMenu>,
     focus: gpui::FocusHandle,
     workspace: Entity<workspace::Workspace>,
     toasts: Entity<toast::ToastHost>,
@@ -98,6 +100,8 @@ impl Ganymede {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         Self {
+            app_menu: cx
+                .new(|cx| menus::in_window::WindowMenu::new(menus::in_window::Kind::Workspace, cx)),
             focus,
             workspace,
             toasts,
@@ -230,6 +234,12 @@ impl Render for Ganymede {
         let body = theme.app;
         menus::handlers(div().id("main-window"), self, cx)
             .track_focus(&self.focus)
+            .on_action(
+                cx.listener(|this, _: &menus::in_window::OpenMenu, window, cx| {
+                    this.app_menu
+                        .update(cx, |menu, cx| menu.open_first(window, cx));
+                }),
+            )
             .on_action(cx.listener(|this, _: &NewTab, window, cx| {
                 this.workspace
                     .update(cx, |workspace, cx| workspace.open_launcher(window, cx));
@@ -264,11 +274,31 @@ impl Render for Ganymede {
                     .flex()
                     .items_center()
                     .pl(px(88.))
+                    .when(
+                        cfg!(target_os = "linux")
+                            && !window.is_fullscreen()
+                            && matches!(
+                                window.window_decorations(),
+                                gpui::Decorations::Client { .. }
+                            ),
+                        |bar| bar.pr(px(128.)),
+                    )
                     .text_size(theme.font.sm)
                     .text_color(outer.muted_fg)
                     .window_control_area(WindowControlArea::Drag)
+                    .when(cfg!(target_os = "linux"), |bar| {
+                        // Linux needs an explicit move request. Toolbar controls
+                        // stop mouse-down propagation so they remain clickable.
+                        bar.on_mouse_down(gpui::MouseButton::Left, |event, window, _| {
+                            if event.click_count == 2 {
+                                window.zoom_window();
+                            } else {
+                                window.start_window_move();
+                            }
+                        })
+                    })
                     .on_click(|event, window, _| {
-                        if event.click_count() == 2 {
+                        if !cfg!(target_os = "linux") && event.click_count() == 2 {
                             window.titlebar_double_click();
                         }
                     })
@@ -422,7 +452,10 @@ impl Render for Ganymede {
                                     })
                                     .flex()
                                     .flex_col()
-                                    .child(self.workspace.clone()),
+                                    .when(cfg!(target_os = "linux"), |body| {
+                                        body.child(self.app_menu.clone())
+                                    })
+                                    .child(div().flex_1().min_h_0().child(self.workspace.clone())),
                             ),
                     ),
             )
@@ -431,6 +464,10 @@ impl Render for Ganymede {
 }
 
 fn main() {
+    if let Err(error) = storage::Paths::current().migrate() {
+        eprintln!("Could not migrate application storage; original files were retained: {error}");
+        std::process::exit(1);
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -492,7 +529,7 @@ fn main() {
         ]);
         menus::init(cx);
         connection::init(cx);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         tray::init(cx);
         connection::open(cx);
         cx.activate(true);

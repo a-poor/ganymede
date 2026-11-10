@@ -4,7 +4,9 @@ use gpui::{
     WindowOptions, div, point, prelude::*, px, size,
 };
 
-pub struct About;
+pub struct About {
+    focus: gpui::FocusHandle,
+}
 #[derive(Default)]
 struct AboutWindow(Option<WindowHandle<About>>);
 impl gpui::Global for AboutWindow {}
@@ -20,8 +22,13 @@ pub fn open(cx: &mut App) {
     let bounds = Bounds::centered(None, size(px(420.), px(280.)), cx);
     match cx.open_window(
         WindowOptions {
+            app_id: Some("com.austinpoor.ganymede".into()),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             is_resizable: false,
+            #[cfg(target_os = "linux")]
+            window_decorations: Some(gpui::WindowDecorations::Client),
+            #[cfg(target_os = "linux")]
+            window_background: gpui::WindowBackgroundAppearance::Transparent,
             titlebar: Some(TitlebarOptions {
                 title: Some("About Ganymede".into()),
                 appears_transparent: true,
@@ -36,7 +43,9 @@ pub fn open(cx: &mut App) {
                     theme::follow_system_appearance(window, cx)
                 })
                 .detach();
-                About
+                let focus = cx.focus_handle();
+                focus.focus(window, cx);
+                About { focus }
             })
         },
     ) {
@@ -45,9 +54,42 @@ pub fn open(cx: &mut App) {
     }
 }
 impl Render for About {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme();
-        div()
+        let client_frame = cfg!(target_os = "linux")
+            && !window.is_fullscreen()
+            && matches!(
+                window.window_decorations(),
+                gpui::Decorations::Client { .. }
+            );
+        let rounded = client_frame
+            && !window.is_maximized()
+            && !matches!(window.window_decorations(), gpui::Decorations::Client { tiling } if tiling.is_tiled());
+        let inset = if rounded { px(5.) } else { px(0.) };
+        if cfg!(target_os = "linux") {
+            window.set_client_inset(inset);
+        }
+        let content = div()
+            .id("about-root")
+            .track_focus(&self.focus)
+            .on_action(|_: &crate::CloseTab, window, _| window.remove_window())
+            .on_key_down(|event, window, cx| {
+                match event.keystroke.key.as_str() {
+                    "tab" => {
+                        if event.keystroke.modifiers.shift {
+                            window.focus_prev(cx);
+                        } else {
+                            window.focus_next(cx);
+                        }
+                    }
+                    "escape" => window.remove_window(),
+                    _ => return,
+                }
+                cx.stop_propagation();
+            })
+            .when(rounded, |v| {
+                v.rounded(t.radius.xl2()).p(t.radius.xl2() * 0.3)
+            })
             .size_full()
             .flex()
             .flex_col()
@@ -58,14 +100,59 @@ impl Render for About {
             .child(
                 div()
                     .h(px(48.))
+                    .flex_shrink_0()
+                    .relative()
+                    .px(px(64.))
                     .flex()
                     .items_center()
                     .justify_center()
                     .window_control_area(WindowControlArea::Drag)
-                    .child("About Ganymede"),
+                    .when(client_frame, |header| {
+                        header.on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                            window.start_window_move()
+                        })
+                    })
+                    .child("About Ganymede")
+                    .when(client_frame, |header| {
+                        header.child(
+                            crate::connection::button("about-close", "", false, cx)
+                                .aria_label("Close About Ganymede")
+                                .absolute()
+                                .top(px(10.))
+                                .right(px(18.))
+                                .p_0()
+                                .size(px(28.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation()
+                                })
+                                .on_click(|_, window, cx| {
+                                    cx.stop_propagation();
+                                    window.remove_window();
+                                })
+                                .on_key_down(|event, window, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        cx.stop_propagation();
+                                        window.remove_window();
+                                    }
+                                })
+                                .child(
+                                    crate::icon::Icon::X
+                                        .svg()
+                                        .size(px(14.))
+                                        .text_color(t.app.fg),
+                                ),
+                        )
+                    }),
             )
             .child(
                 div()
+                    .id("about-content")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
                     .p_6()
                     .flex()
                     .flex_col()
@@ -101,7 +188,8 @@ impl Render for About {
                                 cx,
                             )),
                     ),
-            )
+            );
+        div().size_full().p(inset).child(content)
     }
 }
 fn link(label: &'static str, url: &'static str, cx: &App) -> impl IntoElement {

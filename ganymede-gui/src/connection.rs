@@ -1,6 +1,8 @@
 //! One connection picker / workspace per native window.
 mod credentials;
 mod discovery;
+#[cfg(target_os = "linux")]
+pub(crate) mod linux_frame;
 mod planet;
 pub(crate) mod server;
 pub(crate) mod ssh;
@@ -40,17 +42,7 @@ struct Connections {
 impl gpui::Global for Connections {}
 
 pub(crate) fn history_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("GANYMEDE_CONNECTIONS_FILE") {
-        return path.into();
-    }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    home.join(if cfg!(target_os = "macos") {
-        "Library/Application Support/Ganymede/connections.json"
-    } else {
-        ".config/ganymede/connections.json"
-    })
+    crate::storage::Paths::current().connections
 }
 fn load_recent() -> Vec<Recent> {
     let data = std::fs::read(history_path())
@@ -249,12 +241,17 @@ fn open_launcher(show: bool, cx: &mut App) -> Option<gpui::WindowHandle<Connecti
     let bounds = gpui::Bounds::centered(None, gpui::size(px(760.), px(560.)), cx);
     let result = cx.open_window(
         gpui::WindowOptions {
+            app_id: Some("com.austinpoor.ganymede".into()),
             window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
             show,
             focus: show,
             is_resizable: false,
             is_minimizable: true,
             window_min_size: Some(gpui::size(px(480.), px(320.))),
+            #[cfg(target_os = "linux")]
+            window_decorations: Some(gpui::WindowDecorations::Client),
+            #[cfg(target_os = "linux")]
+            window_background: gpui::WindowBackgroundAppearance::Transparent,
             titlebar: Some(gpui::TitlebarOptions {
                 title: Some("Ganymede".into()),
                 appears_transparent: true,
@@ -283,12 +280,17 @@ fn open_workspace(
 ) -> anyhow::Result<gpui::WindowHandle<ConnectionWindow>> {
     cx.open_window(
         gpui::WindowOptions {
+            app_id: Some("com.austinpoor.ganymede".into()),
             window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::centered(
                 None,
                 gpui::size(px(1000.), px(700.)),
                 cx,
             ))),
             window_min_size: Some(gpui::size(px(480.), px(320.))),
+            #[cfg(target_os = "linux")]
+            window_decorations: Some(gpui::WindowDecorations::Client),
+            #[cfg(target_os = "linux")]
+            window_background: gpui::WindowBackgroundAppearance::Transparent,
             titlebar: Some(gpui::TitlebarOptions {
                 title: Some(format!("{label} — Ganymede").into()),
                 appears_transparent: true,
@@ -320,6 +322,8 @@ struct PageTransition {
     started: Instant,
 }
 struct ConnectionWindow {
+    #[cfg(target_os = "linux")]
+    app_menu: Entity<crate::menus::in_window::WindowMenu>,
     hidden: bool,
     toasts: Entity<crate::toast::ToastHost>,
     workspace: Option<Entity<crate::Ganymede>>,
@@ -412,6 +416,13 @@ impl ConnectionWindow {
         let toasts = cx.new(|cx| crate::toast::ToastHost::new(window, cx));
         cx.observe(&toasts, |_, _, cx| cx.notify()).detach();
         Self {
+            #[cfg(target_os = "linux")]
+            app_menu: cx.new(|cx| {
+                crate::menus::in_window::WindowMenu::new(
+                    crate::menus::in_window::Kind::Connection,
+                    cx,
+                )
+            }),
             toasts,
             workspace: None,
             hidden: false,
@@ -637,12 +648,17 @@ impl ConnectionWindow {
                 .await
                 .unwrap_or_else(|_| Err("Connection interrupted.".into()));
             let mut saved = false;
-            if result.is_ok() && let Some((address, token)) = save_token {
-                let write = cx.update(|_, cx| cx.write_credentials(&credentials::key(&address), "token", token.as_bytes()));
-                if let Ok(write) = write {
-                    if write.await.is_ok() { saved = true; }
-                    else { result = Err("Connected, but the token could not be saved to Keychain. Try again or uncheck Remember token.".into()); }
-                } else { return; }
+            if result.is_ok() {
+                match credentials::save(save_token, |key, token| {
+                    let write =
+                        cx.update(|_, cx| cx.write_credentials(&key, "token", token.as_bytes()));
+                    async move { write?.await }
+                })
+                .await
+                {
+                    Ok(value) => saved = value,
+                    Err(error) => result = Err(error),
+                }
             }
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
@@ -650,12 +666,15 @@ impl ConnectionWindow {
                     Ok((address, config, label, kernel, info, pending, tunnel)) => {
                         let ssh_host = tunnel.as_ref().map(|t| t.host());
                         let key = ssh::identity(&address, ssh_host.as_deref());
-                        if let Some(tunnel) = &tunnel { tunnel.register_quit(cx); }
+                        if let Some(tunnel) = &tunnel {
+                            tunnel.register_quit(cx);
+                        }
                         let configured = cx.global::<Runtime>();
-                        let kernel = if ssh_host.is_none() && configured
-                            .config
-                            .as_ref()
-                            .is_ok_and(|c| c.base_url().as_str() == address)
+                        let kernel = if ssh_host.is_none()
+                            && configured
+                                .config
+                                .as_ref()
+                                .is_ok_and(|c| c.base_url().as_str() == address)
                         {
                             configured.kernel.clone()
                         } else {
@@ -680,13 +699,27 @@ impl ConnectionWindow {
                                 label: label.clone(),
                                 address: address.clone(),
                                 config: Some(config),
-                                saved_token: saved || cx.global::<Connections>().recent.iter().any(|r| r.key() == key && r.saved_token),
+                                saved_token: saved
+                                    || cx
+                                        .global::<Connections>()
+                                        .recent
+                                        .iter()
+                                        .any(|r| r.key() == key && r.saved_token),
                                 ssh_host: ssh_host.clone(),
-                                local_info: if ssh_host.is_none() { managed_server(&address, cx).map(|s| s.connection().1).or(info) } else { None },
-                                local_id: pending
-                                    .as_ref()
-                                    .and_then(|p| p.id())
-                                    .or_else(|| if ssh_host.is_none() { managed_server(&address, cx).and_then(|s| s.id()) } else { None }),
+                                local_info: if ssh_host.is_none() {
+                                    managed_server(&address, cx)
+                                        .map(|s| s.connection().1)
+                                        .or(info)
+                                } else {
+                                    None
+                                },
+                                local_id: pending.as_ref().and_then(|p| p.id()).or_else(|| {
+                                    if ssh_host.is_none() {
+                                        managed_server(&address, cx).and_then(|s| s.id())
+                                    } else {
+                                        None
+                                    }
+                                }),
                             },
                             cx,
                         );
@@ -723,22 +756,24 @@ impl ConnectionWindow {
         {
             self.edit_recent(&recent, window, cx);
             self.busy = true;
+            self.reading_token = true;
             let read = cx.read_credentials(&credentials::key(&recent.key()));
             self.task = cx.spawn_in(window, async move |this, cx| {
                 let result = read.await;
                 let _ = this.update_in(cx, |this, window, cx| {
                     this.busy = false;
-                    match result.ok().flatten().and_then(|(_, bytes)| String::from_utf8(bytes).ok()) {
-                        Some(token) => {
-                            this.token.update(cx, |input, cx| input.set_value(token.clone(), cx));
-                            match server::parse_connection(&recent.address, &token) {
-                                Ok((address, config)) => this.connect(address, config, recent.label, None, window, cx),
-                                Err(error) => this.error = Some(error),
+                    this.reading_token = false;
+                    if let Some(token) = this.restore_token(result, window, cx) {
+                        match server::parse_connection(&recent.address, &token) {
+                            Ok((address, config)) => {
+                                this.connect(address, config, recent.label, None, window, cx)
                             }
+                            Err(error) => this.error = Some(error),
                         }
-                        None => this.error = Some("Could not read the saved token. Enter it again, or unlock Keychain and retry.".into()),
                     }
-                    if !this.busy { this.reveal(window, cx); }
+                    if !this.busy {
+                        this.reveal(window, cx);
+                    }
                     cx.notify();
                 });
             });
@@ -824,27 +859,37 @@ impl ConnectionWindow {
         let read = cx.read_credentials(&credentials::key(&recent.key()));
         self.task = cx.spawn_in(window, async move |this, cx| {
             let result = read.await;
-            let _ =
-                this.update_in(cx, |this, window, cx| {
-                    this.busy = false;
-                    this.reading_token = false;
-                    match result
-                        .ok()
-                        .flatten()
-                        .and_then(|(_, bytes)| String::from_utf8(bytes).ok())
-                    {
-                        Some(token) => this
-                            .token
-                            .update(cx, |input, cx| input.set_value(token, cx)),
-                        None => this.error = Some(
-                            "Could not read the saved token. Enter it again or unlock Keychain."
-                                .into(),
-                        ),
-                    }
-                    this.token.read(cx).focus_handle(cx).focus(window, cx);
-                    cx.notify();
-                });
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.busy = false;
+                this.reading_token = false;
+                this.restore_token(result, window, cx);
+                this.token.read(cx).focus_handle(cx).focus(window, cx);
+                cx.notify();
+            });
         });
+    }
+    fn restore_token(
+        &mut self,
+        result: credentials::StoredToken,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        match credentials::restored(result) {
+            Ok(token) => {
+                self.token
+                    .update(cx, |input, cx| input.set_value(token.clone(), cx));
+                self.error = None;
+                Some(token)
+            }
+            Err(error) => {
+                // Manual entry must not immediately retry the failing store.
+                // This does not claim to delete an existing saved credential.
+                self.remember_token = false;
+                self.error = Some(error);
+                self.token.read(cx).focus_handle(cx).focus(window, cx);
+                None
+            }
+        }
     }
     fn forget_token(&mut self, address: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy {
@@ -855,36 +900,45 @@ impl ConnectionWindow {
         self.task = cx.spawn_in(window, async move |this, cx| {
             let result = delete.await;
             let _ = this.update_in(cx, |this, _, cx| {
-                this.busy = false;
-                if credentials::deleted(&result) {
-                    let recent = cx
-                        .global::<Connections>()
-                        .recent
-                        .iter()
-                        .find(|r| r.key() == address)
-                        .cloned();
-                    if let Some(mut recent) = recent {
-                        recent.saved_token = false;
-                        recent.config = None;
-                        remember(recent, cx);
-                    }
-                    this.remember_token = false;
-                    this.token
-                        .update(cx, |input, cx| input.set_value(String::new(), cx));
-                    this.error = None;
-                } else {
-                    this.error =
-                        Some("Could not forget the token. Unlock Keychain and try again.".into());
-                }
-                cx.notify();
+                this.finish_forgetting(&address, result, cx);
             });
         });
+        cx.notify();
+    }
+    fn finish_forgetting(
+        &mut self,
+        address: &str,
+        result: anyhow::Result<()>,
+        cx: &mut Context<Self>,
+    ) {
+        self.busy = false;
+        if credentials::deleted(&result) {
+            let recent = cx
+                .global::<Connections>()
+                .recent
+                .iter()
+                .find(|r| r.key() == address)
+                .cloned();
+            if let Some(mut recent) = recent {
+                recent.saved_token = false;
+                recent.config = None;
+                remember(recent, cx);
+            }
+            self.remember_token = false;
+            self.token
+                .update(cx, |input, cx| input.set_value(String::new(), cx));
+            self.error = None;
+        } else {
+            self.error = Some(credentials::forget_error());
+        }
         cx.notify();
     }
     fn remember_control(&self, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.theme();
         div()
             .id("remember-token")
+            .debug_selector(|| "remember-token".into())
+            .aria_label("Remember token")
             .tab_index(0)
             .flex()
             .items_center()
@@ -913,8 +967,7 @@ impl ConnectionWindow {
                     .child(if self.remember_token { "✓" } else { "" }),
             )
             .child("Remember token")
-            .hover(|s| s.text_color(t.card.primary))
-            .focus(|s| s.bg(t.card.accent).text_color(t.card.accent_fg))
+            .focus_visible(|s| s.bg(t.card.accent).text_color(t.card.accent_fg))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.remember_token = !this.remember_token;
                 cx.notify();
@@ -966,7 +1019,7 @@ fn field(label: &'static str, input: Entity<Field>, cx: &App) -> gpui::Div {
         .child(div().text_color(cx.theme().app.muted_fg).child(label))
         .child(div().flex().child(input))
 }
-fn button(
+pub(crate) fn button(
     id: &'static str,
     label: &'static str,
     primary: bool,
@@ -1595,12 +1648,10 @@ impl ConnectionWindow {
                     .child(div().font_weight(gpui::FontWeight::MEDIUM).child(
                         if page == Page::Local {
                             "Starting Jupyter…"
+                        } else if self.reading_token {
+                            "Loading saved token…"
                         } else {
-                            if self.reading_token {
-                                "Loading saved token…"
-                            } else {
-                                "Connecting…"
-                            }
+                            "Connecting…"
                         },
                     ))
                     .child(
@@ -1720,7 +1771,7 @@ impl ConnectionWindow {
                             .child(field("Server URL", self.address.clone(), cx))
                             .child(field("Token (optional)", self.token.clone(), cx))
                             .child(div().w_full().max_w(px(420.)).flex().items_center().justify_between()
-                            .when(cfg!(target_os = "macos"), |v| v.child(self.remember_control(cx)))
+                            .child(self.remember_control(cx))
                             .when_some(server::parse_connection(self.address.read(cx).value(), "").ok().and_then(|(a, _)| ssh::host(self.ssh_host.read(cx).value()).ok().map(|host| ssh::identity(&a, host.as_deref()))).filter(|address| cx.global::<Connections>().recent.iter().any(|r| r.key() == *address && r.saved_token)), |v, address| {
                                 let key_address = address.clone();
                                 v.child(div().flex().child(div().id("forget-token").tab_index(0).py_1().text_size(t.font.xs).text_color(t.app.muted_fg).cursor_pointer().hover(|s| s.underline().text_color(t.app.fg)).focus_visible(|s| s.underline().text_color(t.app.fg)).child("Forget token")
@@ -1736,7 +1787,7 @@ impl ConnectionWindow {
                                 div()
                                     .text_size(t.font.xs)
                                     .text_color(t.card.muted_fg)
-                                    .child("Tokens are saved in macOS Keychain. You can forget them anytime."),
+                                    .child(credentials::help()),
                             ),
                     )
                     .child(div().flex().flex_col().gap_2()
@@ -1758,7 +1809,14 @@ impl ConnectionWindow {
             }
         }
         if let Some(error) = &self.error {
-            body = body.child(div().text_color(t.destructive).child(error.clone()));
+            body = body.child(
+                div()
+                    .p_3()
+                    .rounded(t.radius.lg())
+                    .bg(t.dialog_destructive_bg)
+                    .text_color(t.dialog_destructive_fg)
+                    .child(error.clone()),
+            );
         }
         div()
             .id(match page {
@@ -1805,7 +1863,12 @@ impl ConnectionWindow {
                 div()
                     .h(px(28.))
                     .flex_shrink_0()
-                    .window_control_area(gpui::WindowControlArea::Drag),
+                    .window_control_area(gpui::WindowControlArea::Drag)
+                    .when(cfg!(target_os = "linux"), |region| {
+                        region.on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                            window.start_window_move();
+                        })
+                    }),
             )
             .child(
                 div()
@@ -1832,6 +1895,16 @@ impl ConnectionWindow {
 }
 impl Render for ConnectionWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = self.render_content(window, cx);
+        #[cfg(target_os = "linux")]
+        return self.linux_frame(content, window, cx);
+        #[cfg(not(target_os = "linux"))]
+        content
+    }
+}
+
+impl ConnectionWindow {
+    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         if let Some(workspace) = &self.workspace {
             self.planet = None;
             return div()
@@ -1884,9 +1957,14 @@ impl Render for ConnectionWindow {
             .shadow(vec![t.launcher_shadow.clone()])
             .child(
                 div()
-                    .h(px(48.))
+                    .h(px(if cfg!(target_os = "linux") { 16. } else { 48. }))
                     .flex_shrink_0()
-                    .window_control_area(gpui::WindowControlArea::Drag),
+                    .window_control_area(gpui::WindowControlArea::Drag)
+                    .when(cfg!(target_os = "linux"), |region| {
+                        region.on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                            window.start_window_move();
+                        })
+                    }),
             )
             .child(
                 div()
@@ -2148,10 +2226,10 @@ pub(crate) fn update_local_history(address: &str, cx: &mut App) {
 }
 
 /// Menu snapshots contain display metadata only, never authentication material.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 type TrayEntries = Vec<(String, String)>;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) fn tray_connections(cx: &App) -> (TrayEntries, TrayEntries) {
     let connections = cx.global::<Connections>();
     let recent = connections
@@ -2184,7 +2262,7 @@ pub(crate) fn tray_connections(cx: &App) -> (TrayEntries, TrayEntries) {
     (recent, running)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) fn open_recent(key: &str, cx: &mut App) {
     let recent = cx
         .global::<Connections>()
@@ -2204,7 +2282,7 @@ pub(crate) fn open_recent(key: &str, cx: &mut App) {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) fn tray_server(address: &str, stop: bool, cx: &mut App) {
     let Some(server) = managed_server(address, cx) else {
         return;
@@ -2243,6 +2321,123 @@ pub(crate) fn tray_server(address: &str, stop: bool, cx: &mut App) {
 mod tests {
     use super::*;
 
+    fn credential_form(
+        window: &mut Window,
+        cx: &mut Context<ConnectionWindow>,
+    ) -> ConnectionWindow {
+        cx.set_global(
+            crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+        );
+        cx.set_global(crate::theme::AppearancePreference::default());
+        cx.set_global(Connections::default());
+        let mut view = ConnectionWindow::new(window, cx);
+        view.page = Page::Existing;
+        view
+    }
+
+    #[gpui::test]
+    fn remember_token_is_visible_and_can_be_disabled(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(credential_form);
+        let bounds = cx
+            .debug_bounds("remember-token")
+            .expect("Remember token must be available on Linux too");
+        assert!(view.read_with(cx, |v, _| v.remember_token));
+        cx.simulate_click(bounds.center(), Default::default());
+        assert!(!view.read_with(cx, |v, _| v.remember_token));
+    }
+
+    #[gpui::test]
+    fn unavailable_saved_credentials_allow_manual_entry_without_retrying_storage(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(credential_form);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                assert!(
+                    view.restore_token(Err(anyhow::anyhow!("locked: private-token")), window, cx)
+                        .is_none()
+                );
+                assert!(!view.remember_token);
+                assert!(view.token.read(cx).focus_handle(cx).is_focused(window));
+                assert!(!view.error.as_ref().unwrap().contains("private-token"));
+            })
+        });
+        cx.simulate_input("manual-token");
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.token.read(cx).value(), "manual-token");
+            assert!(!view.remember_token);
+        });
+    }
+
+    #[gpui::test]
+    fn restored_credentials_populate_the_token_field(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(credential_form);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.error = Some("Previous error".into());
+                assert_eq!(
+                    view.restore_token(
+                        Ok(Some(("token".into(), b"saved-token".to_vec()))),
+                        window,
+                        cx
+                    )
+                    .as_deref(),
+                    Some("saved-token")
+                );
+                assert_eq!(view.token.read(cx).value(), "saved-token");
+                assert!(view.error.is_none());
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn failed_forget_keeps_the_saved_record_and_cached_credentials(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(credential_form);
+        cx.update(|_, cx| {
+            let (address, config) =
+                server::parse_connection("https://example.test/", "test-token").unwrap();
+            cx.global_mut::<Connections>().recent.push(Recent {
+                label: "Test".into(),
+                address: address.clone(),
+                config: Some(config),
+                saved_token: true,
+                ssh_host: None,
+                local_info: None,
+                local_id: None,
+            });
+            view.update(cx, |view, cx| {
+                view.busy = true;
+                view.finish_forgetting(&address, Err(anyhow::anyhow!("locked: test-token")), cx);
+                assert!(!view.busy);
+                assert!(view.remember_token);
+                assert!(!view.error.as_ref().unwrap().contains("test-token"));
+            });
+            let recent = &cx.global::<Connections>().recent[0];
+            assert!(recent.saved_token);
+            assert!(recent.config.is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn forgetting_an_already_missing_token_clears_the_form(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(credential_form);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.token
+                    .update(cx, |input, cx| input.set_value("test-token".into(), cx));
+                // GPUI's test credential backend returns success for an absent item.
+                view.forget_token("https://example.test/".into(), window, cx);
+            })
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            assert!(!view.busy);
+            assert!(!view.remember_token);
+            assert!(view.token.read(cx).value().is_empty());
+            assert!(view.error.is_none());
+        });
+    }
+
     #[gpui::test]
     fn background_connection_stays_hidden_until_failure(cx: &mut gpui::TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -2276,7 +2471,7 @@ mod tests {
         });
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[gpui::test]
     fn tray_recents_keep_ssh_identity_and_open_missing_credentials_in_form(
         cx: &mut gpui::TestAppContext,

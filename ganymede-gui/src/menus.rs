@@ -1,4 +1,5 @@
 //! Native application menus. Commands route through the same operations as UI controls.
+pub mod in_window;
 use crate::Ganymede;
 use gpui::{App, Context, KeyBinding, Menu, MenuItem, prelude::*};
 gpui::actions!(
@@ -102,8 +103,15 @@ pub fn init(cx: &mut App) {
         KeyBinding::new(&format!("{modifier}-enter"), RunCell, Some("Notebook")),
         KeyBinding::new("alt-enter", RunInsert, Some("Notebook")),
     ]);
+    if cfg!(target_os = "linux") {
+        cx.bind_keys([KeyBinding::new("f10", in_window::OpenMenu, None)]);
+    }
+    cx.set_menus(definitions());
+}
+
+pub(super) fn definitions() -> Vec<Menu> {
     use MenuItem as I;
-    cx.set_menus(vec![
+    vec![
         Menu::new("Ganymede").items([
             I::action("About Ganymede", About),
             I::action("Check for Updates…", CheckForUpdates),
@@ -211,7 +219,7 @@ pub fn init(cx: &mut App) {
             I::action("Ganymede Documentation", Documentation),
             I::action("Report an Issue…", ReportIssue),
         ]),
-    ]);
+    ]
 }
 
 pub fn handlers(

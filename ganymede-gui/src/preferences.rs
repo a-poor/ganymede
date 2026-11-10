@@ -90,9 +90,7 @@ pub struct Persistence {
 impl gpui::Global for Persistence {}
 
 fn path() -> PathBuf {
-    std::env::var_os("GANYMEDE_PREFERENCES_FILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| crate::connection::history_path().with_extension("preferences.json"))
+    crate::storage::Paths::current().preferences
 }
 
 fn read(path: &Path) -> anyhow::Result<Preferences> {

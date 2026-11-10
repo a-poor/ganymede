@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       full:
-        description: Run the full macOS checks and release build
+        description: Run macOS checks and Linux/macOS release builds
         type: boolean
         default: false
 
@@ -23,9 +23,14 @@ env:
 
 jobs:
   quick:
-    name: Linux core checks
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    name: Linux workspace checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,14 +46,22 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ runner.arch }}-core-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          key: ${{ runner.os }}-${{ runner.arch }}-workspace-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-core-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            ${{ runner.os }}-${{ runner.arch }}-workspace-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
       - run: cargo fmt --all -- --check
+      - name: Install Linux build dependencies
+        run: bash scripts/install-linux-deps.sh
       - name: Test release automation
         run: python3 -m unittest discover -s scripts/tests -v
-      - run: cargo clippy --locked -p ganymede-core --all-targets -- -D warnings
-      - run: cargo test --locked -p ganymede-core
+      - name: Fetch bundled fonts and icons
+        run: bash scripts/fetch-assets.sh
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+      - name: Test Linux tray service
+        run: dbus-run-session -- cargo test --locked -p ganymede-gui linux_tray_exports_updates_and_removes_its_dbus_menu -- --ignored
+      - name: Check unfinished feature
+        run: cargo check --locked -p ganymede-gui --features unfinished
 
   checks:
     name: Full macOS checks
@@ -128,5 +141,45 @@ jobs:
           path: |
             target/dist/Ganymede-macOS.zip
             target/dist/Ganymede-macOS.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+  release-linux:
+    name: Linux release build
+    env:
+      CARGO_BUILD_JOBS: "2"
+    needs: quick
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: |
+          toolchain=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$toolchain" --profile minimal
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+      - name: Install Linux build dependencies
+        run: bash scripts/install-linux-deps.sh
+      - name: Build and package release
+        run: python3 scripts/package-linux.py
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ganymede-Linux-${{ runner.arch }}
+          path: |
+            target/dist/ganymede-*.tar.gz
+            target/dist/ganymede_*.deb
+            target/dist/ganymede-*.sha256
           if-no-files-found: error
           retention-days: 14

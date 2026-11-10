@@ -2,6 +2,19 @@
 
 [Back to the README](../README.md)
 
+## Application menus
+
+On Linux, the main window shows File, Edit, View, Run, Kernel, Window, and Help
+menus above the active tab's content, including the launcher. Settings is in File;
+About and Check for Updates are in Help. The connection and Settings windows use
+a hamburger menu beside the close button with commands relevant to those windows.
+macOS continues to use the system menu bar.
+
+Press **F10** on Linux to open the menu. Use Left/Right to switch menus, Up/Down to
+select a command, and Enter to run it. Escape, Tab, or clicking outside dismisses
+the menu. Unavailable commands are dimmed. Text-editing commands operate on the
+editor selection that was active before opening the menu.
+
 ## Create a local server
 
 Choose **Create** on the welcome screen, select your project folder, and choose a
@@ -42,8 +55,15 @@ Choose **Connect**, enter the Jupyter server URL and token if required, then cli
 **Connect**. URLs with a deployment prefix are supported, as are pasted Jupyter
 Lab URLs containing a token.
 
-**Remember token** saves a successfully validated token in macOS Keychain. Recent
-connections let you reopen a server. Their overflow menu offers **Edit connection…**
+**Remember token** saves a successfully validated token in the system keyring
+(macOS Keychain on macOS). Turn it off to connect without saving a token. Linux
+credential storage requires an available, unlocked system keyring. If saving
+fails, unlock it and retry, or turn off Remember token and connect again. If a
+saved token cannot be loaded, the form turns remembering off and lets you enter
+the token manually. Turning remembering off does not delete an existing saved
+token; use **Forget token** for that.
+
+Recent connections let you reopen a server. Their overflow menu offers **Edit connection…**
 to review or change the connection before opening it, and **Remove from recents**.
 Use **Forget token** in the connection form to remove a saved credential.
 
@@ -155,9 +175,40 @@ saved tabs and sidebar layout; restoring a layout does not execute cells.
 On macOS, the default storage directory is
 `~/Library/Application Support/Ganymede/`. It contains preferences, recent
 connections, workspace layouts, recovery copies, and local server records.
+
+On Linux, Ganymede follows XDG directory settings:
+
+| Contents | Location | Default base directory |
+| --- | --- | --- |
+| Preferences | `$XDG_CONFIG_HOME/ganymede/preferences.json` | `~/.config` |
+| Recent connections | `$XDG_STATE_HOME/ganymede/connections.json` | `~/.local/state` |
+| Layouts and recovery copies | `$XDG_STATE_HOME/ganymede/connections.workspaces/` | `~/.local/state` |
+| Local server records | `$XDG_STATE_HOME/ganymede/connections.servers/` | `~/.local/state` |
+| Server runtime files | `$XDG_RUNTIME_DIR/ganymede/server-<uuid>/` | Private temporary directory if unavailable |
+
+Empty or relative config/state directory settings use the defaults. Runtime
+directories must be owned by the current user with permissions `0700`.
+Ganymede currently has no separate persistent cache or application-data files
+requiring `XDG_CACHE_HOME` or `XDG_DATA_HOME`.
+
+At startup, Linux builds copy legacy data from `~/.config/ganymede/` to the new
+locations without overwriting existing destination files. Original files remain
+available for recovery, including any conflicting backups. Completion markers
+prevent migration from restoring old state after you delete its new copy.
+If migration fails, startup stops and reports the error; the originals remain.
+Close older Ganymede versions before migrating so they cannot keep writing to
+the legacy locations.
+
+For development and tests, `GANYMEDE_CONNECTIONS_FILE` still overrides connection
+storage and the derived workspace, server, and preference paths, bypassing legacy
+migration. `GANYMEDE_PREFERENCES_FILE` overrides preferences independently. These
+development overrides take precedence over XDG settings; normal Linux use should
+use XDG settings instead.
+
 Recovery copies contain notebook or text-file contents, and local server records
 include the credentials needed to manage those servers. Remembered remote tokens
-are stored in Keychain. Treat local app data as private when sharing diagnostics.
+are stored in the system keyring (Keychain on macOS). Treat local app data as
+private when sharing diagnostics.
 
 ## Check for updates
 
@@ -219,3 +270,15 @@ endpoint: use attachments or embedded outputs instead. Interactive widgets and
 JavaScript outputs may not survive static conversion, and HTML equations or
 widgets may need network access to load their rendering libraries. PDF rendering
 also depends on those resources being available to Chromium.
+
+For managed local projects, right-click a file or folder and choose **Show in Finder**
+on macOS or **Show in file manager** on Linux
+to reveal it on your desktop. This action is omitted for remote and SSH connections.
+After exporting a notebook, **Show file** reveals the saved export.
+
+On Linux, **Show tray icon** in Settings enables a StatusNotifierItem tray menu
+with the same recent connections and local-server commands. The desktop must
+provide a compatible tray host; GNOME may require an AppIndicator extension.
+The tray is optional, and its commands remain accessible in the app. Closing a
+window does not stop local servers; use the tray's **Stop…** command to confirm
+stopping a server, or **Quit Ganymede** to exit the application.

@@ -9,6 +9,8 @@ use crate::{
 };
 
 pub struct Settings {
+    focus: gpui::FocusHandle,
+    app_menu: gpui::Entity<crate::menus::in_window::WindowMenu>,
     dropdown: Option<Setting>,
     selected: usize,
 }
@@ -66,7 +68,7 @@ impl Setting {
 
 #[derive(Clone, Copy)]
 enum ToggleSetting {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     MenuBar,
     Autosave,
     LineNumbers,
@@ -75,7 +77,7 @@ enum ToggleSetting {
 impl ToggleSetting {
     fn enabled(self, cx: &App) -> bool {
         match self {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             Self::MenuBar => cx.global::<crate::preferences::MenuBarPreference>().0,
             Self::Autosave => cx.global::<crate::autosave::AutosavePreference>().0,
             Self::LineNumbers => crate::preferences::editor(cx).line_numbers,
@@ -84,7 +86,7 @@ impl ToggleSetting {
     }
     fn toggle(self, cx: &mut App) {
         match self {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             Self::MenuBar => {
                 cx.update_global::<crate::preferences::MenuBarPreference, _>(|p, _| p.0 = !p.0);
                 crate::tray::refresh(cx);
@@ -110,7 +112,12 @@ pub fn open(cx: &mut App) -> anyhow::Result<WindowHandle<Settings>> {
     let bounds = Bounds::centered(None, size(px(520.), px(420.)), cx);
     cx.open_window(
         WindowOptions {
+            app_id: Some("com.austinpoor.ganymede".into()),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
+            #[cfg(target_os = "linux")]
+            window_decorations: Some(gpui::WindowDecorations::Client),
+            #[cfg(target_os = "linux")]
+            window_background: gpui::WindowBackgroundAppearance::Transparent,
             window_min_size: Some(size(px(480.), px(220.))),
             titlebar: Some(TitlebarOptions {
                 title: Some("Settings".into()),
@@ -134,7 +141,16 @@ pub fn open(cx: &mut App) -> anyhow::Result<WindowHandle<Settings>> {
                     .detach();
                 cx.observe_global::<crate::preferences::EditorPreferences>(|_, cx| cx.notify())
                     .detach();
+                let focus = cx.focus_handle();
+                focus.focus(window, cx);
                 Settings {
+                    focus,
+                    app_menu: cx.new(|cx| {
+                        crate::menus::in_window::WindowMenu::new(
+                            crate::menus::in_window::Kind::Settings,
+                            cx,
+                        )
+                    }),
                     dropdown: None,
                     selected: 0,
                 }
@@ -298,8 +314,8 @@ impl Settings {
         let t = cx.theme();
         let enabled = setting.enabled(cx);
         let (id, label) = match setting {
-            #[cfg(target_os = "macos")]
-            ToggleSetting::MenuBar => ("menu-bar-toggle", "Show menu bar icon"),
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            ToggleSetting::MenuBar => ("menu-bar-toggle", crate::tray::setting_label()),
             ToggleSetting::Autosave => ("autosave-toggle", "Autosave"),
             ToggleSetting::LineNumbers => ("line-numbers-toggle", "Line numbers"),
             ToggleSetting::AutoCloseBrackets => {
@@ -419,10 +435,58 @@ impl Settings {
 }
 
 impl Render for Settings {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let client_frame = cfg!(target_os = "linux")
+            && !window.is_fullscreen()
+            && matches!(
+                window.window_decorations(),
+                gpui::Decorations::Client { .. }
+            );
+        let rounded = client_frame
+            && !window.is_maximized()
+            && !matches!(window.window_decorations(), gpui::Decorations::Client { tiling } if tiling.is_tiled());
+        let inset = if rounded { px(5.) } else { px(0.) };
+        if cfg!(target_os = "linux") {
+            window.set_client_inset(inset);
+        }
+        let content = self.render_content(rounded, cx);
+        div()
+            .size_full()
+            .p(inset)
+            .map(|frame| {
+                #[cfg(target_os = "linux")]
+                let frame = frame.when(rounded, |frame| {
+                    frame.on_mouse_down(gpui::MouseButton::Left, move |event, window, _| {
+                        if let Some(edge) = crate::connection::linux_frame::resize_edge(
+                            event.position,
+                            window.viewport_size(),
+                            inset,
+                        ) {
+                            window.start_window_resize(edge);
+                        }
+                    })
+                });
+                frame
+            })
+            .child(content)
+    }
+}
+
+impl Settings {
+    fn render_content(&self, rounded: bool, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.theme();
         div()
             .id("settings-root")
+            .when(rounded, |root| {
+                root.rounded(t.radius.xl2()).p(t.radius.xl2() * 0.3)
+            })
+            .track_focus(&self.focus)
+            .on_action(
+                cx.listener(|this, _: &crate::menus::in_window::OpenMenu, window, cx| {
+                    this.app_menu
+                        .update(cx, |menu, cx| menu.open_first(window, cx));
+                }),
+            )
             .on_key_down(|event, window, cx| {
                 if event.keystroke.key == "tab" {
                     if event.keystroke.modifiers.shift {
@@ -446,10 +510,52 @@ impl Render for Settings {
                     .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .pl(px(84.))
+                    .pl(px(if cfg!(target_os = "linux") { 16. } else { 84. }))
                     .window_control_area(WindowControlArea::Drag)
+                    .when(cfg!(target_os = "linux"), |bar| {
+                        bar.on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                            window.start_window_move()
+                        })
+                    })
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("Settings"),
+                    .child("Settings")
+                    .when(cfg!(target_os = "linux"), |bar| {
+                        bar.child(
+                            div()
+                                .ml_auto()
+                                .mr_4()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(self.app_menu.clone())
+                                .child(
+                                    crate::connection::button("settings-close", "", false, cx)
+                                        .aria_label("Close Settings")
+                                        .p_0()
+                                        .size(px(28.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(|_, window, cx| {
+                                            cx.stop_propagation();
+                                            window.remove_window();
+                                        })
+                                        .on_key_down(|event, window, cx| {
+                                            if matches!(
+                                                event.keystroke.key.as_str(),
+                                                "enter" | "space"
+                                            ) {
+                                                cx.stop_propagation();
+                                                window.remove_window();
+                                            }
+                                        })
+                                        .child(Icon::X.svg().size(px(14.)).text_color(t.app.fg)),
+                                ),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -478,7 +584,7 @@ impl Render for Settings {
                                     .child(self.appearance_selector(cx)),
                             )
                             .children({
-                                #[cfg(target_os = "macos")]
+                                #[cfg(any(target_os = "macos", target_os = "linux"))]
                                 {
                                     Some(
                                         div()
@@ -491,12 +597,12 @@ impl Render for Settings {
                                                     .flex()
                                                     .items_center()
                                                     .justify_between()
-                                                    .child("Show menu bar icon")
+                                                    .child(crate::tray::setting_label())
                                                     .child(self.toggle(ToggleSetting::MenuBar, cx)),
                                             ),
                                     )
                                 }
-                                #[cfg(not(target_os = "macos"))]
+                                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
                                 {
                                     None::<gpui::Div>
                                 }

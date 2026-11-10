@@ -55,7 +55,7 @@ impl Server {
     }
 }
 impl Workspace {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub(crate) fn has_server(&self, address: &str) -> bool {
         self.runtime.tunnel.is_none()
             && self
@@ -94,7 +94,10 @@ impl Workspace {
         }
     }
 
-    fn local_server(&self, cx: &App) -> Option<crate::connection::server::ManagedServer> {
+    pub(super) fn local_server(
+        &self,
+        cx: &App,
+    ) -> Option<crate::connection::server::ManagedServer> {
         if self.runtime.tunnel.is_some() {
             return None;
         }

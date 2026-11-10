@@ -1,10 +1,19 @@
-//! Native macOS menu-bar integration. All native objects stay on GPUI's main thread.
+//! Native macOS menu-bar and Linux StatusNotifierItem integration.
+//! UI commands return to GPUI's main thread; KSNI owns the Linux D-Bus worker.
 use gpui::{App, Global};
 use std::{collections::HashMap, time::Duration};
 use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu},
 };
+
+pub fn setting_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Show menu bar icon"
+    } else {
+        "Show tray icon"
+    }
+}
 
 type Entries = Vec<(String, String)>;
 #[derive(Clone)]
@@ -82,16 +91,10 @@ pub fn refresh(cx: &mut App) {
             if let Some(icon) = &tray.icon {
                 icon.set_menu(Some(Box::new(menu)));
             } else {
-                match TrayIconBuilder::new()
-                    .with_icon_templated(planet_icon())
-                    .with_tooltip("Ganymede")
-                    .with_autosave_name("GanymedeMenuBar")
-                    .with_menu(Box::new(menu))
-                    .build()
-                {
+                match create_icon(menu) {
                     Ok(icon) => tray.icon = Some(icon),
                     Err(error) => {
-                        eprintln!("Could not create menu bar icon: {error}");
+                        eprintln!("Could not create tray icon: {error}");
                         return;
                     }
                 }
@@ -99,8 +102,19 @@ pub fn refresh(cx: &mut App) {
             tray.commands = commands;
             tray.snapshot = Some(snapshot);
         }
-        Err(error) => eprintln!("Could not update menu bar menu: {error}"),
+        Err(error) => eprintln!("Could not update tray menu: {error}"),
     }
+}
+
+fn create_icon(menu: Menu) -> tray_icon::Result<TrayIcon> {
+    let builder = TrayIconBuilder::new().with_tooltip("Ganymede");
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .with_icon_templated(planet_icon())
+        .with_autosave_name("GanymedeMenuBar");
+    #[cfg(target_os = "linux")]
+    let builder = builder.with_icon(planet_icon()).with_title("Ganymede");
+    builder.with_menu(Box::new(menu)).build()
 }
 
 fn label(value: &str) -> String {
@@ -148,9 +162,14 @@ fn build_menu(snapshot: &(Entries, Entries)) -> anyhow::Result<(Menu, HashMap<Me
 
 fn planet_icon() -> Icon {
     // Template artwork: AppKit adapts the dotted sphere to the menu-bar appearance.
-    let image = image::load_from_memory(include_bytes!("../branding/icon-menu-bar.png"))
-        .expect("bundled menu-bar icon is valid PNG")
-        .into_rgba8();
+    #[cfg(target_os = "macos")]
+    let artwork = include_bytes!("../branding/icon-menu-bar.png").as_slice();
+    #[cfg(target_os = "linux")]
+    let artwork = include_bytes!("../branding/icon-source.png").as_slice();
+    let image = image::load_from_memory(artwork).expect("bundled tray icon is valid PNG");
+    #[cfg(target_os = "linux")]
+    let image = image.thumbnail(32, 32);
+    let image = image.into_rgba8();
     let (width, height) = image.dimensions();
     Icon::from_rgba(image.into_raw(), width, height).expect("valid menu icon dimensions")
 }
@@ -162,5 +181,108 @@ mod tests {
     fn menu_labels_are_single_line_and_bounded() {
         assert_eq!(label("Project\nname\t"), "Projectname");
         assert_eq!(label(&"é".repeat(80)).chars().count(), 73);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run under dbus-run-session; requires gdbus"]
+    fn linux_tray_exports_updates_and_removes_its_dbus_menu() {
+        fn call(dest: &str, path: &str, method: &str, args: &[&str]) -> String {
+            let output = std::process::Command::new("gdbus")
+                .args([
+                    "call",
+                    "--session",
+                    "--timeout",
+                    "5",
+                    "--dest",
+                    dest,
+                    "--object-path",
+                    path,
+                    "--method",
+                    method,
+                ])
+                .arg("--")
+                .args(args)
+                .output()
+                .expect("run gdbus");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap()
+        }
+        let (menu, commands) = build_menu(&(
+            vec![("recent-key".into(), "Recent project".into())],
+            vec![("http://localhost:8888/".into(), "Local project".into())],
+        ))
+        .unwrap();
+        assert!(
+            commands
+                .values()
+                .any(|c| matches!(c, Command::Recent(key) if key == "recent-key"))
+        );
+        assert!(
+            commands
+                .values()
+                .any(|c| matches!(c, Command::Server(_, true)))
+        );
+        let icon = create_icon(menu).unwrap();
+        let names = call(
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus.ListNames",
+            &[],
+        );
+        let pattern = regex::Regex::new(&format!(
+            r"org\.kde\.StatusNotifierItem-{}-\d+",
+            std::process::id()
+        ))
+        .unwrap();
+        let name = pattern
+            .find(&names)
+            .expect("tray registered on session bus")
+            .as_str();
+        let layout = call(
+            name,
+            "/MenuBar",
+            "com.canonical.dbusmenu.GetLayout",
+            &["0", "-1", "[]"],
+        );
+        for label in [
+            "Open Ganymede",
+            "Recent project",
+            "Local project",
+            "Stop",
+            "Settings",
+            "Quit Ganymede",
+        ] {
+            assert!(layout.contains(label), "missing {label}: {layout}");
+        }
+        let title = call(
+            name,
+            "/StatusNotifierItem",
+            "org.freedesktop.DBus.Properties.Get",
+            &["org.kde.StatusNotifierItem", "Title"],
+        );
+        assert!(title.contains("Ganymede"));
+        let (menu, _) = build_menu(&(vec![], vec![])).unwrap();
+        icon.set_menu(Some(Box::new(menu)));
+        let layout = call(
+            name,
+            "/MenuBar",
+            "com.canonical.dbusmenu.GetLayout",
+            &["0", "-1", "[]"],
+        );
+        assert!(layout.contains("Nothing yet"));
+        assert!(!layout.contains("Recent project"));
+        drop(icon);
+        let owner = call(
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus.NameHasOwner",
+            &[name],
+        );
+        assert!(owner.contains("false"));
     }
 }

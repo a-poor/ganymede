@@ -18,7 +18,7 @@ pub(super) struct Record {
 }
 
 pub(super) fn directory() -> PathBuf {
-    super::super::history_path().with_extension("servers")
+    crate::storage::Paths::current().servers
 }
 
 fn private(path: &Path) -> bool {
