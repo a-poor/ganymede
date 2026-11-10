@@ -238,6 +238,7 @@ pub fn open(cx: &mut App) {
     let bounds = gpui::Bounds::centered(None, gpui::size(px(760.), px(560.)), cx);
     let result = cx.open_window(
         gpui::WindowOptions {
+            app_id: Some("com.austinpoor.ganymede".into()),
             window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
             is_resizable: false,
             is_minimizable: true,
@@ -267,6 +268,7 @@ fn open_workspace(
 ) -> anyhow::Result<gpui::WindowHandle<ConnectionWindow>> {
     cx.open_window(
         gpui::WindowOptions {
+            app_id: Some("com.austinpoor.ganymede".into()),
             window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::centered(
                 None,
                 gpui::size(px(1000.), px(700.)),

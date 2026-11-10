@@ -8,10 +8,12 @@ pub(super) struct FileMenu {
     pub selected: Option<usize>,
     pub paths: Vec<String>,
     pub selection_count: usize,
+    pub local_path: Option<std::path::PathBuf>,
 }
 #[derive(Clone, Copy)]
 pub(super) enum MenuAction {
     Open,
+    Reveal,
     Rename,
     SaveAs,
     Delete,
@@ -26,7 +28,7 @@ impl FileMenu {
         if self.selection_count > 1 {
             return vec![(MenuAction::Delete, "Delete selected…", Icon::Trash)];
         }
-        if self.directory {
+        let mut items = if self.directory {
             let mut items = vec![
                 (MenuAction::NewNotebook, "New notebook", Icon::Notebook),
                 (MenuAction::NewText, "New text file", Icon::FileText),
@@ -48,8 +50,33 @@ impl FileMenu {
                 (MenuAction::SaveAs, "Save As…", Icon::Copy),
                 (MenuAction::Delete, "Delete…", Icon::Trash),
             ]
+        };
+        if self.local_path.is_some() {
+            items.push((
+                MenuAction::Reveal,
+                if cfg!(target_os = "macos") {
+                    "Show in Finder"
+                } else {
+                    "Show in file manager"
+                },
+                Icon::FolderOpen,
+            ));
         }
+        items
     }
+}
+
+fn local_file_path(root: &std::path::Path, path: &str) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    let relative = std::path::Path::new(path);
+    if !root.is_absolute()
+        || relative
+            .components()
+            .any(|c| !matches!(c, Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(root.join(relative))
 }
 #[derive(Clone)]
 pub(super) struct DragFile {
@@ -130,7 +157,11 @@ impl Workspace {
             self.select_file_path(&path, directory);
         }
         let paths = selection_roots(self.file_selection.paths.clone());
+        let local_path = self
+            .local_server(cx)
+            .and_then(|server| local_file_path(&server.project_folder(), &path));
         self.file_menu = Some(FileMenu {
+            local_path,
             path,
             directory,
             position,
@@ -162,6 +193,11 @@ impl Workspace {
             self.select_file_path(&menu.path, menu.directory);
         }
         match action {
+            MenuAction::Reveal => {
+                if let Some(path) = menu.local_path {
+                    cx.reveal_path(&path);
+                }
+            }
             MenuAction::Open => {
                 if menu.path.ends_with(".ipynb") {
                     self.open_notebook(Some(menu.path), window, cx);
@@ -803,6 +839,44 @@ fn suggested_copy_path(path: &str) -> String {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn local_reveal_uses_the_project_root_and_rejects_escaping_paths() {
+        let root = std::path::Path::new("/project with spaces");
+        assert_eq!(local_file_path(root, ""), Some(root.to_path_buf()));
+        assert_eq!(
+            local_file_path(root, "data/demo.ipynb"),
+            Some(root.join("data/demo.ipynb"))
+        );
+        assert!(local_file_path(root, "../outside").is_none());
+        assert!(local_file_path(root, "/absolute").is_none());
+        assert!(local_file_path(std::path::Path::new("relative"), "file").is_none());
+    }
+
+    #[test]
+    fn reveal_is_offered_only_for_a_single_local_file_or_folder() {
+        let mut menu = FileMenu {
+            path: "demo.ipynb".into(),
+            directory: false,
+            position: Default::default(),
+            selected: None,
+            paths: vec!["demo.ipynb".into()],
+            selection_count: 1,
+            local_path: None,
+        };
+        let has_reveal = |menu: &FileMenu| {
+            menu.actions()
+                .iter()
+                .any(|(action, _, _)| matches!(action, MenuAction::Reveal))
+        };
+        assert!(!has_reveal(&menu));
+        menu.local_path = Some("/project/demo.ipynb".into());
+        assert!(has_reveal(&menu));
+        menu.directory = true;
+        assert!(has_reveal(&menu));
+        menu.selection_count = 2;
+        assert!(!has_reveal(&menu));
+    }
 
     #[test]
     fn save_as_suggestions_preserve_extensions_and_parent_folders() {

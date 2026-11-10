@@ -22,6 +22,7 @@ pub fn open(cx: &mut App) {
     let bounds = Bounds::centered(None, size(px(420.), px(280.)), cx);
     match cx.open_window(
         WindowOptions {
+            app_id: Some("com.austinpoor.ganymede".into()),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             is_resizable: false,
             #[cfg(target_os = "linux")]

@@ -80,9 +80,10 @@ command above coordinates them for public distribution.
 ## Checks and preview builds
 
 On pushes and pull requests, GitHub Actions runs formatting, release automation
-tests, and Clippy and tests for `ganymede-core` on Linux. Tag pushes additionally
+tests, and full workspace Clippy and tests (including the GUI) on Linux. Tag pushes additionally
 run full workspace Clippy and tests and check the `unfinished` feature on macOS.
 To run those macOS jobs before tagging, dispatch CI manually with **full** enabled.
+Tags and full manual runs also build [Linux packages](linux.md).
 Live Jupyter tests remain a separate opt-in check via `scripts/test_jupyter.py`.
 Rust is pinned in `rust-toolchain.toml`.
 

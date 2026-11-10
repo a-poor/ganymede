@@ -262,3 +262,8 @@ endpoint: use attachments or embedded outputs instead. Interactive widgets and
 JavaScript outputs may not survive static conversion, and HTML equations or
 widgets may need network access to load their rendering libraries. PDF rendering
 also depends on those resources being available to Chromium.
+
+For managed local projects, right-click a file or folder and choose **Show in Finder**
+on macOS or **Show in file manager** on Linux
+to reveal it on your desktop. This action is omitted for remote and SSH connections.
+After exporting a notebook, **Show file** reveals the saved export.

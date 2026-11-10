@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Ganymede
+Comment=Work with Jupyter notebooks
+Exec=ganymede
+TryExec=ganymede
+Icon=com.austinpoor.ganymede
+Terminal=false
+Categories=Development;
+StartupWMClass=com.austinpoor.ganymede

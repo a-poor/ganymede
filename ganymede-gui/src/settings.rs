@@ -103,6 +103,7 @@ pub fn open(cx: &mut App) -> anyhow::Result<WindowHandle<Settings>> {
     let bounds = Bounds::centered(None, size(px(520.), px(420.)), cx);
     cx.open_window(
         WindowOptions {
+            app_id: Some("com.austinpoor.ganymede".into()),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             #[cfg(target_os = "linux")]
             window_decorations: Some(gpui::WindowDecorations::Client),

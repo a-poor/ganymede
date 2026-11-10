@@ -84,7 +84,10 @@ impl Workspace {
         }
     }
 
-    fn local_server(&self, cx: &App) -> Option<crate::connection::server::ManagedServer> {
+    pub(super) fn local_server(
+        &self,
+        cx: &App,
+    ) -> Option<crate::connection::server::ManagedServer> {
         if self.runtime.tunnel.is_some() {
             return None;
         }

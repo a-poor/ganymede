@@ -575,6 +575,10 @@ pub(crate) enum LocalState {
     Busy,
 }
 impl ManagedServer {
+    pub fn project_folder(&self) -> PathBuf {
+        self.0.lock().unwrap().launch.folder.clone().into()
+    }
+
     pub(super) fn launch_options(&self) -> (Environment, String, String) {
         let server = self.0.lock().unwrap();
         (

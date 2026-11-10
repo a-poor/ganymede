@@ -104,7 +104,7 @@ impl Workspace {
                 let message = match result {
                     Ok(Some(path)) => Toast::new("Notebook exported")
                         .kind(ToastKind::Success)
-                        .action("Show in Finder", move |_, cx| cx.reveal_path(&path)),
+                        .action("Show file", move |_, cx| cx.reveal_path(&path)),
                     Ok(None) => Toast::new("Export canceled"),
                     Err(error) => Toast::new("Could not save export")
                         .description(error)
