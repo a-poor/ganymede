@@ -56,7 +56,7 @@ from Recent connections. Closing or quitting checks every workspace for unsaved
 changes and does not shut down server kernels.
 
 The titlebar server menu shows connection status and provides **Reconnect**,
-**Open server in browser**, and **New connection window**. Reachability is checked
+**Open server in browser**, and **New connection**. Reachability is checked
 every ten seconds. An outage keeps open documents and unsaved edits in memory
 and cancels queued notebook runs. When the server returns, choose Reconnect to
 reattach surviving sessions without rerunning cells or reloading documents.

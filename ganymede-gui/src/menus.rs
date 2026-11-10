@@ -125,7 +125,7 @@ pub fn init(cx: &mut App) {
                 I::action("Folder…", NewFolder),
             ])),
             I::action("New Launcher", crate::NewTab),
-            I::action("New Connection Window", crate::NewWindow),
+            I::action("New Connection", crate::NewWindow),
             I::action("Upload…", Upload),
             I::separator(),
             I::action("Save", crate::Save),

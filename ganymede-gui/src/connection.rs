@@ -248,7 +248,7 @@ pub fn open(cx: &mut App) {
         gpui::WindowOptions {
             window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
             is_resizable: false,
-            is_minimizable: false,
+            is_minimizable: true,
             window_min_size: Some(gpui::size(px(480.), px(320.))),
             titlebar: Some(gpui::TitlebarOptions {
                 title: Some("Ganymede".into()),
@@ -976,7 +976,10 @@ fn button(
                 .shadow(Vec::<gpui::BoxShadow>::new())
                 .bg(if t.is_dark { t.app.bg } else { t.card.bg })
                 .text_color(t.app.muted_fg)
-                .px_0()
+                .px_2()
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .focus_visible(|s| s.bg(t.card.accent).text_color(t.card.accent_fg))
         })
         .child(label)
 }
@@ -1617,6 +1620,7 @@ impl ConnectionWindow {
                                 crate::icon::Icon::CaretLeft
                                     .svg()
                                     .size(px(12.))
+                                    .flex_shrink_0()
                                     .text_color(t.secondary_fg),
                             ),
                     ),
@@ -2386,7 +2390,7 @@ mod tests {
             picker
                 .update(cx, |_, window, _| {
                     assert!(!window.is_resizable());
-                    assert!(!window.is_minimizable());
+                    assert!(window.is_minimizable());
                     window.remove_window();
                 })
                 .unwrap();

@@ -16,7 +16,6 @@ pub struct Settings {
 enum Setting {
     Indentation,
     FontSize,
-    LineNumbers,
     Console,
 }
 impl Setting {
@@ -24,7 +23,6 @@ impl Setting {
         match self {
             Self::Indentation => "Indentation",
             Self::FontSize => "Code font size",
-            Self::LineNumbers => "Line numbers",
             Self::Console => "Console run shortcut",
         }
     }
@@ -32,7 +30,6 @@ impl Setting {
         match self {
             Self::Indentation => &["2 spaces", "4 spaces", "8 spaces"],
             Self::FontSize => &["10", "12", "14", "16", "18", "20", "24"],
-            Self::LineNumbers => &["Off", "On"],
             Self::Console => &["Enter", "Shift+Enter"],
         }
     }
@@ -48,7 +45,6 @@ impl Setting {
                 .iter()
                 .position(|v| *v == p.font_size)
                 .unwrap_or(2),
-            Self::LineNumbers => usize::from(p.line_numbers),
             Self::Console => usize::from(!p.console_enter),
         }
     }
@@ -62,9 +58,35 @@ impl Setting {
                 ][index]
             }
             Self::FontSize => p.font_size = [10, 12, 14, 16, 18, 20, 24][index],
-            Self::LineNumbers => p.line_numbers = index == 1,
             Self::Console => p.console_enter = index == 0,
         });
+        crate::preferences::save(cx);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ToggleSetting {
+    Autosave,
+    LineNumbers,
+}
+impl ToggleSetting {
+    fn enabled(self, cx: &App) -> bool {
+        match self {
+            Self::Autosave => cx.global::<crate::autosave::AutosavePreference>().0,
+            Self::LineNumbers => crate::preferences::editor(cx).line_numbers,
+        }
+    }
+    fn toggle(self, cx: &mut App) {
+        match self {
+            Self::Autosave => {
+                cx.update_global::<crate::autosave::AutosavePreference, _>(|p, _| p.0 = !p.0)
+            }
+            Self::LineNumbers => {
+                cx.update_global::<crate::preferences::EditorPreferences, _>(|p, _| {
+                    p.line_numbers = !p.line_numbers
+                })
+            }
+        }
         crate::preferences::save(cx);
     }
 }
@@ -257,16 +279,16 @@ impl Settings {
                     }),
             )
     }
-    fn autosave_toggle(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn toggle(&self, setting: ToggleSetting, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.theme();
-        let enabled = cx.global::<crate::autosave::AutosavePreference>().0;
+        let enabled = setting.enabled(cx);
+        let (id, label) = match setting {
+            ToggleSetting::Autosave => ("autosave-toggle", "Autosave"),
+            ToggleSetting::LineNumbers => ("line-numbers-toggle", "Line numbers"),
+        };
         div()
-            .id("autosave-toggle")
-            .aria_label(if enabled {
-                "Autosave on"
-            } else {
-                "Autosave off"
-            })
+            .id(id)
+            .aria_label(format!("{label} {}", if enabled { "on" } else { "off" }))
             .tab_index(0)
             .w(px(32.))
             .h(px(20.))
@@ -285,21 +307,7 @@ impl Settings {
             })
             .cursor_pointer()
             .focus(|s| s.border_1().border_color(t.card.ring))
-            .on_click(|_, _, cx| {
-                cx.update_global::<crate::autosave::AutosavePreference, _>(|setting, _| {
-                    setting.0 = !setting.0
-                });
-                crate::preferences::save(cx);
-            })
-            .on_key_down(|event, _, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    cx.update_global::<crate::autosave::AutosavePreference, _>(|setting, _| {
-                        setting.0 = !setting.0
-                    });
-                    crate::preferences::save(cx);
-                    cx.stop_propagation();
-                }
-            })
+            .on_click(move |_, _, cx| setting.toggle(cx))
             .child(
                 div()
                     .size(px(16.))
@@ -465,21 +473,26 @@ impl Render for Settings {
                                                 .child("Save after a short pause in editing."),
                                         ),
                                     )
-                                    .child(self.autosave_toggle(cx)),
+                                    .child(self.toggle(ToggleSetting::Autosave, cx)),
                             )
-                            .children(
-                                [
-                                    Setting::LineNumbers,
-                                    Setting::Indentation,
-                                    Setting::FontSize,
-                                ]
-                                .into_iter()
-                                .map(|setting| {
+                            .child(div().mx_3().h(px(1.)).bg(t.card.border))
+                            .child(
+                                div()
+                                    .p_3()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child("Line numbers")
+                                    .child(self.toggle(ToggleSetting::LineNumbers, cx)),
+                            )
+                            .children([Setting::Indentation, Setting::FontSize].into_iter().map(
+                                |setting| {
                                     div()
                                         .child(div().mx_3().h(px(1.)).bg(t.card.border))
                                         .child(self.setting_row(setting, cx))
-                                }),
-                            )
+                                },
+                            ))
                             .when(crate::features::UNFINISHED, |view| {
                                 view.child(div().mx_3().h(px(1.)).bg(t.card.border))
                                     .child(self.setting_row(Setting::Console, cx))
