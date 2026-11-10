@@ -239,7 +239,7 @@ impl Render for TextFile {
             .flex()
             .flex_col()
             .on_action(cx.listener(|this, _: &crate::Save, window, cx| this.save(window, cx)))
-            .child(div().flex_1().min_h_0().p_3().child(self.editor.clone()))
+            .child(div().flex_1().min_h_0().child(self.editor.clone()))
     }
 }
 

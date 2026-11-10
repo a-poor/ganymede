@@ -871,8 +871,21 @@ impl CodeCell {
             window
                 .text_system()
                 .shape_line(line.to_owned().into(), font_size, &[run], None);
-        let x = shaped.x_for_index(column);
-        let y = self.line_height * row as f32;
+        // The scroll viewport includes the document padding and gutter; cursor
+        // coordinates must use that same origin to keep edge lines reachable.
+        let padding = if self.document {
+            px(DOCUMENT_PADDING)
+        } else {
+            px(0.)
+        };
+        let gutter = self
+            .text_layouts
+            .borrow()
+            .entries
+            .last()
+            .map_or(px(0.), |(_, layout)| layout.gutter);
+        let x = padding + gutter + shaped.x_for_index(column);
+        let y = padding + self.line_height * row as f32;
         let viewport = self.scroll.bounds().size;
         if viewport.width > px(0.) && viewport.height > px(0.) {
             let mut offset = self.scroll.offset();
@@ -1390,13 +1403,21 @@ impl Render for CodeCell {
                     .id("code-scroll")
                     .w_full()
                     .min_h(theme.font.line_height_tight)
-                    .when(self.document, |s| s.h_full())
+                    .when(self.document, |s| s.h_full().min_h_0())
                     .when(self.document || self.filter_input, |s| {
                         s.overflow_x_scroll()
                     })
                     .when(self.document, |s| s.overflow_y_scroll())
                     .track_scroll(&self.scroll)
-                    .child(CellText { cell: cx.entity() }),
+                    .child(if self.document {
+                        div()
+                            .p(px(DOCUMENT_PADDING))
+                            .min_w_full()
+                            .child(CellText { cell: cx.entity() })
+                            .into_any_element()
+                    } else {
+                        CellText { cell: cx.entity() }.into_any_element()
+                    }),
             );
 
         if self.filter_input {
@@ -1457,7 +1478,7 @@ impl Render for CodeCell {
                 .bg(theme.app.bg)
                 .text_color(theme.app.fg)
                 .border_0()
-                .pr_3()
+                .p_0()
                 .into_any_element();
         }
         let popover = theme.popover;
@@ -1831,6 +1852,9 @@ fn visible_rows(
     let last = (((clip_bottom - top) / line_height).ceil().max(0.) as usize).min(count);
     first..last.max(first)
 }
+
+// Preserve the document inset, but let it scroll with the text.
+const DOCUMENT_PADDING: f32 = 24.;
 
 struct CellText {
     cell: Entity<CodeCell>,
@@ -2237,6 +2261,95 @@ impl Element for CellText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn document_viewport_reaches_panel_edges_and_reveals_first_and_last_lines(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for (height, font_size, line_numbers) in
+            [(120., 10, false), (240., 18, true), (97., 24, true)]
+        {
+            let cx = cx.add_empty_window();
+            let cell = cx.update(|window, cx| {
+                cx.set_global(
+                    crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+                );
+                cx.set_global(crate::preferences::EditorPreferences {
+                    font_size,
+                    line_numbers,
+                    ..Default::default()
+                });
+                cx.new(|cx| {
+                    let mut cell = CodeCell::new_document(window, cx);
+                    cell.buffer.text = (1..=80)
+                        .map(|n| format!("line_{n} = {n}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    cell
+                })
+            });
+            let draw = |cx: &mut gpui::VisualTestContext| {
+                cx.draw(point(px(0.), px(0.)), size(px(400.), px(height)), |_, _| {
+                    cell.clone().into_any_element()
+                });
+            };
+            draw(cx);
+            cx.update(|_, cx| {
+                let cell = cell.read(cx);
+                assert_eq!(cell.scroll.bounds().top(), px(0.));
+                assert_eq!(cell.scroll.bounds().bottom(), px(height));
+                assert_eq!(cell.bounds.unwrap().top(), px(24.));
+                cell.scroll
+                    .set_offset(point(px(0.), -cell.line_height * 2.5));
+            });
+            draw(cx);
+            cx.update(|_, cx| {
+                let cell = cell.read(cx);
+                assert_eq!(cell.bounds.unwrap().top(), px(24.) + cell.scroll.offset().y);
+                assert_eq!(cell.scroll.bounds().top(), px(0.));
+                // Hit testing uses the same scrolled origin as text and gutter.
+                let bounds = cell.bounds.unwrap();
+                let position = point(
+                    bounds.left() + cell.lines[3].x_for_index(4),
+                    bounds.top() + cell.line_height * 3.5,
+                );
+                assert_eq!(cell.index_at(position), cell.starts[3] + 4);
+                cell.scroll.set_offset(point(px(0.), px(-100000.)));
+            });
+            draw(cx);
+            cx.update(|_, cx| {
+                let cell = cell.read(cx);
+                let last_bottom = cell.bounds.unwrap().top() + cell.line_height * 80.;
+                assert_eq!(
+                    last_bottom,
+                    cell.scroll.bounds().bottom() - px(DOCUMENT_PADDING)
+                );
+            });
+            cx.update(|window, cx| {
+                cell.update(cx, |cell, cx| {
+                    cell.move_cursor(cell.buffer.text.len(), false, window, cx)
+                })
+            });
+            draw(cx);
+            cx.update(|_, cx| {
+                let cell = cell.read(cx);
+                let last_top = cell.bounds.unwrap().top() + cell.line_height * 79.;
+                assert!(last_top >= cell.scroll.bounds().top());
+                assert!(last_top + cell.line_height <= cell.scroll.bounds().bottom());
+            });
+            cx.update(|window, cx| {
+                cell.update(cx, |cell, cx| cell.move_cursor(0, false, window, cx))
+            });
+            draw(cx);
+            cx.update(|_, cx| {
+                let cell = cell.read(cx);
+                assert!(cell.bounds.unwrap().top() >= cell.scroll.bounds().top());
+                assert!(
+                    cell.bounds.unwrap().top() + cell.line_height <= cell.scroll.bounds().bottom()
+                );
+            });
+        }
+    }
 
     #[test]
     fn word_navigation_handles_identifiers_punctuation_whitespace_and_unicode() {
