@@ -288,7 +288,7 @@ impl Workspace {
         let status_label = match local {
             Some(LocalState::Stopped) => "Stopped",
             Some(LocalState::Busy) => "Working…",
-            Some(LocalState::Unverified) => "Ownership unverified",
+            Some(LocalState::Unverified) => "Identity unverified",
             _ => this.server.status.label(),
         };
         let mut actions = vec![
@@ -300,7 +300,7 @@ impl Workspace {
             },
             ("New connection…", Icon::AppWindow),
         ];
-        if let Some(state) = local.filter(|s| *s != LocalState::Unverified) {
+        if let Some(state) = local {
             actions.push(if state == LocalState::Stopped {
                 ("Restart Server…", Icon::Restart)
             } else {
@@ -311,8 +311,10 @@ impl Workspace {
         let ssh = this.runtime.tunnel.is_some();
         let t = cx.theme();
         let surface = t.sidebar;
-        let pending = matches!(local, Some(LocalState::Busy | LocalState::Unverified))
-            || (local != Some(LocalState::Stopped)
+        let unverified = local == Some(LocalState::Unverified);
+        let pending = local == Some(LocalState::Busy)
+            || (!unverified
+                && local != Some(LocalState::Stopped)
                 && matches!(
                     this.server.status,
                     Status::Checking | Status::Reconnecting | Status::Available
@@ -321,7 +323,7 @@ impl Workspace {
             local != Some(LocalState::Stopped) && this.server.status == Status::Disconnected;
         let (badge_bg, badge_fg) = if error {
             (t.dialog_destructive_bg, t.dialog_destructive_fg)
-        } else if pending {
+        } else if pending || unverified {
             (t.warning_subtle, t.warning_fg)
         } else {
             (t.secondary, t.secondary_fg)
@@ -556,6 +558,10 @@ impl Workspace {
                                                     .child(status_label),
                                             ),
                                     )
+                                    .when(unverified, |v| {
+                                        v.child(div().text_color(t.popover.muted_fg)
+                                            .child("Ganymede couldn’t verify this server’s identity. Reconnect to check again."))
+                                    })
                                     .when_some(this.runtime.tunnel.as_ref(), |v, tunnel| {
                                         v.child(
                                             div()
@@ -591,7 +597,10 @@ impl Workspace {
                                     .map(|(index, (label, icon))| {
                                         let click = entity.downgrade();
                                         let hover = click.clone();
-                                        let selected = this.server.selected == Some(index);
+                                        let disabled = (index == 0 && (this.server.checking
+                                            || matches!(local, Some(LocalState::Stopped | LocalState::Busy))))
+                                            || (index == 3 && matches!(local, Some(LocalState::Busy | LocalState::Unverified)));
+                                        let selected = !disabled && this.server.selected == Some(index);
                                         let fg = if selected {
                                             t.popover.accent_fg
                                         } else {
@@ -609,23 +618,11 @@ impl Workspace {
                                             .text_color(fg)
                                             .cursor_pointer()
                                             .when(selected, |v| v.bg(t.popover.accent))
-                                            .when(
-                                                (index == 0
-                                                    && (this.server.checking
-                                                        || local.is_some_and(|s| {
-                                                            matches!(
-                                                                s,
-                                                                LocalState::Stopped
-                                                                    | LocalState::Busy
-                                                            )
-                                                        })))
-                                                    || (index == 3
-                                                        && local == Some(LocalState::Busy)),
-                                                |v| v.opacity(0.4),
-                                            )
+                                            .when(disabled, |v| v.opacity(0.4).cursor_default())
                                             .child(icon.svg().size(px(12.)).text_color(fg))
                                             .child(label)
                                             .on_hover(move |over, _, cx| {
+                                                if disabled { return; }
                                                 hover
                                                     .update(cx, |this, cx| {
                                                         if *over {
@@ -641,6 +638,7 @@ impl Workspace {
                                             })
                                             .on_click(move |_, window, cx| {
                                                 cx.stop_propagation();
+                                                if disabled { return; }
                                                 click
                                                     .update(cx, |this, cx| {
                                                         this.server_action(index, window, cx)
