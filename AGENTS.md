@@ -41,6 +41,8 @@ Use `#[test]` and `#[tokio::test]`; name tests after observable behavior. Add re
 
 Use concise, action-oriented commit subjects, such as `Add application-facing notebook documents and controller`. Keep unrelated edits separate. PR descriptions should explain behavior, relevant issues, and validation; include screenshots for visible GUI changes.
 
+Prefer rebasing feature branches onto `main` when possible to bring them up to date. When integrating a multi-commit feature branch into `main`, prefer squash merge.
+
 ## Security & Configuration
 
 Examples use `GANYMEDE_JUPYTER_URL` and `GANYMEDE_JUPYTER_TOKEN`. Keep tokens out of committed files, URLs, and logs. Never automatically replay execution requests after disconnects or treat closing a window as authorization to delete a server kernel.
