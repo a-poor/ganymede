@@ -6,6 +6,7 @@ pub(crate) struct StdinPrompt {
     pub id: String,
     prompt: String,
     password: bool,
+    monospace: bool,
     session: Option<crate::execution::Session>,
     generation: u64,
     buffer: Buffer,
@@ -34,6 +35,7 @@ impl StdinPrompt {
             id: input.id,
             prompt: input.prompt,
             password: input.password,
+            monospace: false,
             generation: session.input_generation(),
             session: Some(session),
             buffer: Buffer::default(),
@@ -64,6 +66,7 @@ impl StdinPrompt {
             id: String::new(),
             prompt: label.into(),
             password,
+            monospace: false,
             session: None,
             generation: 0,
             buffer: Buffer {
@@ -84,6 +87,10 @@ impl StdinPrompt {
             undo: vec![],
             redo: vec![],
         }
+    }
+    pub(crate) fn monospace(mut self) -> Self {
+        self.monospace = true;
+        self
     }
     pub(crate) fn value(&self) -> &str {
         &self.buffer.text
@@ -328,7 +335,7 @@ impl Render for StdinPrompt {
             .h(px(28.))
             .px_2()
             .py_1()
-            .font_family(if self.session.is_some() {
+            .font_family(if self.session.is_some() || self.monospace {
                 t.font.mono.clone()
             } else {
                 t.font.sans.clone()
@@ -379,6 +386,18 @@ impl Render for StdinPrompt {
                     false,
                     cx,
                 )
+            }))
+            .on_action(cx.listener(|this, _: &WordLeft, _, cx| {
+                this.select(this.buffer.word_left(), false, cx)
+            }))
+            .on_action(cx.listener(|this, _: &WordRight, _, cx| {
+                this.select(this.buffer.word_right(), false, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectWordLeft, _, cx| {
+                this.select(this.buffer.word_left(), true, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectWordRight, _, cx| {
+                this.select(this.buffer.word_right(), true, cx)
             }))
             .on_action(cx.listener(|this, _: &SelectLeft, _, cx| {
                 this.select(this.buffer.previous(), true, cx)

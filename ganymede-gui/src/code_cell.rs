@@ -1,5 +1,6 @@
 //! A standalone, in-memory code cell. Notebook persistence and execution can be
 //! connected later without coupling the text-input machinery to a kernel.
+mod pairing;
 pub(crate) mod stdin_prompt;
 use std::{cell::RefCell, ops::Range, rc::Rc, time::Duration};
 
@@ -20,6 +21,10 @@ actions!(
         Right,
         Up,
         Down,
+        WordLeft,
+        WordRight,
+        SelectWordLeft,
+        SelectWordRight,
         SelectLeft,
         SelectRight,
         SelectUp,
@@ -72,6 +77,25 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("tab", Tab, context),
         KeyBinding::new("shift-tab", Outdent, context),
     ]);
+    let word_modifier = if cfg!(target_os = "macos") {
+        "alt"
+    } else {
+        "ctrl"
+    };
+    cx.bind_keys([
+        KeyBinding::new(&format!("{word_modifier}-left"), WordLeft, context),
+        KeyBinding::new(&format!("{word_modifier}-right"), WordRight, context),
+        KeyBinding::new(
+            &format!("{word_modifier}-shift-left"),
+            SelectWordLeft,
+            context,
+        ),
+        KeyBinding::new(
+            &format!("{word_modifier}-shift-right"),
+            SelectWordRight,
+            context,
+        ),
+    ]);
     let modifier = if cfg!(target_os = "macos") {
         "cmd"
     } else {
@@ -92,6 +116,46 @@ pub fn init(cx: &mut App) {
             KeyBinding::new("cmd-shift-left", SelectHome, context),
             KeyBinding::new("cmd-shift-right", SelectEnd, context),
         ]);
+    }
+}
+
+#[derive(Clone, Debug)]
+enum MouseSelection {
+    Character,
+    Word(Range<usize>),
+    Line(Range<usize>),
+}
+
+impl MouseSelection {
+    fn begin(buffer: &mut Buffer, offset: usize, clicks: usize, extend: bool) -> Self {
+        let mode = match clicks {
+            2 => Self::Word(buffer.word_at(offset)),
+            3.. => Self::Line(buffer.line_at(offset)),
+            _ => {
+                buffer.select(offset, extend);
+                return Self::Character;
+            }
+        };
+        mode.extend(buffer, offset);
+        mode
+    }
+
+    fn extend(&self, buffer: &mut Buffer, offset: usize) {
+        let (initial, target) = match self {
+            Self::Character => {
+                buffer.select(offset, true);
+                return;
+            }
+            Self::Word(initial) => (initial, buffer.word_at(offset)),
+            Self::Line(initial) => (initial, buffer.line_at(offset)),
+        };
+        if target.start < initial.start {
+            buffer.anchor = initial.end;
+            buffer.head = target.start;
+        } else {
+            buffer.anchor = initial.start;
+            buffer.head = target.end.max(initial.end);
+        }
     }
 }
 
@@ -173,6 +237,37 @@ impl Buffer {
             .find_map(|(i, _)| (i > self.head).then_some(i))
             .unwrap_or(self.text.len())
     }
+    // Skip whitespace, then move to the edge of the next Unicode word or
+    // punctuation segment. Offsets remain UTF-8 boundaries, including emoji.
+    fn word_left(&self) -> usize {
+        self.text[..self.head]
+            .split_word_bound_indices()
+            .rev()
+            .find(|(_, segment)| !segment.chars().all(char::is_whitespace))
+            .map_or(0, |(start, _)| start)
+    }
+    fn word_right(&self) -> usize {
+        self.text[self.head..]
+            .split_word_bound_indices()
+            .find(|(_, segment)| !segment.chars().all(char::is_whitespace))
+            .map_or(self.text.len(), |(start, segment)| {
+                self.head + start + segment.len()
+            })
+    }
+    fn word_at(&self, offset: usize) -> Range<usize> {
+        self.text
+            .split_word_bound_indices()
+            .find(|(start, segment)| offset < start + segment.len())
+            .or_else(|| self.text.split_word_bound_indices().next_back())
+            .map_or(0..0, |(start, segment)| start..start + segment.len())
+    }
+    fn line_at(&self, offset: usize) -> Range<usize> {
+        let start = self.text[..offset].rfind('\n').map_or(0, |i| i + 1);
+        let end = self.text[offset..]
+            .find('\n')
+            .map_or(self.text.len(), |i| offset + i + 1);
+        start..end
+    }
     fn line_start(&self) -> usize {
         self.text[..self.head].rfind('\n').map_or(0, |i| i + 1)
     }
@@ -220,6 +315,8 @@ pub enum CellEvent {
     InsertAbove,
     InsertBelow,
     Selected,
+    CommandSelected,
+    ExtendSelection,
     RunAndAdvance,
     RunFinished,
     RunFailed,
@@ -232,7 +329,9 @@ const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '�
 
 pub struct CodeCell {
     current: bool,
+    group_selected: bool,
     document: bool,
+    language: Option<crate::syntax::Language>,
     filter_input: bool,
     name_input: bool,
     search_input: bool,
@@ -272,7 +371,7 @@ pub struct CodeCell {
     bounds: Option<Bounds<Pixels>>,
     line_height: Pixels,
     goal_x: Option<Pixels>,
-    selecting: bool,
+    selecting: Option<MouseSelection>,
     scroll: ScrollHandle,
     cursor_visible: bool,
     blink: Task<()>,
@@ -296,7 +395,7 @@ impl CodeCell {
         let cell_focus = cx.focus_handle();
         let subscriptions = vec![
             cx.on_focus(&cell_focus, window, |_, _, cx| {
-                cx.emit(CellEvent::Selected);
+                cx.emit(CellEvent::CommandSelected);
                 cx.notify();
             }),
             cx.on_blur(&cell_focus, window, |_, _, cx| {
@@ -309,13 +408,15 @@ impl CodeCell {
             cx.on_blur(&focus, window, |this, _, cx| {
                 this.blink = Task::ready(());
                 this.cursor_visible = false;
-                this.selecting = false;
+                this.selecting = None;
                 cx.notify();
             }),
         ];
         Self {
             current: false,
+            group_selected: false,
             document: false,
+            language: None,
             filter_input: false,
             name_input: false,
             search_input: false,
@@ -355,7 +456,7 @@ impl CodeCell {
             bounds: None,
             line_height: cx.theme().font.line_height_tight,
             goal_x: None,
-            selecting: false,
+            selecting: None,
             scroll: ScrollHandle::new(),
             cursor_visible: true,
             blink: Task::ready(()),
@@ -367,6 +468,28 @@ impl CodeCell {
         let mut this = Self::new(window, cx);
         this.document = true;
         this
+    }
+
+    pub fn set_language(
+        &mut self,
+        language: Option<crate::syntax::Language>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.language != language {
+            self.language = language;
+            self.text_layouts.borrow_mut().entries.clear();
+            cx.notify();
+        }
+    }
+
+    fn syntax_language(&self) -> Option<crate::syntax::Language> {
+        if self.document {
+            self.language
+        } else if self.python_code() {
+            Some(crate::syntax::Language::Python)
+        } else {
+            None
+        }
     }
 
     pub fn new_name_input(value: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -589,9 +712,10 @@ impl CodeCell {
         }
     }
 
-    pub fn set_current(&mut self, current: bool, cx: &mut Context<Self>) {
-        if self.current != current {
+    pub fn set_selection(&mut self, current: bool, group_selected: bool, cx: &mut Context<Self>) {
+        if self.current != current || self.group_selected != group_selected {
             self.current = current;
+            self.group_selected = group_selected;
             cx.notify();
         }
     }
@@ -777,8 +901,21 @@ impl CodeCell {
             window
                 .text_system()
                 .shape_line(line.to_owned().into(), font_size, &[run], None);
-        let x = shaped.x_for_index(column);
-        let y = self.line_height * row as f32;
+        // The scroll viewport includes the document padding and gutter; cursor
+        // coordinates must use that same origin to keep edge lines reachable.
+        let padding = if self.document {
+            px(DOCUMENT_PADDING)
+        } else {
+            px(0.)
+        };
+        let gutter = self
+            .text_layouts
+            .borrow()
+            .entries
+            .last()
+            .map_or(px(0.), |(_, layout)| layout.gutter);
+        let x = padding + gutter + shaped.x_for_index(column);
+        let y = padding + self.line_height * row as f32;
         let viewport = self.scroll.bounds().size;
         if viewport.width > px(0.) && viewport.height > px(0.) {
             let mut offset = self.scroll.offset();
@@ -871,17 +1008,51 @@ impl CodeCell {
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         self.focus.focus(window, cx);
-        self.selecting = true;
+        self.finish_composition();
         let offset = self.index_at(event.position);
-        self.move_cursor(offset, event.modifiers.shift, window, cx);
+        self.selecting = Some(MouseSelection::begin(
+            &mut self.buffer,
+            offset,
+            event.click_count,
+            event.modifiers.shift,
+        ));
+        self.changed(window, cx);
     }
     fn mouse_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selecting {
-            self.move_cursor(self.index_at(event.position), true, window, cx);
+        if let Some(mode) = self.selecting.clone() {
+            let offset = self.index_at(event.position);
+            mode.extend(&mut self.buffer, offset);
+            self.changed(window, cx);
         }
     }
     fn mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
-        self.selecting = false;
+        self.selecting = None;
+    }
+
+    fn editor_enter(&mut self, shifted: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.filter_input {
+            if self.search_input {
+                cx.emit(if shifted {
+                    CellEvent::MoveUp
+                } else {
+                    CellEvent::MoveDown
+                });
+            } else if self.name_input && !shifted {
+                cx.emit(CellEvent::RunAndAdvance);
+            }
+            return;
+        }
+        if !self.document && shifted != crate::preferences::editor(cx).run_cell_on_enter {
+            cx.emit(CellEvent::RunAndAdvance);
+            return;
+        }
+        let offset = self.buffer.selection().start;
+        let newline = if self.document && shifted {
+            "\n".to_owned()
+        } else {
+            crate::syntax::newline(&self.buffer.text, offset, self.python_code())
+        };
+        self.replace_text_in_range(None, &newline, window, cx);
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -900,7 +1071,7 @@ impl CodeCell {
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.replace_text_in_range(
-                None,
+                Some(self.buffer.to_utf16(self.buffer.selection())),
                 &text
                     .replace("\r\n", "\n")
                     .replace('\r', "\n")
@@ -959,6 +1130,16 @@ impl EntityInputHandler for CodeCell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let pair = range.is_none()
+            && self.marked.is_none()
+            && self.composition_start.is_none()
+            && !self.filter_input
+            && crate::preferences::editor(cx).auto_close_brackets;
+        if pair && self.insert_pair(text) {
+            self.changed(window, cx);
+            cx.emit(CellEvent::Changed);
+            return;
+        }
         let range = range
             .map(|r| self.buffer.utf16_range(r))
             .or(self.marked.clone())
@@ -1117,7 +1298,7 @@ impl Render for CodeCell {
                     .line_height_tight
                     .max(px(crate::preferences::editor(cx).font_size as f32 * 1.5)),
             )
-            .p_3()
+            .p(px(8.))
             .pr(px(44.))
             .on_action(cx.listener(|this, _: &Left, w, cx| {
                 let offset = if this.buffer.selection().is_empty() {
@@ -1134,6 +1315,18 @@ impl Render for CodeCell {
                     this.buffer.selection().end
                 };
                 this.move_cursor(offset, false, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &WordLeft, w, cx| {
+                this.move_cursor(this.buffer.word_left(), false, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &WordRight, w, cx| {
+                this.move_cursor(this.buffer.word_right(), false, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectWordLeft, w, cx| {
+                this.move_cursor(this.buffer.word_left(), true, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectWordRight, w, cx| {
+                this.move_cursor(this.buffer.word_right(), true, w, cx)
             }))
             .on_action(cx.listener(|this, _: &SelectLeft, w, cx| {
                 this.move_cursor(this.buffer.previous(), true, w, cx)
@@ -1162,6 +1355,15 @@ impl Render for CodeCell {
                 this.move_cursor(this.buffer.text.len(), true, w, cx);
             }))
             .on_action(cx.listener(|this, _: &Backspace, w, cx| {
+                if this.buffer.selection().is_empty()
+                    && !this.filter_input
+                    && crate::preferences::editor(cx).auto_close_brackets
+                    && this.delete_pair()
+                {
+                    cx.emit(CellEvent::Changed);
+                    this.changed(w, cx);
+                    return;
+                }
                 if this.buffer.selection().is_empty() {
                     let prefix = &this.buffer.text[this.buffer.line_start()..this.buffer.head];
                     this.buffer.anchor = if !this.filter_input
@@ -1184,19 +1386,7 @@ impl Render for CodeCell {
                 }
                 this.replace_text_in_range(None, "", w, cx);
             }))
-            .on_action(cx.listener(|this, _: &Enter, w, cx| {
-                if this.filter_input {
-                    if this.search_input {
-                        cx.emit(CellEvent::MoveDown);
-                    } else if this.name_input {
-                        cx.emit(CellEvent::RunAndAdvance);
-                    }
-                    return;
-                }
-                let offset = this.buffer.selection().start;
-                let newline = crate::syntax::newline(&this.buffer.text, offset, this.python_code());
-                this.replace_text_in_range(None, &newline, w, cx);
-            }))
+            .on_action(cx.listener(|this, _: &Enter, w, cx| this.editor_enter(false, w, cx)))
             .on_action(cx.listener(|this, _: &Tab, w, cx| {
                 if this.name_input {
                     cx.emit(CellEvent::FocusNext);
@@ -1232,15 +1422,7 @@ impl Render for CodeCell {
                     this.indent(true, w, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &RunAndAdvance, window, cx| {
-                if this.search_input {
-                    cx.emit(CellEvent::MoveUp);
-                } else if this.document {
-                    this.replace_text_in_range(None, "\n", window, cx);
-                } else if !this.filter_input {
-                    cx.emit(CellEvent::RunAndAdvance);
-                }
-            }))
+            .on_action(cx.listener(|this, _: &RunAndAdvance, w, cx| this.editor_enter(true, w, cx)))
             .on_action(cx.listener(|this, _: &SelectCell, window, cx| {
                 if this.filter_input {
                     cx.emit(CellEvent::DeleteCell);
@@ -1276,13 +1458,21 @@ impl Render for CodeCell {
                     .id("code-scroll")
                     .w_full()
                     .min_h(theme.font.line_height_tight)
-                    .when(self.document, |s| s.h_full())
+                    .when(self.document, |s| s.h_full().min_h_0())
                     .when(self.document || self.filter_input, |s| {
                         s.overflow_x_scroll()
                     })
                     .when(self.document, |s| s.overflow_y_scroll())
                     .track_scroll(&self.scroll)
-                    .child(CellText { cell: cx.entity() }),
+                    .child(if self.document {
+                        div()
+                            .p(px(DOCUMENT_PADDING))
+                            .min_w_full()
+                            .child(CellText { cell: cx.entity() })
+                            .into_any_element()
+                    } else {
+                        CellText { cell: cx.entity() }.into_any_element()
+                    }),
             );
 
         if self.filter_input {
@@ -1343,7 +1533,7 @@ impl Render for CodeCell {
                 .bg(theme.app.bg)
                 .text_color(theme.app.fg)
                 .border_0()
-                .pr_3()
+                .p_0()
                 .into_any_element();
         }
         let popover = theme.popover;
@@ -1558,15 +1748,32 @@ impl Render for CodeCell {
             .p(cell_padding)
             .px(px(6.))
             .pr(px(4.))
-            .bg(theme.app.bg)
+            .bg(if self.group_selected {
+                theme.app.accent
+            } else {
+                theme.app.bg
+            })
             .text_color(theme.app.fg)
             .border_1()
             .border_color(if self.current && self.cell_focus.is_focused(window) {
                 surface.primary
+            } else if self.group_selected {
+                theme.app.accent
             } else {
                 theme.app.bg
             })
             .rounded(theme.radius.md() + cell_padding / 2. + px(1.))
+            .capture_any_mouse_down(cx.listener(
+                |this, event: &gpui::MouseDownEvent, window, cx| {
+                    if event.button == MouseButton::Left
+                        && event.modifiers.shift
+                        && !this.focus.is_focused(window)
+                    {
+                        cx.emit(CellEvent::ExtendSelection);
+                        cx.stop_propagation();
+                    }
+                },
+            ))
             .on_mouse_down_out(cx.listener(|this, _, window, _| {
                 if this.focus.is_focused(window) || this.cell_focus.is_focused(window) {
                     window.blur();
@@ -1575,6 +1782,7 @@ impl Render for CodeCell {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
+                    cx.emit(CellEvent::Selected);
                     this.cell_focus.focus(window, cx);
                 }),
             )
@@ -1718,6 +1926,10 @@ fn visible_rows(
     first..last.max(first)
 }
 
+// Keep a compact document inset that scrolls with the text.
+const DOCUMENT_PADDING: f32 = 8.;
+const EDITOR_GUTTER_EXTRA: f32 = 4.;
+
 struct CellText {
     cell: Entity<CodeCell>,
 }
@@ -1774,8 +1986,8 @@ impl Element for CellText {
                 .shape_line("M".into(), font_size, &[style.to_run(1)], None);
         let empty_baseline = (line_height - caret_metrics.ascent - caret_metrics.descent) / 2.
             + caret_metrics.ascent;
-        let highlights = if cell.python_code() {
-            cell.syntax.borrow_mut().get(&cell.buffer.text)
+        let highlights = if let Some(language) = cell.syntax_language() {
+            cell.syntax.borrow_mut().get(language, &cell.buffer.text)
         } else {
             Rc::new(vec![])
         };
@@ -1791,7 +2003,7 @@ impl Element for CellText {
             .unwrap_or_else(|| Rc::from(cell.buffer.text.as_str()));
         let gutter = if !cell.filter_input && crate::preferences::editor(cx).line_numbers {
             let digits = cell.buffer.text.split('\n').count().to_string().len();
-            caret_metrics.width * digits as f32 + px(12.)
+            caret_metrics.width * digits as f32 + px(12.) + px(EDITOR_GUTTER_EXTRA)
         } else {
             px(0.)
         };
@@ -1803,7 +2015,7 @@ impl Element for CellText {
             line_height,
             width: None,
             marked: cell.marked.clone(),
-            syntax: cell.python_code().then_some(colors),
+            syntax: cell.syntax_language().map(|_| colors),
         };
         let marked = cell.marked.clone();
         let wrap = !cell.document && !cell.filter_input;
@@ -2049,7 +2261,25 @@ impl Element for CellText {
         cx: &mut App,
     ) {
         let layout = state.borrow();
+        let gutter_extra = px(EDITOR_GUTTER_EXTRA);
         if layout.gutter > px(0.) {
+            // Documents span the scrolling viewport; cells keep the divider
+            // within their own text area, including wrapped continuation lines.
+            let divider_bounds = if self.cell.read(cx).document {
+                window.content_mask().bounds
+            } else {
+                bounds
+            };
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(
+                        bounds.left() + layout.gutter - gutter_extra - px(6.),
+                        divider_bounds.top(),
+                    ),
+                    size(px(1.), divider_bounds.size.height),
+                ),
+                cx.theme().app.border,
+            ));
             let style = window.text_style();
             let font_size = style.font_size.to_pixels(window.rem_size());
             for row in prepaint.visible.clone() {
@@ -2065,7 +2295,7 @@ impl Element for CellText {
                 number
                     .paint(
                         point(
-                            bounds.left() + layout.gutter - px(12.) - number.width,
+                            bounds.left() + layout.gutter - gutter_extra - px(12.) - number.width,
                             bounds.top() + layout.line_height * row as f32,
                         ),
                         layout.line_height,
@@ -2123,6 +2353,352 @@ impl Element for CellText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn document_viewport_reaches_panel_edges_and_reveals_first_and_last_lines(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for (height, font_size, line_numbers) in
+            [(120., 10, false), (240., 18, true), (97., 24, true)]
+        {
+            let cx = cx.add_empty_window();
+            let cell = cx.update(|window, cx| {
+                cx.set_global(
+                    crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+                );
+                cx.set_global(crate::preferences::EditorPreferences {
+                    font_size,
+                    line_numbers,
+                    ..Default::default()
+                });
+                cx.new(|cx| {
+                    let mut cell = CodeCell::new_document(window, cx);
+                    cell.buffer.text = (1..=80)
+                        .map(|n| format!("line_{n} = {n}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    cell
+                })
+            });
+            let draw = |cx: &mut gpui::VisualTestContext| {
+                cx.draw(point(px(0.), px(0.)), size(px(400.), px(height)), |_, _| {
+                    cell.clone().into_any_element()
+                });
+            };
+            draw(cx);
+            cx.update(|_, cx| {
+                let cell = cell.read(cx);
+                assert_eq!(cell.scroll.bounds().top(), px(0.));
+                assert_eq!(cell.scroll.bounds().bottom(), px(height));
+                assert_eq!(cell.bounds.unwrap().top(), px(8.));
+                cell.scroll
+                    .set_offset(point(px(0.), -cell.line_height * 2.5));
+            });
+            draw(cx);
+            cx.update(|_, cx| {
+                let cell = cell.read(cx);
+                assert_eq!(cell.bounds.unwrap().top(), px(8.) + cell.scroll.offset().y);
+                assert_eq!(cell.scroll.bounds().top(), px(0.));
+                // Hit testing uses the same scrolled origin as text and gutter.
+                let bounds = cell.bounds.unwrap();
+                let position = point(
+                    bounds.left() + cell.lines[3].x_for_index(4),
+                    bounds.top() + cell.line_height * 3.5,
+                );
+                assert_eq!(cell.index_at(position), cell.starts[3] + 4);
+                cell.scroll.set_offset(point(px(0.), px(-100000.)));
+            });
+            draw(cx);
+            cx.update(|_, cx| {
+                let cell = cell.read(cx);
+                let last_bottom = cell.bounds.unwrap().top() + cell.line_height * 80.;
+                assert_eq!(
+                    last_bottom,
+                    cell.scroll.bounds().bottom() - px(DOCUMENT_PADDING)
+                );
+            });
+            cx.update(|window, cx| {
+                cell.update(cx, |cell, cx| {
+                    cell.move_cursor(cell.buffer.text.len(), false, window, cx)
+                })
+            });
+            draw(cx);
+            cx.update(|_, cx| {
+                let cell = cell.read(cx);
+                let last_top = cell.bounds.unwrap().top() + cell.line_height * 79.;
+                assert!(last_top >= cell.scroll.bounds().top());
+                assert!(last_top + cell.line_height <= cell.scroll.bounds().bottom());
+            });
+            cx.update(|window, cx| {
+                cell.update(cx, |cell, cx| cell.move_cursor(0, false, window, cx))
+            });
+            draw(cx);
+            cx.update(|_, cx| {
+                let cell = cell.read(cx);
+                assert!(cell.bounds.unwrap().top() >= cell.scroll.bounds().top());
+                assert!(
+                    cell.bounds.unwrap().top() + cell.line_height <= cell.scroll.bounds().bottom()
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn word_navigation_handles_identifiers_punctuation_whitespace_and_unicode() {
+        let mut buffer = Buffer {
+            text: "foo_bar( café 👩‍💻)\n  next".into(),
+            ..Default::default()
+        };
+        for expected in ["foo_bar", "(", " café", " 👩‍💻", ")", "\n  next"] {
+            let start = buffer.head;
+            buffer.select(buffer.word_right(), false);
+            assert_eq!(&buffer.text[start..buffer.head], expected);
+        }
+        assert_eq!(buffer.word_right(), buffer.text.len());
+        for expected in ["next", ")\n  ", "👩‍💻", "café ", "( ", "foo_bar"] {
+            let end = buffer.head;
+            buffer.select(buffer.word_left(), false);
+            assert_eq!(&buffer.text[buffer.head..end], expected);
+        }
+        assert_eq!(buffer.word_left(), 0);
+        let empty = Buffer::default();
+        assert_eq!(empty.word_left(), 0);
+        assert_eq!(empty.word_right(), 0);
+    }
+
+    #[test]
+    fn word_drag_preserves_whole_words_when_reversing_direction() {
+        let mut buffer = Buffer {
+            text: "one café three".into(),
+            ..Default::default()
+        };
+        let mode = MouseSelection::begin(&mut buffer, 5, 2, false);
+        assert_eq!(&buffer.text[buffer.selection()], "café");
+        mode.extend(&mut buffer, 12);
+        assert_eq!(&buffer.text[buffer.selection()], "café three");
+        mode.extend(&mut buffer, 1);
+        assert_eq!(&buffer.text[buffer.selection()], "one café");
+        assert!(buffer.head < buffer.anchor);
+        mode.extend(&mut buffer, 5);
+        assert_eq!(&buffer.text[buffer.selection()], "café");
+        assert_eq!(buffer.word_at(buffer.text.len()), 10..15);
+    }
+
+    #[test]
+    fn triple_click_and_drag_select_logical_lines_including_newlines() {
+        let mut buffer = Buffer {
+            text: "first\n\nlast".into(),
+            ..Default::default()
+        };
+        let mode = MouseSelection::begin(&mut buffer, 6, 3, false);
+        assert_eq!(&buffer.text[buffer.selection()], "\n");
+        mode.extend(&mut buffer, 9);
+        assert_eq!(&buffer.text[buffer.selection()], "\nlast");
+        mode.extend(&mut buffer, 0);
+        assert_eq!(&buffer.text[buffer.selection()], "first\n\n");
+        assert!(buffer.head < buffer.anchor);
+        assert_eq!(buffer.line_at(buffer.text.len()), 7..11);
+        let mut empty = Buffer::default();
+        MouseSelection::begin(&mut empty, 0, 3, false);
+        assert_eq!(empty.selection(), 0..0);
+    }
+
+    #[gpui::test]
+    fn mouse_click_counts_select_words_and_lines_in_notebook_and_file_editors(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for document in [false, true] {
+            let cx = cx.add_empty_window();
+            let cell = cx.update(|window, cx| {
+                cx.set_global(
+                    crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+                );
+                cx.new(|cx| {
+                    let mut cell = if document {
+                        CodeCell::new_document(window, cx)
+                    } else {
+                        CodeCell::new(window, cx)
+                    };
+                    cell.buffer.text = "one café three\nlast".into();
+                    cell
+                })
+            });
+            for (click_count, expected) in [(2, "café"), (3, "one café three\n")] {
+                cx.draw(point(px(0.), px(0.)), size(px(600.), px(300.)), |_, _| {
+                    cell.clone().into_any_element()
+                });
+                let position = cx.update(|_, cx| {
+                    let cell = cell.read(cx);
+                    let bounds = cell.bounds.unwrap();
+                    point(
+                        bounds.left() + cell.lines[0].x_for_index(5),
+                        bounds.top() + cell.line_height / 2.,
+                    )
+                });
+                cx.simulate_event(MouseDownEvent {
+                    position,
+                    button: MouseButton::Left,
+                    click_count,
+                    modifiers: Default::default(),
+                    first_mouse: false,
+                });
+                cx.simulate_mouse_up(position, MouseButton::Left, Default::default());
+                cx.update(|_, cx| assert_eq!(cell.read(cx).selected_text(), expected));
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn run_shortcut_swaps_edit_keys_without_affecting_navigation_or_fields(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_global(
+                crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+            );
+            init(cx);
+        });
+        for run_on_enter in [false, true] {
+            for mode in ["cell", "document", "search", "name", "filter", "navigation"] {
+                for shifted in [false, true] {
+                    let events = Rc::new(RefCell::new(Vec::new()));
+                    let window = cx.update(|cx| {
+                        cx.set_global(crate::preferences::EditorPreferences {
+                            run_cell_on_enter: run_on_enter,
+                            ..Default::default()
+                        });
+                        cx.open_window(Default::default(), |window, cx| {
+                            cx.new(|cx| {
+                                let mut cell = CodeCell::new(window, cx);
+                                cell.document = mode == "document";
+                                cell.filter_input = matches!(mode, "search" | "name" | "filter");
+                                cell.search_input = mode == "search";
+                                cell.name_input = mode == "name";
+                                cell.buffer.text = "    value".into();
+                                cell.buffer.head = cell.buffer.text.len();
+                                cell.buffer.anchor = cell.buffer.head;
+                                if mode == "navigation" {
+                                    cell.cell_focus.focus(window, cx);
+                                } else {
+                                    cell.focus.focus(window, cx);
+                                }
+                                cell
+                            })
+                        })
+                        .unwrap()
+                    });
+                    let observed = events.clone();
+                    let _subscription = cx.update(|cx| {
+                        let entity = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+                        cx.subscribe(&entity, move |_, event: &CellEvent, _| {
+                            if let CellEvent::RunAndAdvance
+                            | CellEvent::MoveUp
+                            | CellEvent::MoveDown = event
+                            {
+                                observed.borrow_mut().push(*event);
+                            }
+                        })
+                    });
+                    cx.run_until_parked();
+                    cx.simulate_keystrokes(
+                        window.into(),
+                        if shifted { "shift-enter" } else { "enter" },
+                    );
+                    cx.run_until_parked();
+                    cx.update(|cx| {
+                        window
+                            .update(cx, |cell, window, _| {
+                                let newline = mode == "document"
+                                    || (mode == "cell" && shifted == run_on_enter);
+                                let expected = if newline {
+                                    if mode == "document" && shifted {
+                                        "    value\n"
+                                    } else {
+                                        "    value\n    "
+                                    }
+                                } else {
+                                    "    value"
+                                };
+                                assert_eq!(
+                                    cell.text(),
+                                    expected,
+                                    "{mode} enter={run_on_enter} shifted={shifted}"
+                                );
+                                let should_run = (mode == "cell" && shifted != run_on_enter)
+                                    || (mode == "name" && !shifted)
+                                    || (mode == "navigation" && shifted);
+                                assert_eq!(
+                                    events
+                                        .borrow()
+                                        .iter()
+                                        .any(|event| matches!(event, CellEvent::RunAndAdvance)),
+                                    should_run
+                                );
+                                if mode == "search" {
+                                    assert_eq!(events.borrow().len(), 1);
+                                    assert!(
+                                        matches!(events.borrow()[0], CellEvent::MoveUp) == shifted
+                                    );
+                                }
+                                if mode == "navigation" && !shifted {
+                                    assert!(cell.focus.is_focused(window));
+                                }
+                            })
+                            .unwrap()
+                    });
+                }
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn word_shortcuts_extend_reverse_and_replace_selection(cx: &mut gpui::TestAppContext) {
+        let window = cx.update(|cx| {
+            cx.set_global(
+                crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+            );
+            init(cx);
+            cx.open_window(Default::default(), |window, cx| {
+                cx.new(|cx| {
+                    let mut cell = CodeCell::new_document(window, cx);
+                    cell.buffer.text = "one café three".into();
+                    cell.focus.focus(window, cx);
+                    cell
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        let modifier = if cfg!(target_os = "macos") {
+            "alt"
+        } else {
+            "ctrl"
+        };
+        for (keys, head, selected) in [
+            ("right", 3, ""),
+            ("shift-right", 9, " café"),
+            ("shift-left", 4, " "),
+            ("shift-left", 0, "one"),
+            ("right", 3, ""),
+            ("shift-right", 9, " café"),
+        ] {
+            cx.simulate_keystrokes(window.into(), &format!("{modifier}-{keys}"));
+            cx.update(|cx| {
+                window
+                    .update(cx, |cell, _, _| {
+                        assert_eq!(cell.buffer.head, head, "{keys}");
+                        assert_eq!(cell.selected_text(), selected, "{keys}");
+                    })
+                    .unwrap()
+            });
+        }
+        cx.simulate_keystrokes(window.into(), "backspace");
+        cx.update(|cx| {
+            window
+                .update(cx, |cell, _, _| assert_eq!(cell.text(), "one three"))
+                .unwrap()
+        });
+    }
 
     #[gpui::test]
     fn empty_search_input_uses_the_same_baseline_as_typed_text(cx: &mut gpui::TestAppContext) {

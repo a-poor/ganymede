@@ -18,24 +18,21 @@ pub struct Settings {
 enum Setting {
     Indentation,
     FontSize,
-    LineNumbers,
-    Console,
+    RunCell,
 }
 impl Setting {
     fn label(self) -> &'static str {
         match self {
             Self::Indentation => "Indentation",
             Self::FontSize => "Code font size",
-            Self::LineNumbers => "Line numbers",
-            Self::Console => "Console run shortcut",
+            Self::RunCell => "Run cell shortcut",
         }
     }
     fn choices(self) -> &'static [&'static str] {
         match self {
             Self::Indentation => &["2 spaces", "4 spaces", "8 spaces"],
             Self::FontSize => &["10", "12", "14", "16", "18", "20", "24"],
-            Self::LineNumbers => &["Off", "On"],
-            Self::Console => &["Enter", "Shift+Enter"],
+            Self::RunCell => &["Enter", "Shift+Enter"],
         }
     }
     fn index(self, cx: &App) -> usize {
@@ -50,8 +47,7 @@ impl Setting {
                 .iter()
                 .position(|v| *v == p.font_size)
                 .unwrap_or(2),
-            Self::LineNumbers => usize::from(p.line_numbers),
-            Self::Console => usize::from(!p.console_enter),
+            Self::RunCell => usize::from(!p.run_cell_on_enter),
         }
     }
     fn apply(self, index: usize, cx: &mut App) {
@@ -64,9 +60,41 @@ impl Setting {
                 ][index]
             }
             Self::FontSize => p.font_size = [10, 12, 14, 16, 18, 20, 24][index],
-            Self::LineNumbers => p.line_numbers = index == 1,
-            Self::Console => p.console_enter = index == 0,
+            Self::RunCell => p.run_cell_on_enter = index == 0,
         });
+        crate::preferences::save(cx);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ToggleSetting {
+    Autosave,
+    LineNumbers,
+    AutoCloseBrackets,
+}
+impl ToggleSetting {
+    fn enabled(self, cx: &App) -> bool {
+        match self {
+            Self::Autosave => cx.global::<crate::autosave::AutosavePreference>().0,
+            Self::LineNumbers => crate::preferences::editor(cx).line_numbers,
+            Self::AutoCloseBrackets => crate::preferences::editor(cx).auto_close_brackets,
+        }
+    }
+    fn toggle(self, cx: &mut App) {
+        match self {
+            Self::Autosave => {
+                cx.update_global::<crate::autosave::AutosavePreference, _>(|p, _| p.0 = !p.0)
+            }
+            Self::AutoCloseBrackets => cx
+                .update_global::<crate::preferences::EditorPreferences, _>(|p, _| {
+                    p.auto_close_brackets = !p.auto_close_brackets
+                }),
+            Self::LineNumbers => {
+                cx.update_global::<crate::preferences::EditorPreferences, _>(|p, _| {
+                    p.line_numbers = !p.line_numbers
+                })
+            }
+        }
         crate::preferences::save(cx);
     }
 }
@@ -272,16 +300,19 @@ impl Settings {
                     }),
             )
     }
-    fn autosave_toggle(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn toggle(&self, setting: ToggleSetting, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.theme();
-        let enabled = cx.global::<crate::autosave::AutosavePreference>().0;
+        let enabled = setting.enabled(cx);
+        let (id, label) = match setting {
+            ToggleSetting::Autosave => ("autosave-toggle", "Autosave"),
+            ToggleSetting::LineNumbers => ("line-numbers-toggle", "Line numbers"),
+            ToggleSetting::AutoCloseBrackets => {
+                ("auto-close-brackets-toggle", "Auto close brackets")
+            }
+        };
         div()
-            .id("autosave-toggle")
-            .aria_label(if enabled {
-                "Autosave on"
-            } else {
-                "Autosave off"
-            })
+            .id(id)
+            .aria_label(format!("{label} {}", if enabled { "on" } else { "off" }))
             .tab_index(0)
             .w(px(32.))
             .h(px(20.))
@@ -300,21 +331,7 @@ impl Settings {
             })
             .cursor_pointer()
             .focus(|s| s.border_1().border_color(t.card.ring))
-            .on_click(|_, _, cx| {
-                cx.update_global::<crate::autosave::AutosavePreference, _>(|setting, _| {
-                    setting.0 = !setting.0
-                });
-                crate::preferences::save(cx);
-            })
-            .on_key_down(|event, _, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    cx.update_global::<crate::autosave::AutosavePreference, _>(|setting, _| {
-                        setting.0 = !setting.0
-                    });
-                    crate::preferences::save(cx);
-                    cx.stop_propagation();
-                }
-            })
+            .on_click(move |_, _, cx| setting.toggle(cx))
             .child(
                 div()
                     .size(px(16.))
@@ -570,41 +587,51 @@ impl Settings {
                                                 .child("Save after a short pause in editing."),
                                         ),
                                     )
-                                    .child(self.autosave_toggle(cx)),
+                                    .child(self.toggle(ToggleSetting::Autosave, cx)),
                             )
-                            .children(
-                                [
-                                    Setting::LineNumbers,
-                                    Setting::Indentation,
-                                    Setting::FontSize,
-                                ]
-                                .into_iter()
-                                .map(|setting| {
+                            .child(div().mx_3().h(px(1.)).bg(t.card.border))
+                            .child(
+                                div()
+                                    .p_3()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child("Line numbers")
+                                    .child(self.toggle(ToggleSetting::LineNumbers, cx)),
+                            )
+                            .child(div().mx_3().h(px(1.)).bg(t.card.border))
+                            .child(
+                                div()
+                                    .p_3()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child("Auto close brackets")
+                                    .child(self.toggle(ToggleSetting::AutoCloseBrackets, cx)),
+                            )
+                            .children([Setting::Indentation, Setting::FontSize].into_iter().map(
+                                |setting| {
                                     div()
                                         .child(div().mx_3().h(px(1.)).bg(t.card.border))
                                         .child(self.setting_row(setting, cx))
-                                }),
-                            )
-                            .when(crate::features::UNFINISHED, |view| {
-                                view.child(div().mx_3().h(px(1.)).bg(t.card.border))
-                                    .child(self.setting_row(Setting::Console, cx))
-                                    .child(
-                                        div()
-                                            .px_3()
-                                            .pb_2()
-                                            .text_size(t.font.xs)
-                                            .text_color(t.card.muted_fg)
-                                            .child("Auto close brackets — not available yet"),
-                                    )
-                                    .child(
-                                        div()
-                                            .px_3()
-                                            .pb_3()
-                                            .text_size(t.font.xs)
-                                            .text_color(t.card.muted_fg)
-                                            .child("Console support is in development."),
-                                    )
-                            }),
+                                },
+                            ))
+                            .child(div().mx_3().h(px(1.)).bg(t.card.border))
+                            .child(self.setting_row(Setting::RunCell, cx))
+                            .child(
+                                div()
+                                    .px_3()
+                                    .pb_3()
+                                    .text_size(t.font.xs)
+                                    .text_color(t.card.muted_fg)
+                                    .child(if crate::preferences::editor(cx).run_cell_on_enter {
+                                        "While editing: Enter runs; Shift+Enter adds a line."
+                                    } else {
+                                        "While editing: Shift+Enter runs; Enter adds a line."
+                                    }),
+                            ),
                     ),
             )
             .when_some(

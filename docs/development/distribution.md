@@ -79,12 +79,14 @@ command above coordinates them for public distribution.
 
 ## Checks and preview builds
 
-GitHub Actions runs formatting, Clippy, workspace tests, and a check of the
-`unfinished` feature on pushes and pull requests. Live Jupyter tests remain a
-separate opt-in check via `scripts/test_jupyter.py`. Rust is pinned in
-`rust-toolchain.toml`.
+On pushes and pull requests, GitHub Actions runs formatting, release automation
+tests, and Clippy and tests for `ganymede-core` on Linux. Tag pushes additionally
+run full workspace Clippy and tests and check the `unfinished` feature on macOS.
+To run those macOS jobs before tagging, dispatch CI manually with **full** enabled.
+Live Jupyter tests remain a separate opt-in check via `scripts/test_jupyter.py`.
+Rust is pinned in `rust-toolchain.toml`.
 
-After checks pass, CI builds an optimized macOS app with unfinished features
+After the full macOS checks pass, CI builds an optimized macOS app with unfinished features
 disabled and uploads unsigned, architecture-specific ZIP and DMG artifacts. This is
 a testing artifact, not a signed or notarized public release. It requires macOS
 15 or later. To build the same bundle locally, fetch assets, then run:

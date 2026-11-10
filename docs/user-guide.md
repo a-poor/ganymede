@@ -18,12 +18,36 @@ editor selection that was active before opening the menu.
 ## Create a local server
 
 Choose **Create** on the welcome screen, select your project folder, and choose a
-Python environment: Global Python, Virtual environment, or Custom Python.
+Python environment. Ganymede checks the project's `.venv` and `venv`, Python
+installations on `PATH`, common macOS install locations, and installed Python
+versions reported by uv. Detected entries show their version and path. Readiness and missing packages appear
+below the picker after selection.
+A ready project environment is preferred automatically until you make a choice.
+The **Python runtimes** section includes `python3 (PATH)` and detected interpreters.
+Below the divider, choose **Virtual environment** or **Custom Python path** to enter
+your own location.
+For a virtual-environment folder that does not exist, **Create environment…**
+creates it with `python3` from PATH and installs `jupyter-server` and `ipykernel`
+after confirmation. The default folder is `.venv` inside your project. To use a
+different Python or environment setup, create it yourself and select its folder.
+Existing folders are never overwritten. If setup fails or is cancelled, any
+partially created folder is kept; you can finish setup yourself or select a new path.
 That environment must have `jupyter-server` and `ipykernel` installed. Click
 **Start server** to open the workspace.
 
 Ganymede uses your existing Python installation; it does not bundle or install
-Python for you. The selected folder becomes the server's file root.
+Python for you. Discovery never installs packages or creates environments.
+Use **Install…** to install missing `jupyter-server` or `ipykernel` packages after
+confirming the selected interpreter. Ganymede uses uv when available, otherwise
+that interpreter's pip. OS-managed environments may reject installation; choose a
+virtual environment in that case. Installation does not edit `pyproject.toml` or
+`uv.lock`. **Refresh** checks again after changes made outside the app.
+
+These choices launch Python directly, including uv-managed interpreters. They do
+not run `uvx` or create an isolated tool environment. Relative virtual-environment
+paths are resolved from the project folder. The selected folder becomes the server's
+file root. Kernels are listed by the connected server after it starts; discovered
+Python installations are not automatically registered as kernels.
 
 ## Connect to an existing server
 
@@ -63,6 +87,9 @@ Open a notebook from the Files sidebar or create one from the workspace launcher
 Choose a kernel using the notebook's kernel control.
 
 - **Shift+Enter** runs the selected cell. Variables persist in its kernel between runs.
+  In Settings, **Run cell shortcut** can swap Enter and Shift+Enter while editing;
+  the other shortcut inserts an indented newline. Cell navigation mode keeps
+  Enter to edit and Shift+Enter to run.
 - Double-click a Markdown cell, or select it and press **Enter**, to edit it.
   **Shift+Enter** renders the Markdown again.
 - **Command+S** saves. Autosave is on by default and can be changed in Settings.
@@ -70,6 +97,15 @@ Choose a kernel using the notebook's kernel control.
   matches; **Escape** closes search. Outputs are not searched.
 - **Escape**, then **Command+Z**, undoes cell operations such as insertion,
   deletion, movement, and type changes. While typing, undo applies to text edits.
+
+In notebook source and text files, **Option+Left/Right** moves by word; add
+**Shift** to extend the selection. Double-click selects a word, and triple-click
+selects a full line. Drag after either gesture to select whole words or lines.
+
+**Auto close brackets** in Settings pairs `()`, `[]`, `{}`, and quotes while typing
+in notebook source and text files. Type an opening character to wrap selected text;
+type the existing closing character to move past it. Backspace between an empty
+pair removes both characters. Paste and IME composition remain literal.
 
 Use the Run and Kernel menus for execution, interrupt, restart, and shutdown.
 Restart clears the kernel's variables. Closing a notebook does **not** shut down
@@ -180,3 +216,49 @@ are not downloaded or installed automatically.
 [Open a GitHub issue](https://github.com/a-poor/ganymede/issues) with your Ganymede
 version, macOS version, steps to reproduce, and any relevant error message.
 Remove tokens and private notebook contents from logs or screenshots.
+
+## Selecting multiple cells
+
+Shift-click another cell to select a range. For keyboard selection, press Escape
+to leave text editing, then use Shift+Up/Down. Up/Down selects a single cell and
+Enter edits it. The toolbar shows the number of selected cells.
+
+Run, copy, cut, paste, duplicate, delete, move, change type, and clear output apply
+to the selected group. Shift+Enter runs the group and advances. In cell mode,
+Command+C/X/V (Control on other platforms) copies/cuts/pastes cells and Delete or
+Backspace deletes them. Undo restores a whole group operation, including its
+selection. Copy/paste preserves cell types and saved outputs.
+
+## Export a notebook
+
+Choose **File → Export Notebook → HTML, Markdown, or PDF**. Ganymede sends a
+snapshot of the current notebook to the connected Jupyter server’s `nbconvert`
+endpoint, then opens a native dialog to save the result on your Mac. Unsaved
+edits and existing outputs are included; exporting does not save the notebook,
+change its dirty state, or request cell execution. Edits made after export begins
+are not included. Only one export runs at a time in each workspace.
+
+Install `nbconvert` in the **server’s Python environment** (including for SSH or
+remote connections). PDF uses nbconvert’s Chromium-based WebPDF layout, avoiding
+a LaTeX installation. Set it up in that environment with:
+
+```sh
+python -m pip install 'nbconvert[webpdf]'
+python -m playwright install chromium
+```
+
+Ganymede does not install these dependencies or download browsers automatically.
+Use the default non-executing nbconvert configuration; custom server-side
+preprocessors are controlled by the server administrator. Export needs a live
+connection and permission to use the server’s nbconvert endpoint. Conversion has
+a two-minute timeout and a 128 MB download limit. Failures appear in a toast;
+server logs contain detailed conversion errors.
+
+Markdown without extracted images saves as `.md`. With images, Jupyter returns
+`.zip`; extract it and keep the Markdown document beside its image files. HTML
+and PDF use nbconvert’s layouts. Notebook attachments and saved image outputs are
+supported. Notebook-relative external files are not resolved by the snapshot
+endpoint: use attachments or embedded outputs instead. Interactive widgets and
+JavaScript outputs may not survive static conversion, and HTML equations or
+widgets may need network access to load their rendering libraries. PDF rendering
+also depends on those resources being available to Chromium.

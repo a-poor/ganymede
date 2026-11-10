@@ -288,7 +288,7 @@ impl Workspace {
             } else {
                 ("Open server in browser", Icon::Browsers)
             },
-            ("New connection window…", Icon::AppWindow),
+            ("New connection…", Icon::AppWindow),
         ];
         if let Some(state) = local.filter(|s| *s != LocalState::Unverified) {
             actions.push(if state == LocalState::Stopped {

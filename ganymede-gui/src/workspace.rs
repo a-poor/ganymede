@@ -1,5 +1,6 @@
 //! Server file browser, notebook tabs, and launcher.
 pub(crate) mod commands;
+mod export;
 mod file_management;
 mod kernels;
 mod persistence;
@@ -234,6 +235,7 @@ pub struct Workspace {
     restoring: bool,
     toasts: Entity<crate::toast::ToastHost>,
     documents: Vec<Document>,
+    focus: gpui::FocusHandle,
     tabs: Tabs,
     header_tabs: Vec<HeaderTab>,
     reveal_tab: Option<u64>,
@@ -256,6 +258,7 @@ pub struct Workspace {
     filter_query: String,
     filter_requested: HashSet<String>,
     uploading: bool,
+    exporting: bool,
     file_busy: bool,
     file_directory: String,
     file_selection: FileSelection,
@@ -300,6 +303,7 @@ impl Workspace {
             runtime,
             toasts,
             documents: vec![],
+            focus: cx.focus_handle(),
             tabs: Tabs::default(),
             header_tabs: Vec::new(),
             reveal_tab: None,
@@ -322,6 +326,7 @@ impl Workspace {
             filter_query: String::new(),
             filter_requested: HashSet::new(),
             uploading: false,
+            exporting: false,
             file_busy: false,
             file_directory: String::new(),
             file_selection: FileSelection::default(),
@@ -867,10 +872,10 @@ impl Workspace {
                     notebook.update(cx, |notebook, cx| notebook.focus_selected(window, cx))
                 }
                 Content::Text(editor) => editor.update(cx, |editor, cx| editor.focus(window, cx)),
-                _ => window.blur(),
+                _ => self.focus.focus(window, cx),
             }
         } else {
-            window.blur();
+            self.focus.focus(window, cx);
         }
         cx.notify();
     }
@@ -1061,6 +1066,7 @@ impl Workspace {
         }
         let t = cx.theme();
         div()
+            .relative()
             .flex()
             .flex_1()
             .min_w_0()
@@ -1237,6 +1243,49 @@ impl Workspace {
                             )
                     })),
             )
+            .child({
+                let scroll = this.tab_scroll.clone();
+                let colors = t.tab_overflow_fade;
+                gpui::canvas(
+                    |_, _, _| (),
+                    move |_, _, window, _| {
+                        // Read after the scroll area's prepaint, so resize and
+                        // animated tab widths are reflected in this same frame.
+                        let bounds = scroll.bounds();
+                        let offset = -scroll.offset().x;
+                        let max = scroll.max_offset().x;
+                        let width = px(18.).min(bounds.size.width / 2.);
+                        for (visible, left) in
+                            [(offset > px(0.5), true), (max - offset > px(0.5), false)]
+                        {
+                            if !visible {
+                                continue;
+                            }
+                            let edge = gpui::Bounds::new(
+                                gpui::point(
+                                    if left {
+                                        bounds.left()
+                                    } else {
+                                        bounds.right() - width
+                                    },
+                                    bounds.top(),
+                                ),
+                                gpui::size(width, bounds.size.height),
+                            );
+                            window.paint_quad(gpui::fill(
+                                edge,
+                                gpui::linear_gradient(
+                                    if left { 90. } else { 270. },
+                                    gpui::linear_color_stop(colors[0], 0.),
+                                    gpui::linear_color_stop(colors[1], 1.),
+                                ),
+                            ));
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0()
+            })
             .child({
                 let click = entity.clone();
                 let key = entity.clone();
@@ -1976,6 +2025,7 @@ impl Render for Workspace {
         let t = cx.theme();
         let content = self.documents.iter().find(|doc| doc.id == self.tabs.active);
         div()
+            .track_focus(&self.focus)
             .size_full()
             .min_h_0()
             .flex()
@@ -2124,6 +2174,151 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[gpui::test]
+    fn tab_shortcuts_cross_launcher_and_wrap_in_both_directions(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let window = cx.update(|cx| {
+            cx.set_global(
+                crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+            );
+            cx.set_global(crate::theme::AppearancePreference::default());
+            cx.set_global(crate::autosave::AutosavePreference(false));
+            crate::menus::init(cx);
+            crate::code_cell::init(cx);
+            crate::notebook::init(cx);
+            let bridge = Runtime {
+                tunnel: None,
+                handle: runtime.handle().clone(),
+                config: Err("Offline test".into()),
+                kernel: "python3".into(),
+            };
+            cx.open_window(Default::default(), |window, cx| {
+                cx.new(|cx| crate::Ganymede::new(bridge, "Test", window, cx))
+            })
+            .unwrap()
+        });
+        cx.update(|cx| {
+            window
+                .update(cx, |app, window, cx| {
+                    app.workspace.update(cx, |this, cx| {
+                        let config =
+                            ganymede_core::jupyter::ServerConfig::new("http://127.0.0.1:9")
+                                .unwrap();
+                        let mut document = ganymede_core::notebook::NotebookDocument::new();
+                        document
+                            .insert_cell(0, ganymede_core::notebook::CellKind::Code, "42")
+                            .unwrap();
+                        let controller = ganymede_core::notebook::NotebookController::new(
+                            config.clone(),
+                            "test.ipynb",
+                            document,
+                        )
+                        .unwrap();
+                        let session =
+                            crate::execution::Session::from_controller(controller, &this.runtime);
+                        let book = cx.new(|cx| {
+                            Notebook::new_with_connection(
+                                session,
+                                this.toasts.clone(),
+                                false,
+                                window,
+                                cx,
+                            )
+                        });
+                        let controller =
+                            ganymede_core::text_file::TextFileController::from_recovery(
+                                config,
+                                ganymede_core::text_file::TextRecovery {
+                                    path: "test.py".into(),
+                                    text: "42".into(),
+                                    saved_version: String::new(),
+                                    crlf: false,
+                                    bom: false,
+                                },
+                            )
+                            .unwrap();
+                        let editor =
+                            cx.new(|cx| TextFile::new(controller, this.toasts.clone(), window, cx));
+                        this.documents = vec![
+                            Document {
+                                id: 1,
+                                name: "test.ipynb".into(),
+                                kind: DocumentKind::Notebook,
+                                path: None,
+                                content: Content::Notebook(book),
+                            },
+                            Document {
+                                id: 2,
+                                name: "test.py".into(),
+                                kind: DocumentKind::Python,
+                                path: None,
+                                content: Content::Text(editor),
+                            },
+                        ];
+                        this.tabs.open = vec![1, LAUNCHER, 2];
+                        this.activate(1, window, cx);
+                    });
+                })
+                .unwrap()
+        });
+        cx.run_until_parked();
+        for (key, expected) in [
+            ("ctrl-tab", LAUNCHER),
+            ("ctrl-tab", 2),
+            ("ctrl-tab", 1),
+            ("ctrl-shift-tab", 2),
+            ("ctrl-shift-tab", LAUNCHER),
+            ("ctrl-shift-tab", 1),
+        ] {
+            cx.simulate_keystrokes(window.into(), key);
+            cx.update(|cx| {
+                window
+                    .update(cx, |app, _, cx| {
+                        assert_eq!(app.workspace.read(cx).tabs.active, expected, "{key}")
+                    })
+                    .unwrap()
+            });
+        }
+        // Launcher controls can own focus without disabling workspace shortcuts.
+        cx.update(|cx| {
+            window
+                .update(cx, |app, window, cx| {
+                    app.workspace
+                        .update(cx, |this, cx| this.open_launcher(window, cx))
+                })
+                .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            window
+                .update(cx, |_, window, cx| window.focus_next(cx))
+                .unwrap()
+        });
+        cx.simulate_keystrokes(window.into(), "ctrl-tab");
+        cx.update(|cx| {
+            window
+                .update(cx, |app, window, cx| {
+                    assert_eq!(app.workspace.read(cx).tabs.active, 2);
+                    app.workspace.update(cx, |this, cx| {
+                        this.tabs.open = vec![LAUNCHER];
+                        this.activate(LAUNCHER, window, cx);
+                    });
+                })
+                .unwrap()
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes(window.into(), "ctrl-tab ctrl-shift-tab");
+        cx.update(|cx| {
+            window
+                .update(cx, |app, _, cx| {
+                    assert_eq!(app.workspace.read(cx).tabs.active, LAUNCHER)
+                })
+                .unwrap()
+        });
+    }
     fn tree_entry(path: &str, kind: &str) -> Contents {
         serde_json::from_value(serde_json::json!({
             "name": path.rsplit('/').next().unwrap(), "path": path, "type": kind,

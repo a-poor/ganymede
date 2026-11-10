@@ -63,7 +63,7 @@ from Recent connections. Closing or quitting checks every workspace for unsaved
 changes and does not shut down server kernels.
 
 The titlebar server menu shows connection status and provides **Reconnect**,
-**Open server in browser**, and **New connection window**. Reachability is checked
+**Open server in browser**, and **New connection**. Reachability is checked
 every ten seconds. An outage keeps open documents and unsaved edits in memory
 and cancels queued notebook runs. When the server returns, choose Reconnect to
 reattach surviving sessions without rerunning cells or reloading documents.
@@ -168,12 +168,22 @@ out as a whole; output-internal virtualization is not implemented.
 
 Notebook cell editors soft-wrap and grow vertically with their source. Code cells
 use Python Tree-sitter syntax highlighting, cached until their source changes;
-cells over 256 KiB fall back to plain text. Markdown/Raw cells and standalone text
-files remain unhighlighted. Tab inserts spaces using the configured indentation width, or
+cells over 256 KiB fall back to plain text. Markdown/Raw notebook cells remain
+unhighlighted. Standalone Python, Markdown, TOML, JSON, YAML, and SQL files use cached
+Tree-sitter highlighting with the same size limit and theme palette. Language
+detection follows file extensions, including after rename or Save As. Markdown
+includes inline syntax and Python, TOML, JSON, YAML, and SQL fenced code. Tab inserts spaces using the configured indentation width, or
 indents selected lines; Shift+Tab outdents. Enter preserves leading whitespace
 and, in Code cells, indents Python block headers and bracket continuations.
 Backspace in leading spaces removes one indentation step. Block indentation is
 one undoable edit and retains the selection direction.
+
+Auto close brackets is enabled by default and persisted in editor preferences.
+Direct typing pairs brackets and quotes, wraps selections without losing their
+direction, skips matching closers, and deletes empty pairs with one Backspace.
+Pair insertion/wrapping/deletion is one undoable edit. Escaped characters,
+apostrophes after words, explicit replacements, paste, IME composition, and
+search/path fields do not trigger pairing.
 
 Notebook outputs render PNG/JPEG/GIF/WebP images (including plots), inert HTML
 and DataFrame tables, Markdown, LaTeX equations, and ANSI-styled streams/tracebacks.
@@ -249,9 +259,8 @@ Markdown, and Python files using server-allocated names. Save with
 work for text files too. Detection uses the returned content rather than an extension
 allowlist: UTF-8 text (including base64-encoded UTF-8 responses) is accepted; binary
 content and unsupported encodings produce an error toast. UTF-8 BOM and uniform CRLF
-line endings returned by the server are preserved on save. Syntax highlighting and
-specialized Markdown/Python behavior are not implemented yet; paths and document kinds
-are retained for that future work.
+line endings returned by the server are preserved on save. Specialized Markdown/Python
+behavior beyond syntax highlighting is not implemented yet.
 
 Right-click a file or folder for its context menu. Files offer Open, Rename, Save As,
 and Delete; folders offer New notebook, New text file, New folder, Upload here,
@@ -322,3 +331,26 @@ files are left untouched at startup, with a message in Settings.
 `GANYMEDE_PREFERENCES_FILE` overrides the path. Otherwise it follows the
 `GANYMEDE_CONNECTIONS_FILE` location with a `.preferences.json` extension, keeping
 isolated previews separate from normal preferences.
+
+Notebook cell selection uses a contiguous range with one active cell. Shift-click
+another cell or press Escape followed by Shift+Up/Down to extend the range.
+Up/Down in cell mode selects one neighboring cell; Enter edits the active cell.
+Shift-click inside the focused text editor retains normal text selection.
+The selected group has a subtle background and a toolbar count; the active cell
+retains its marker. Copy/cut/paste, duplicate, delete, move, cell-type changes,
+clear output, and run apply to the range. Clipboard metadata preserves cell kinds,
+metadata, attachments, and saved outputs, while plain-text consumers receive source
+text. Pasted cells receive fresh IDs. Structural undo/redo restores the entire
+operation and selection. A group containing a running cell cannot be cut or deleted;
+queued and running cells retain their identities when moved. Shift+Enter runs the
+range in document order and advances to the following cell.
+
+### Cell execution shortcut
+
+The release Settings window exposes Run cell shortcut (Shift+Enter by default,
+or Enter). In notebook edit mode the selected key runs and advances (or renders
+Markdown); the other key inserts an indented newline. Cell navigation mode keeps
+Enter to edit and Shift+Enter to run the selection. Text files, search fields,
+rename dialogs, and kernel input prompts retain their existing key behavior.
+The persisted `run_cell_on_enter` preference reads the old `console_enter` key as
+an alias, preserving its value; subsequent saves use the new name.
