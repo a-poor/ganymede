@@ -1518,6 +1518,7 @@ impl ConnectionWindow {
                 .border_1()
                 .border_color(t.launcher_border)
                 .rounded(t.radius.xl2())
+                .shadow(vec![t.launcher_shadow.clone()])
                 .overflow_hidden()
         };
         let divider = || div().mx_3().h(px(1.)).bg(t.launcher_border);
@@ -1711,12 +1712,12 @@ impl ConnectionWindow {
                             ),
                     )
                     .child(div().flex().flex_col().gap_2()
-                        .child(div().id("advanced-connection").tab_index(0).flex().items_center().gap_1().cursor_pointer()
-                            .text_size(t.font.xs).text_color(t.app.muted_fg)
-                            .child(if self.advanced { crate::icon::Icon::CaretDown } else { crate::icon::Icon::CaretRight }.svg().size(px(12.)).text_color(t.app.muted_fg))
-                            .child(if self.ssh_host.read(cx).value().trim().is_empty() { "Advanced" } else { "Advanced · SSH enabled" })
+                        .child(div().flex().child(button("advanced-connection",
+                            if self.ssh_host.read(cx).value().trim().is_empty() { "Advanced" } else { "Advanced · SSH enabled" }, false, cx)
+                            .flex().items_center().gap_1()
+                            .child(if self.advanced { crate::icon::Icon::CaretDown } else { crate::icon::Icon::CaretRight }.svg().size(px(12.)).text_color(t.app.fg))
                             .on_click(cx.listener(|this, _, _, cx| { this.advanced = !this.advanced; cx.notify(); }))
-                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| { if matches!(event.keystroke.key.as_str(), "enter" | "space") { cx.stop_propagation(); this.advanced = !this.advanced; cx.notify(); } })))
+                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| { if matches!(event.keystroke.key.as_str(), "enter" | "space") { cx.stop_propagation(); this.advanced = !this.advanced; cx.notify(); } }))))
                         .when(self.advanced, |v| v.child(group().p_3().flex().flex_col().gap_2()
                             .child(field("SSH host (optional)", self.ssh_host.clone(), cx))
                             .child(div().text_size(t.font.xs).text_color(t.card.muted_fg).child("SSH alias or user@host. Server URL is relative to this host.")))))

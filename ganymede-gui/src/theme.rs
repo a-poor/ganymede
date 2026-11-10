@@ -299,6 +299,7 @@ pub struct Theme {
     pub launcher_option_hover_bg: Hsla,
     pub launcher_border: Hsla,
     pub launcher_shadow: BoxShadow,
+    pub tab_overflow_fade: [Hsla; 2],
     pub body_shadow: BoxShadow,
     pub active_tab_edges: [BoxShadow; 2],
     pub toast_shadow: BoxShadow,
@@ -435,6 +436,11 @@ impl ThemeSpec {
             self.sidebar_foreground,
         );
 
+        let launcher_art_bg = if self.is_dark {
+            gpui::rgb(0x07080a).into()
+        } else {
+            app.bg
+        };
         Theme {
             is_dark: self.is_dark,
             find_match: alpha(self.ring, 0.18),
@@ -501,11 +507,7 @@ impl ThemeSpec {
             toast_shadow: BoxShadow::new(px(0.), px(4.), alpha(gpui::black(), 0.10))
                 .blur_radius(px(14.)),
             // Preserve PlanetRise at night; reverse its ink/paper relationship in light mode.
-            launcher_art_bg: if self.is_dark {
-                gpui::rgb(0x07080a).into()
-            } else {
-                app.bg
-            },
+            launcher_art_bg,
             launcher_art_fg: if self.is_dark {
                 gpui::rgb(0xe6e1d6).into()
             } else {
@@ -530,12 +532,8 @@ impl ThemeSpec {
                 }
             },
             launcher_border: app.bg.blend(alpha(app.border, 0.55)),
-            launcher_shadow: BoxShadow::new(
-                px(0.),
-                px(4.),
-                alpha(gpui::black(), if self.is_dark { 0.18 } else { 0.06 }),
-            )
-            .blur_radius(px(18.)),
+            launcher_shadow: BoxShadow::new(px(3.), px(5.), launcher_art_bg),
+            tab_overflow_fade: [sidebar.bg, alpha(sidebar.bg, 0.)],
             body_shadow: BoxShadow::new(
                 px(0.),
                 px(0.5),

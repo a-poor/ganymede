@@ -1063,6 +1063,7 @@ impl Workspace {
         }
         let t = cx.theme();
         div()
+            .relative()
             .flex()
             .flex_1()
             .min_w_0()
@@ -1239,6 +1240,49 @@ impl Workspace {
                             )
                     })),
             )
+            .child({
+                let scroll = this.tab_scroll.clone();
+                let colors = t.tab_overflow_fade;
+                gpui::canvas(
+                    |_, _, _| (),
+                    move |_, _, window, _| {
+                        // Read after the scroll area's prepaint, so resize and
+                        // animated tab widths are reflected in this same frame.
+                        let bounds = scroll.bounds();
+                        let offset = -scroll.offset().x;
+                        let max = scroll.max_offset().x;
+                        let width = px(18.).min(bounds.size.width / 2.);
+                        for (visible, left) in
+                            [(offset > px(0.5), true), (max - offset > px(0.5), false)]
+                        {
+                            if !visible {
+                                continue;
+                            }
+                            let edge = gpui::Bounds::new(
+                                gpui::point(
+                                    if left {
+                                        bounds.left()
+                                    } else {
+                                        bounds.right() - width
+                                    },
+                                    bounds.top(),
+                                ),
+                                gpui::size(width, bounds.size.height),
+                            );
+                            window.paint_quad(gpui::fill(
+                                edge,
+                                gpui::linear_gradient(
+                                    if left { 90. } else { 270. },
+                                    gpui::linear_color_stop(colors[0], 0.),
+                                    gpui::linear_color_stop(colors[1], 1.),
+                                ),
+                            ));
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0()
+            })
             .child({
                 let click = entity.clone();
                 let key = entity.clone();
