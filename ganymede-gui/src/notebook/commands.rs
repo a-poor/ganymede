@@ -30,7 +30,8 @@ impl Notebook {
     }
     fn clear_menu_outputs(&mut self, all: bool, cx: &mut Context<Self>) {
         for index in 0..self.cells.len() {
-            if (!all && index != self.selected) || self.runs.active == Some(index) {
+            if (!all && !self.selected_range().contains(&index)) || self.runs.active == Some(index)
+            {
                 continue;
             }
             let cell = &self.cells[index];
@@ -41,7 +42,7 @@ impl Notebook {
             self.save_error = self.session.clear_outputs(cell.entity_id().as_u64()).err();
         }
     }
-    fn run_range(&mut self, range: std::ops::Range<usize>, cx: &mut Context<Self>) {
+    pub(super) fn run_range(&mut self, range: std::ops::Range<usize>, cx: &mut Context<Self>) {
         if self.control_pending || self.restart_run_all || self.file_busy {
             return;
         }
@@ -87,8 +88,8 @@ impl Notebook {
                 self.toolbar_action(ToolbarAction::Run, window, cx);
                 self.emit_selected(CellEvent::InsertBelow, cx);
             }
-            Command::RunAbove => self.run_range(0..self.selected, cx),
-            Command::RunBelow => self.run_range(self.selected..self.cells.len(), cx),
+            Command::RunAbove => self.run_range(0..self.selected_range().start, cx),
+            Command::RunBelow => self.run_range(self.selected_range().start..self.cells.len(), cx),
             Command::RunAll => self.run_range(0..self.cells.len(), cx),
             Command::RenderMarkdown => {
                 for cell in &self.cells {

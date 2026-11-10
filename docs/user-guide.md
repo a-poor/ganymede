@@ -157,3 +157,15 @@ are not downloaded or installed automatically.
 [Open a GitHub issue](https://github.com/a-poor/ganymede/issues) with your Ganymede
 version, macOS version, steps to reproduce, and any relevant error message.
 Remove tokens and private notebook contents from logs or screenshots.
+
+## Selecting multiple cells
+
+Shift-click another cell to select a range. For keyboard selection, press Escape
+to leave text editing, then use Shift+Up/Down. Up/Down selects a single cell and
+Enter edits it. The toolbar shows the number of selected cells.
+
+Run, copy, cut, paste, duplicate, delete, move, change type, and clear output apply
+to the selected group. Shift+Enter runs the group and advances. In cell mode,
+Command+C/X/V (Control on other platforms) copies/cuts/pastes cells and Delete or
+Backspace deletes them. Undo restores a whole group operation, including its
+selection. Copy/paste preserves cell types and saved outputs.

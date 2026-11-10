@@ -317,3 +317,16 @@ files are left untouched at startup, with a message in Settings.
 `GANYMEDE_PREFERENCES_FILE` overrides the path. Otherwise it follows the
 `GANYMEDE_CONNECTIONS_FILE` location with a `.preferences.json` extension, keeping
 isolated previews separate from normal preferences.
+
+Notebook cell selection uses a contiguous range with one active cell. Shift-click
+another cell or press Escape followed by Shift+Up/Down to extend the range.
+Up/Down in cell mode selects one neighboring cell; Enter edits the active cell.
+Shift-click inside the focused text editor retains normal text selection.
+The selected group has a subtle background and a toolbar count; the active cell
+retains its marker. Copy/cut/paste, duplicate, delete, move, cell-type changes,
+clear output, and run apply to the range. Clipboard metadata preserves cell kinds,
+metadata, attachments, and saved outputs, while plain-text consumers receive source
+text. Pasted cells receive fresh IDs. Structural undo/redo restores the entire
+operation and selection. A group containing a running cell cannot be cut or deleted;
+queued and running cells retain their identities when moved. Shift+Enter runs the
+range in document order and advances to the following cell.

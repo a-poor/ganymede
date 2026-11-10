@@ -3,6 +3,7 @@ pub(crate) mod commands;
 mod history;
 mod kernel;
 mod list_row;
+mod selection;
 use std::collections::VecDeque;
 
 use gpui::{Context, Entity, Focusable, ListAlignment, ListState, Window, div, prelude::*};
@@ -13,7 +14,20 @@ use crate::code_cell::{CellEvent, CodeCell};
 
 gpui::actions!(
     notebook,
-    [FindNotebook, CloseFind, UndoStructure, RedoStructure]
+    [
+        FindNotebook,
+        CloseFind,
+        UndoStructure,
+        RedoStructure,
+        ExtendCellsUp,
+        ExtendCellsDown,
+        PreviousCell,
+        NextCell,
+        CopyCells,
+        CutCells,
+        PasteCells,
+        DeleteCells
+    ]
 );
 pub fn init(cx: &mut gpui::App) {
     let key = if cfg!(target_os = "macos") {
@@ -37,6 +51,31 @@ pub fn init(cx: &mut gpui::App) {
             RedoStructure,
             Some("Notebook && !CodeCell"),
         ),
+        gpui::KeyBinding::new("shift-up", ExtendCellsUp, Some("NotebookCell && !CodeCell")),
+        gpui::KeyBinding::new(
+            "shift-down",
+            ExtendCellsDown,
+            Some("NotebookCell && !CodeCell"),
+        ),
+        gpui::KeyBinding::new("up", PreviousCell, Some("NotebookCell && !CodeCell")),
+        gpui::KeyBinding::new("down", NextCell, Some("NotebookCell && !CodeCell")),
+        gpui::KeyBinding::new(
+            &format!("{modifier}-c"),
+            CopyCells,
+            Some("NotebookCell && !CodeCell"),
+        ),
+        gpui::KeyBinding::new(
+            &format!("{modifier}-x"),
+            CutCells,
+            Some("NotebookCell && !CodeCell"),
+        ),
+        gpui::KeyBinding::new(
+            &format!("{modifier}-v"),
+            PasteCells,
+            Some("NotebookCell && !CodeCell"),
+        ),
+        gpui::KeyBinding::new("backspace", DeleteCells, Some("NotebookCell && !CodeCell")),
+        gpui::KeyBinding::new("delete", DeleteCells, Some("NotebookCell && !CodeCell")),
         gpui::KeyBinding::new(key, FindNotebook, Some("Notebook")),
         gpui::KeyBinding::new("escape", CloseFind, Some("Notebook && !CodeCell")),
     ]);
@@ -115,6 +154,7 @@ pub struct Notebook {
     restart_run_all: bool,
     execution_error: Option<String>,
     selected: usize,
+    selection_anchor: usize,
     largest_count: u64,
     applied_count_hint: Option<u64>,
     kernel_menu: kernel::Picker,
@@ -190,6 +230,7 @@ impl Notebook {
             restart_run_all: false,
             execution_error: None,
             selected: 0,
+            selection_anchor: 0,
             largest_count: 0,
             applied_count_hint: None,
             kernel_menu: kernel::Picker::new(cx),
@@ -329,7 +370,7 @@ impl Notebook {
         selected: usize,
         cx: &mut Context<Self>,
     ) {
-        self.selected = selected.min(self.cells.len().saturating_sub(1));
+        self.select(selected.min(self.cells.len().saturating_sub(1)), cx);
         self.reveal_cell = None;
         self.sync_list(cx);
         self.scroll.scroll_to(gpui::ListOffset {
@@ -349,6 +390,19 @@ impl Notebook {
             let Some(index) = this.cells.iter().position(|item| item == cell) else {
                 return;
             };
+            if matches!(
+                event,
+                CellEvent::DeleteCell
+                    | CellEvent::Duplicate
+                    | CellEvent::MoveUp
+                    | CellEvent::MoveDown
+                    | CellEvent::InsertAbove
+                    | CellEvent::InsertBelow
+                    | CellEvent::RunAndAdvance
+            ) && !this.selected_range().contains(&index)
+            {
+                this.select(index, cx);
+            }
             match event {
                 CellEvent::InputRequested => {
                     this.reveal_cell = Some(index);
@@ -362,47 +416,28 @@ impl Notebook {
                 CellEvent::FocusNext => (),
                 CellEvent::RunProgress => cx.notify(),
                 CellEvent::Selected => this.select(index, cx),
-                CellEvent::DeleteCell => {
-                    if this.runs.active == Some(index) {
-                        return;
+                CellEvent::ExtendSelection => this.extend_selection(index, window, cx),
+                CellEvent::CommandSelected => {
+                    if this.selected != index {
+                        this.select(index, cx);
                     }
-                    if !this.record_structure(Some(index), cx) {
-                        return;
-                    }
-                    // A running cell stays in place until the kernel finishes.
-                    cell.update(cx, |cell, cx| cell.clear_execution(cx));
-                    this.runs.remove(index);
-                    this.cells.remove(index);
-                    if this.cells.is_empty() {
-                        this.append_cell(window, cx);
-                    }
-                    let target = index.min(this.cells.len() - 1);
-                    this.select(target, cx);
-                    this.cells[target]
-                        .read(cx)
-                        .focus_handle(cx)
-                        .focus(window, cx);
-                    this.start_next_run(cx);
-                    cx.notify();
                 }
-                CellEvent::Duplicate | CellEvent::InsertAbove | CellEvent::InsertBelow => {
+                CellEvent::DeleteCell => {
+                    this.delete_selection(window, cx);
+                }
+                CellEvent::Duplicate => {
+                    this.duplicate_selection(window, cx);
+                }
+                CellEvent::InsertAbove | CellEvent::InsertBelow => {
                     if !this.record_structure(None, cx) {
                         return;
                     }
-                    let source = if matches!(event, CellEvent::Duplicate) {
-                        cell.read(cx).text().to_owned()
-                    } else {
-                        String::new()
-                    };
-                    let kind = if matches!(event, CellEvent::Duplicate) {
-                        cell.read(cx).kind()
-                    } else {
-                        CellKind::Code
-                    };
+                    let source = String::new();
+                    let kind = CellKind::Code;
                     let target = if matches!(event, CellEvent::InsertAbove) {
-                        index
+                        this.selected_range().start
                     } else {
-                        index + 1
+                        this.selected_range().end
                     };
                     this.append_cell(window, cx);
                     let added = this.cells.pop().unwrap();
@@ -418,30 +453,7 @@ impl Notebook {
                     cx.notify();
                 }
                 CellEvent::MoveUp | CellEvent::MoveDown => {
-                    let target = if matches!(event, CellEvent::MoveUp) {
-                        index.saturating_sub(1)
-                    } else {
-                        (index + 1).min(this.cells.len() - 1)
-                    };
-                    if index == target {
-                        return;
-                    }
-                    if !this.record_structure(None, cx) {
-                        return;
-                    }
-                    this.cells.swap(index, target);
-                    this.runs.remap(|i| {
-                        if i == index {
-                            target
-                        } else if i == target {
-                            index
-                        } else {
-                            i
-                        }
-                    });
-                    this.select(target, cx);
-                    this.reveal_cell = Some(target);
-                    cx.notify();
+                    this.move_selection(matches!(event, CellEvent::MoveDown), cx);
                 }
                 CellEvent::RunFailed => {
                     this.runs.pending.clear();
@@ -453,37 +465,20 @@ impl Notebook {
                     this.start_next_run(cx);
                 }
                 CellEvent::RunAndAdvance => {
-                    cell.update(cx, |cell, cx| cell.preview_markdown(cx));
-                    if this.control_pending || this.restart_run_all {
+                    if this.control_pending || this.restart_run_all || this.file_busy {
                         return;
                     }
-                    let source = cell.read(cx).text().to_owned();
-                    let count = (cell.read(cx).kind() == CellKind::Code)
-                        .then(|| this.counter.run(&source))
-                        .flatten();
-                    if let Some(count) = count {
-                        this.runs.pending.push_back((index, count, source));
-                        this.start_next_run(cx);
-                    } else if this.runs.active != Some(index) && !this.runs.is_queued(index) {
-                        cell.update(cx, |cell, cx| cell.clear_execution(cx));
-                        if cell.read(cx).kind() == CellKind::Code {
-                            this.save_error =
-                                this.session.clear_outputs(cell.entity_id().as_u64()).err();
-                        }
-                    }
-                    if index + 1 == this.cells.len() {
+                    let next = this.selected_range().end;
+                    this.run_range(this.selected_range(), cx);
+                    if next == this.cells.len() {
                         if !this.record_structure(None, cx) {
                             return;
                         }
                         this.append_cell(window, cx);
                     }
-                    this.select(index + 1, cx);
-                    this.cells[index + 1]
-                        .read(cx)
-                        .focus_handle(cx)
-                        .focus(window, cx);
-                    this.reveal_cell = Some(index + 1);
-                    cx.notify();
+                    this.select(next, cx);
+                    this.focus_selected(window, cx);
+                    this.reveal_cell = Some(next);
                 }
             }
         })
@@ -1002,7 +997,11 @@ impl Notebook {
 
     pub fn focus_selected(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(cell) = self.cells.get(self.selected) {
-            cell.read(cx).focus_handle(cx).focus(window, cx);
+            if self.selected_range().len() > 1 {
+                cell.read(cx).list_focus_handle().focus(window, cx);
+            } else {
+                cell.read(cx).focus_handle(cx).focus(window, cx);
+            }
         }
     }
 
@@ -1013,65 +1012,28 @@ impl Notebook {
         cx: &mut Context<Self>,
     ) {
         match action {
-            ToolbarAction::Add | ToolbarAction::Paste => {
+            ToolbarAction::Add => {
                 if !self.record_structure(None, cx) {
                     return;
                 }
-                let text = if matches!(action, ToolbarAction::Paste) {
-                    cx.read_from_clipboard()
-                        .and_then(|item| item.text())
-                        .unwrap_or_default()
-                } else {
-                    String::new()
-                };
-                let target = self.selected + 1;
+                let target = self.selected_range().end;
                 self.append_cell(window, cx);
                 let added = self.cells.pop().unwrap();
-                added.update(cx, |cell, cx| cell.set_text(text, cx));
                 self.runs.remap(|i| if i >= target { i + 1 } else { i });
                 self.cells.insert(target, added);
                 self.select(target, cx);
                 self.reveal_cell = Some(target);
             }
-            ToolbarAction::Copy | ToolbarAction::Cut => {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                    self.cells[self.selected].read(cx).text().to_owned(),
-                ));
-                if matches!(action, ToolbarAction::Cut) {
-                    if self.runs.active == Some(self.selected) {
-                        return;
-                    }
-                    let index = self.selected;
-                    if !self.record_structure(Some(index), cx) {
-                        return;
-                    }
-                    self.cells[index].update(cx, |cell, cx| cell.clear_execution(cx));
-                    self.runs.remove(index);
-                    self.cells.remove(index);
-                    if self.cells.is_empty() {
-                        self.append_cell(window, cx);
-                    }
-                    self.select(index.min(self.cells.len() - 1), cx);
-                    self.start_next_run(cx);
-                }
-            }
-            ToolbarAction::Run => {
-                self.cells[self.selected].update(cx, |cell, cx| cell.preview_markdown(cx));
-                if self.control_pending || self.restart_run_all {
+            ToolbarAction::Paste => self.paste_selection(window, cx),
+            ToolbarAction::Copy => self.copy_selection(cx),
+            ToolbarAction::Cut => {
+                if self.selection_running() {
                     return;
                 }
-                let indices = self.selected..self.selected + 1;
-                for index in indices {
-                    if self.cells[index].read(cx).kind() != CellKind::Code {
-                        continue;
-                    }
-                    let source = self.cells[index].read(cx).text().to_owned();
-                    if let Some(count) = self.counter.run(&source) {
-                        self.runs.pending.push_back((index, count, source));
-                    }
-                }
-                self.start_next_run(cx);
+                self.copy_selection(cx);
+                self.delete_selection(window, cx);
             }
+            ToolbarAction::Run => self.run_range(self.selected_range(), cx),
             ToolbarAction::Stop => self.kernel_control(false, false, cx),
             ToolbarAction::Restart | ToolbarAction::RunAll => {
                 if self.control_pending || self.connecting || window.has_active_prompt() {
@@ -1173,16 +1135,21 @@ impl Notebook {
     }
 
     fn choose_cell_type(&mut self, kind: CellKind, window: &mut Window, cx: &mut Context<Self>) {
-        if self.runs.active == Some(self.selected) {
+        if self.selection_running() {
             return;
         }
-        if self.cells[self.selected].read(cx).kind() != kind {
-            if !self.record_structure(Some(self.selected), cx) {
+        let range = self.selected_range();
+        if self.cells[range.clone()]
+            .iter()
+            .any(|cell| cell.read(cx).kind() != kind)
+        {
+            if !self.record_structure_range(range.clone(), cx) {
                 return;
             }
-            self.runs.finish(self.selected);
-            self.runs.pending.retain(|run| run.0 != self.selected);
-            self.cells[self.selected].update(cx, |cell, cx| cell.set_kind(kind, cx));
+            self.runs.pending.retain(|run| !range.contains(&run.0));
+            for index in range {
+                self.cells[index].update(cx, |cell, cx| cell.set_kind(kind, cx));
+            }
             self.start_next_run(cx);
         }
         self.type_menu_open = false;
@@ -1395,6 +1362,15 @@ impl Notebook {
                     .bg(t.app.border),
             )
             .child(self.cell_type_control(cx))
+            .when(self.selected_range().len() > 1, |bar| {
+                bar.child(
+                    div()
+                        .px_2()
+                        .text_size(t.font.xs)
+                        .text_color(t.app.muted_fg)
+                        .child(format!("{} cells selected", self.selected_range().len())),
+                )
+            })
             .child(div().flex_1())
             .when(
                 activity == KernelActivity::Disconnected
@@ -1505,10 +1481,13 @@ impl Notebook {
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
         self.sync(cx);
         self.selected = index;
+        self.selection_anchor = index;
         self.type_menu_open = false;
         cx.notify();
         for (position, cell) in self.cells.iter().enumerate() {
-            cell.update(cx, |cell, cx| cell.set_current(position == index, cx));
+            cell.update(cx, |cell, cx| {
+                cell.set_selection(position == index, false, cx)
+            });
         }
     }
 }
@@ -1566,9 +1545,37 @@ impl Render for Notebook {
             .flex()
             .flex_col()
             .key_context("Notebook")
+            .on_action(
+                cx.listener(|this, _: &ExtendCellsUp, w, cx| {
+                    this.navigate_cells(false, true, w, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &ExtendCellsDown, w, cx| {
+                this.navigate_cells(true, true, w, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &PreviousCell, w, cx| {
+                    this.navigate_cells(false, false, w, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &NextCell, w, cx| this.navigate_cells(true, false, w, cx)),
+            )
+            .on_action(cx.listener(|this, _: &CopyCells, w, cx| {
+                this.toolbar_action(ToolbarAction::Copy, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CutCells, w, cx| {
+                this.toolbar_action(ToolbarAction::Cut, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PasteCells, w, cx| {
+                this.toolbar_action(ToolbarAction::Paste, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &DeleteCells, w, cx| this.delete_selection(w, cx)))
             .on_action(cx.listener(|this, _: &CloseFind, window, cx| {
                 if this.find_open {
                     this.close_find(window, cx);
+                } else if this.selected_range().len() > 1 {
+                    this.select(this.selected, cx);
                 } else {
                     cx.propagate();
                 }

@@ -12,11 +12,12 @@ struct Position {
 pub(super) struct Entry {
     order: Vec<Position>,
     selected: usize,
+    selection_anchor: usize,
     restored: Vec<Cell>,
 }
 
 impl Notebook {
-    fn sync_history(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(super) fn sync_history(&mut self, cx: &mut Context<Self>) -> bool {
         if let Err(error) = self.session.sync(&self.editors(cx)) {
             self.toasts.update(cx, |host, cx| {
                 host.push(
@@ -45,6 +46,7 @@ impl Notebook {
                 })
                 .collect(),
             selected: self.selected,
+            selection_anchor: self.selection_anchor,
             restored: document
                 .cells()
                 .iter()
@@ -60,17 +62,23 @@ impl Notebook {
         affected: Option<usize>,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.record_structure_range(affected.map_or(0..0, |index| index..index + 1), cx)
+    }
+
+    pub(super) fn record_structure_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !self.sync_history(cx) {
             return false;
         }
-        let id = affected.and_then(|index| {
-            self.session
-                .document()
-                .cells()
-                .get(index)
-                .map(|c| c.id().clone())
-        });
-        let entry = self.history_entry(|cell, _| Some(cell) == id.as_ref());
+        let document = self.session.document();
+        let ids: Vec<_> = document.cells()[range]
+            .iter()
+            .map(|cell| cell.id())
+            .collect();
+        let entry = self.history_entry(|cell, _| ids.contains(&cell));
         self.undo_structure.push(entry);
         if self.undo_structure.len() > 100 {
             self.undo_structure.remove(0);
@@ -167,7 +175,8 @@ impl Notebook {
         } else {
             self.redo_structure.push(inverse);
         }
-        self.select(entry.selected.min(self.cells.len() - 1), cx);
+        self.selection_anchor = entry.selection_anchor.min(self.cells.len() - 1);
+        self.extend_selection(entry.selected.min(self.cells.len() - 1), window, cx);
         self.reveal_cell = Some(self.selected);
         self.find_dirty = true;
         self.cells[self.selected]

@@ -314,6 +314,8 @@ pub enum CellEvent {
     InsertAbove,
     InsertBelow,
     Selected,
+    CommandSelected,
+    ExtendSelection,
     RunAndAdvance,
     RunFinished,
     RunFailed,
@@ -326,6 +328,7 @@ const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '�
 
 pub struct CodeCell {
     current: bool,
+    group_selected: bool,
     document: bool,
     language: Option<crate::syntax::Language>,
     filter_input: bool,
@@ -391,7 +394,7 @@ impl CodeCell {
         let cell_focus = cx.focus_handle();
         let subscriptions = vec![
             cx.on_focus(&cell_focus, window, |_, _, cx| {
-                cx.emit(CellEvent::Selected);
+                cx.emit(CellEvent::CommandSelected);
                 cx.notify();
             }),
             cx.on_blur(&cell_focus, window, |_, _, cx| {
@@ -410,6 +413,7 @@ impl CodeCell {
         ];
         Self {
             current: false,
+            group_selected: false,
             document: false,
             language: None,
             filter_input: false,
@@ -707,9 +711,10 @@ impl CodeCell {
         }
     }
 
-    pub fn set_current(&mut self, current: bool, cx: &mut Context<Self>) {
-        if self.current != current {
+    pub fn set_selection(&mut self, current: bool, group_selected: bool, cx: &mut Context<Self>) {
+        if self.current != current || self.group_selected != group_selected {
             self.current = current;
+            self.group_selected = group_selected;
             cx.notify();
         }
     }
@@ -1717,15 +1722,32 @@ impl Render for CodeCell {
             .p(cell_padding)
             .px(px(6.))
             .pr(px(4.))
-            .bg(theme.app.bg)
+            .bg(if self.group_selected {
+                theme.app.accent
+            } else {
+                theme.app.bg
+            })
             .text_color(theme.app.fg)
             .border_1()
             .border_color(if self.current && self.cell_focus.is_focused(window) {
                 surface.primary
+            } else if self.group_selected {
+                theme.app.accent
             } else {
                 theme.app.bg
             })
             .rounded(theme.radius.md() + cell_padding / 2. + px(1.))
+            .capture_any_mouse_down(cx.listener(
+                |this, event: &gpui::MouseDownEvent, window, cx| {
+                    if event.button == MouseButton::Left
+                        && event.modifiers.shift
+                        && !this.focus.is_focused(window)
+                    {
+                        cx.emit(CellEvent::ExtendSelection);
+                        cx.stop_propagation();
+                    }
+                },
+            ))
             .on_mouse_down_out(cx.listener(|this, _, window, _| {
                 if this.focus.is_focused(window) || this.cell_focus.is_focused(window) {
                     window.blur();
@@ -1734,6 +1756,7 @@ impl Render for CodeCell {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
+                    cx.emit(CellEvent::Selected);
                     this.cell_focus.focus(window, cx);
                 }),
             )
