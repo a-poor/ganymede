@@ -1520,28 +1520,39 @@ impl ConnectionWindow {
         let divider = || div().mx_3().h(px(1.)).bg(t.launcher_border);
         let mut body = div().w_full().flex().flex_col().gap_3();
         if self.installing {
-            body = body
-                .items_center()
-                .child(
-                    div()
-                        .text_color(t.app.muted_fg)
-                        .child(if self.creating_environment {
+            body = body.child(
+                group()
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(div().font_weight(gpui::FontWeight::MEDIUM).child(
+                        if self.creating_environment {
                             "Creating environment and installing packages…"
                         } else {
                             "Installing packages…"
-                        }),
-                )
-                .child(
-                    div()
-                        .font_family(t.font.mono.clone())
-                        .text_size(t.font.xs)
-                        .text_color(t.app.muted_fg)
-                        .child(self.selected_python(cx).to_string_lossy().into_owned()),
-                )
-                .child(
-                    button("cancel-install", "Cancel", false, cx)
-                        .on_click(cx.listener(|this, _, _, cx| this.cancel_install(cx))),
-                );
+                        },
+                    ))
+                    .child(
+                        div()
+                            .font_family(t.font.mono.clone())
+                            .text_size(t.font.xs)
+                            .text_color(if t.is_dark {
+                                t.card.muted_fg
+                            } else {
+                                t.app.muted_fg
+                            })
+                            .w_full()
+                            .truncate()
+                            .child(self.selected_python(cx).to_string_lossy().into_owned()),
+                    )
+                    .child(
+                        div().w_full().flex().justify_end().child(
+                            button("cancel-install", "Cancel", false, cx)
+                                .on_click(cx.listener(|this, _, _, cx| this.cancel_install(cx))),
+                        ),
+                    ),
+            );
         } else if self.busy {
             body = body
                 .items_center()
