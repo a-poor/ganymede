@@ -20,6 +20,10 @@ actions!(
         Right,
         Up,
         Down,
+        WordLeft,
+        WordRight,
+        SelectWordLeft,
+        SelectWordRight,
         SelectLeft,
         SelectRight,
         SelectUp,
@@ -72,6 +76,25 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("tab", Tab, context),
         KeyBinding::new("shift-tab", Outdent, context),
     ]);
+    let word_modifier = if cfg!(target_os = "macos") {
+        "alt"
+    } else {
+        "ctrl"
+    };
+    cx.bind_keys([
+        KeyBinding::new(&format!("{word_modifier}-left"), WordLeft, context),
+        KeyBinding::new(&format!("{word_modifier}-right"), WordRight, context),
+        KeyBinding::new(
+            &format!("{word_modifier}-shift-left"),
+            SelectWordLeft,
+            context,
+        ),
+        KeyBinding::new(
+            &format!("{word_modifier}-shift-right"),
+            SelectWordRight,
+            context,
+        ),
+    ]);
     let modifier = if cfg!(target_os = "macos") {
         "cmd"
     } else {
@@ -92,6 +115,46 @@ pub fn init(cx: &mut App) {
             KeyBinding::new("cmd-shift-left", SelectHome, context),
             KeyBinding::new("cmd-shift-right", SelectEnd, context),
         ]);
+    }
+}
+
+#[derive(Clone, Debug)]
+enum MouseSelection {
+    Character,
+    Word(Range<usize>),
+    Line(Range<usize>),
+}
+
+impl MouseSelection {
+    fn begin(buffer: &mut Buffer, offset: usize, clicks: usize, extend: bool) -> Self {
+        let mode = match clicks {
+            2 => Self::Word(buffer.word_at(offset)),
+            3.. => Self::Line(buffer.line_at(offset)),
+            _ => {
+                buffer.select(offset, extend);
+                return Self::Character;
+            }
+        };
+        mode.extend(buffer, offset);
+        mode
+    }
+
+    fn extend(&self, buffer: &mut Buffer, offset: usize) {
+        let (initial, target) = match self {
+            Self::Character => {
+                buffer.select(offset, true);
+                return;
+            }
+            Self::Word(initial) => (initial, buffer.word_at(offset)),
+            Self::Line(initial) => (initial, buffer.line_at(offset)),
+        };
+        if target.start < initial.start {
+            buffer.anchor = initial.end;
+            buffer.head = target.start;
+        } else {
+            buffer.anchor = initial.start;
+            buffer.head = target.end.max(initial.end);
+        }
     }
 }
 
@@ -172,6 +235,37 @@ impl Buffer {
             .grapheme_indices(true)
             .find_map(|(i, _)| (i > self.head).then_some(i))
             .unwrap_or(self.text.len())
+    }
+    // Skip whitespace, then move to the edge of the next Unicode word or
+    // punctuation segment. Offsets remain UTF-8 boundaries, including emoji.
+    fn word_left(&self) -> usize {
+        self.text[..self.head]
+            .split_word_bound_indices()
+            .rev()
+            .find(|(_, segment)| !segment.chars().all(char::is_whitespace))
+            .map_or(0, |(start, _)| start)
+    }
+    fn word_right(&self) -> usize {
+        self.text[self.head..]
+            .split_word_bound_indices()
+            .find(|(_, segment)| !segment.chars().all(char::is_whitespace))
+            .map_or(self.text.len(), |(start, segment)| {
+                self.head + start + segment.len()
+            })
+    }
+    fn word_at(&self, offset: usize) -> Range<usize> {
+        self.text
+            .split_word_bound_indices()
+            .find(|(start, segment)| offset < start + segment.len())
+            .or_else(|| self.text.split_word_bound_indices().next_back())
+            .map_or(0..0, |(start, segment)| start..start + segment.len())
+    }
+    fn line_at(&self, offset: usize) -> Range<usize> {
+        let start = self.text[..offset].rfind('\n').map_or(0, |i| i + 1);
+        let end = self.text[offset..]
+            .find('\n')
+            .map_or(self.text.len(), |i| offset + i + 1);
+        start..end
     }
     fn line_start(&self) -> usize {
         self.text[..self.head].rfind('\n').map_or(0, |i| i + 1)
@@ -272,7 +366,7 @@ pub struct CodeCell {
     bounds: Option<Bounds<Pixels>>,
     line_height: Pixels,
     goal_x: Option<Pixels>,
-    selecting: bool,
+    selecting: Option<MouseSelection>,
     scroll: ScrollHandle,
     cursor_visible: bool,
     blink: Task<()>,
@@ -309,7 +403,7 @@ impl CodeCell {
             cx.on_blur(&focus, window, |this, _, cx| {
                 this.blink = Task::ready(());
                 this.cursor_visible = false;
-                this.selecting = false;
+                this.selecting = None;
                 cx.notify();
             }),
         ];
@@ -355,7 +449,7 @@ impl CodeCell {
             bounds: None,
             line_height: cx.theme().font.line_height_tight,
             goal_x: None,
-            selecting: false,
+            selecting: None,
             scroll: ScrollHandle::new(),
             cursor_visible: true,
             blink: Task::ready(()),
@@ -871,17 +965,25 @@ impl CodeCell {
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         self.focus.focus(window, cx);
-        self.selecting = true;
+        self.finish_composition();
         let offset = self.index_at(event.position);
-        self.move_cursor(offset, event.modifiers.shift, window, cx);
+        self.selecting = Some(MouseSelection::begin(
+            &mut self.buffer,
+            offset,
+            event.click_count,
+            event.modifiers.shift,
+        ));
+        self.changed(window, cx);
     }
     fn mouse_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selecting {
-            self.move_cursor(self.index_at(event.position), true, window, cx);
+        if let Some(mode) = self.selecting.clone() {
+            let offset = self.index_at(event.position);
+            mode.extend(&mut self.buffer, offset);
+            self.changed(window, cx);
         }
     }
     fn mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
-        self.selecting = false;
+        self.selecting = None;
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -1134,6 +1236,18 @@ impl Render for CodeCell {
                     this.buffer.selection().end
                 };
                 this.move_cursor(offset, false, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &WordLeft, w, cx| {
+                this.move_cursor(this.buffer.word_left(), false, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &WordRight, w, cx| {
+                this.move_cursor(this.buffer.word_right(), false, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectWordLeft, w, cx| {
+                this.move_cursor(this.buffer.word_left(), true, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectWordRight, w, cx| {
+                this.move_cursor(this.buffer.word_right(), true, w, cx)
             }))
             .on_action(cx.listener(|this, _: &SelectLeft, w, cx| {
                 this.move_cursor(this.buffer.previous(), true, w, cx)
@@ -2123,6 +2237,160 @@ impl Element for CellText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn word_navigation_handles_identifiers_punctuation_whitespace_and_unicode() {
+        let mut buffer = Buffer {
+            text: "foo_bar( café 👩‍💻)\n  next".into(),
+            ..Default::default()
+        };
+        for expected in ["foo_bar", "(", " café", " 👩‍💻", ")", "\n  next"] {
+            let start = buffer.head;
+            buffer.select(buffer.word_right(), false);
+            assert_eq!(&buffer.text[start..buffer.head], expected);
+        }
+        assert_eq!(buffer.word_right(), buffer.text.len());
+        for expected in ["next", ")\n  ", "👩‍💻", "café ", "( ", "foo_bar"] {
+            let end = buffer.head;
+            buffer.select(buffer.word_left(), false);
+            assert_eq!(&buffer.text[buffer.head..end], expected);
+        }
+        assert_eq!(buffer.word_left(), 0);
+        let empty = Buffer::default();
+        assert_eq!(empty.word_left(), 0);
+        assert_eq!(empty.word_right(), 0);
+    }
+
+    #[test]
+    fn word_drag_preserves_whole_words_when_reversing_direction() {
+        let mut buffer = Buffer {
+            text: "one café three".into(),
+            ..Default::default()
+        };
+        let mode = MouseSelection::begin(&mut buffer, 5, 2, false);
+        assert_eq!(&buffer.text[buffer.selection()], "café");
+        mode.extend(&mut buffer, 12);
+        assert_eq!(&buffer.text[buffer.selection()], "café three");
+        mode.extend(&mut buffer, 1);
+        assert_eq!(&buffer.text[buffer.selection()], "one café");
+        assert!(buffer.head < buffer.anchor);
+        mode.extend(&mut buffer, 5);
+        assert_eq!(&buffer.text[buffer.selection()], "café");
+        assert_eq!(buffer.word_at(buffer.text.len()), 10..15);
+    }
+
+    #[test]
+    fn triple_click_and_drag_select_logical_lines_including_newlines() {
+        let mut buffer = Buffer {
+            text: "first\n\nlast".into(),
+            ..Default::default()
+        };
+        let mode = MouseSelection::begin(&mut buffer, 6, 3, false);
+        assert_eq!(&buffer.text[buffer.selection()], "\n");
+        mode.extend(&mut buffer, 9);
+        assert_eq!(&buffer.text[buffer.selection()], "\nlast");
+        mode.extend(&mut buffer, 0);
+        assert_eq!(&buffer.text[buffer.selection()], "first\n\n");
+        assert!(buffer.head < buffer.anchor);
+        assert_eq!(buffer.line_at(buffer.text.len()), 7..11);
+        let mut empty = Buffer::default();
+        MouseSelection::begin(&mut empty, 0, 3, false);
+        assert_eq!(empty.selection(), 0..0);
+    }
+
+    #[gpui::test]
+    fn mouse_click_counts_select_words_and_lines_in_notebook_and_file_editors(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for document in [false, true] {
+            let cx = cx.add_empty_window();
+            let cell = cx.update(|window, cx| {
+                cx.set_global(
+                    crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+                );
+                cx.new(|cx| {
+                    let mut cell = if document {
+                        CodeCell::new_document(window, cx)
+                    } else {
+                        CodeCell::new(window, cx)
+                    };
+                    cell.buffer.text = "one café three\nlast".into();
+                    cell
+                })
+            });
+            for (click_count, expected) in [(2, "café"), (3, "one café three\n")] {
+                cx.draw(point(px(0.), px(0.)), size(px(600.), px(300.)), |_, _| {
+                    cell.clone().into_any_element()
+                });
+                let position = cx.update(|_, cx| {
+                    let cell = cell.read(cx);
+                    let bounds = cell.bounds.unwrap();
+                    point(
+                        bounds.left() + cell.lines[0].x_for_index(5),
+                        bounds.top() + cell.line_height / 2.,
+                    )
+                });
+                cx.simulate_event(MouseDownEvent {
+                    position,
+                    button: MouseButton::Left,
+                    click_count,
+                    modifiers: Default::default(),
+                    first_mouse: false,
+                });
+                cx.simulate_mouse_up(position, MouseButton::Left, Default::default());
+                cx.update(|_, cx| assert_eq!(cell.read(cx).selected_text(), expected));
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn word_shortcuts_extend_reverse_and_replace_selection(cx: &mut gpui::TestAppContext) {
+        let window = cx.update(|cx| {
+            cx.set_global(
+                crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+            );
+            init(cx);
+            cx.open_window(Default::default(), |window, cx| {
+                cx.new(|cx| {
+                    let mut cell = CodeCell::new_document(window, cx);
+                    cell.buffer.text = "one café three".into();
+                    cell.focus.focus(window, cx);
+                    cell
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        let modifier = if cfg!(target_os = "macos") {
+            "alt"
+        } else {
+            "ctrl"
+        };
+        for (keys, head, selected) in [
+            ("right", 3, ""),
+            ("shift-right", 9, " café"),
+            ("shift-left", 4, " "),
+            ("shift-left", 0, "one"),
+            ("right", 3, ""),
+            ("shift-right", 9, " café"),
+        ] {
+            cx.simulate_keystrokes(window.into(), &format!("{modifier}-{keys}"));
+            cx.update(|cx| {
+                window
+                    .update(cx, |cell, _, _| {
+                        assert_eq!(cell.buffer.head, head, "{keys}");
+                        assert_eq!(cell.selected_text(), selected, "{keys}");
+                    })
+                    .unwrap()
+            });
+        }
+        cx.simulate_keystrokes(window.into(), "backspace");
+        cx.update(|cx| {
+            window
+                .update(cx, |cell, _, _| assert_eq!(cell.text(), "one three"))
+                .unwrap()
+        });
+    }
 
     #[gpui::test]
     fn empty_search_input_uses_the_same_baseline_as_typed_text(cx: &mut gpui::TestAppContext) {

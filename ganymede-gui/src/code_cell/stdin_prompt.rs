@@ -387,6 +387,18 @@ impl Render for StdinPrompt {
                     cx,
                 )
             }))
+            .on_action(cx.listener(|this, _: &WordLeft, _, cx| {
+                this.select(this.buffer.word_left(), false, cx)
+            }))
+            .on_action(cx.listener(|this, _: &WordRight, _, cx| {
+                this.select(this.buffer.word_right(), false, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectWordLeft, _, cx| {
+                this.select(this.buffer.word_left(), true, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectWordRight, _, cx| {
+                this.select(this.buffer.word_right(), true, cx)
+            }))
             .on_action(cx.listener(|this, _: &SelectLeft, _, cx| {
                 this.select(this.buffer.previous(), true, cx)
             }))

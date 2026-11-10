@@ -75,6 +75,10 @@ Choose a kernel using the notebook's kernel control.
 - **Escape**, then **Command+Z**, undoes cell operations such as insertion,
   deletion, movement, and type changes. While typing, undo applies to text edits.
 
+In notebook source and text files, **Option+Left/Right** moves by word; add
+**Shift** to extend the selection. Double-click selects a word, and triple-click
+selects a full line. Drag after either gesture to select whole words or lines.
+
 Use the Run and Kernel menus for execution, interrupt, restart, and shutdown.
 Restart clears the kernel's variables. Closing a notebook does **not** shut down
 its kernel; use the Kernels sidebar to inspect and explicitly shut down kernels.
