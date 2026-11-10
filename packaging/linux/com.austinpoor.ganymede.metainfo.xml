@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.austinpoor.ganymede</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>Ganymede</name>
+  <summary>Edit and run Jupyter notebooks</summary>
+  <developer id="com.austinpoor">
+    <name>Austin Poor and Ganymede contributors</name>
+  </developer>
+  <description>
+    <p>Ganymede is a native desktop client for Jupyter. Create or connect to a
+    Jupyter server, edit notebooks, run cells, and manage files and kernels.</p>
+    <ul>
+      <li>Edit code and Markdown cells and view rich outputs.</li>
+      <li>Work with local servers, remote servers, and SSH connections.</li>
+      <li>Recover unsaved work and reopen recent connections.</li>
+    </ul>
+    <p>Python and Jupyter are required for local servers and are not bundled.
+    You can also connect to an existing remote Jupyter server.</p>
+  </description>
+  <launchable type="desktop-id">com.austinpoor.ganymede.desktop</launchable>
+  <icon type="stock">com.austinpoor.ganymede</icon>
+  <provides>
+    <binary>ganymede</binary>
+  </provides>
+  <categories>
+    <category>Development</category>
+  </categories>
+  <url type="homepage">https://github.com/a-poor/ganymede</url>
+  <url type="bugtracker">https://github.com/a-poor/ganymede/issues</url>
+  <url type="vcs-browser">https://github.com/a-poor/ganymede</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Notebook editor and connection launcher</caption>
+      <image>https://raw.githubusercontent.com/a-poor/ganymede/main/docs/images/ganymede-preview.png</image>
+    </screenshot>
+  </screenshots>
+</component>

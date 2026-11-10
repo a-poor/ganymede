@@ -8,6 +8,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("package_linux", ROOT / "scripts/package-linux.py")
@@ -47,9 +48,18 @@ class LinuxPackageTests(unittest.TestCase):
             self.assertEqual((stage / "bin/ganymede").stat().st_mode & 0o777, 0o755)
             self.assertTrue((stage / f"share/icons/hicolor/512x512@2/apps/{package_linux.APP_ID}.png").is_file())
             self.assertNotIn("MimeType=", desktop)  # CLI file opening is not implemented.
+            metadata = ET.parse(stage / f"share/metainfo/{package_linux.APP_ID}.metainfo.xml").getroot()
+            self.assertEqual(metadata.findtext("id"), package_linux.APP_ID)
+            self.assertEqual(metadata.findtext("launchable"), f"{package_linux.APP_ID}.desktop")
+            self.assertEqual(metadata.findtext("project_license"), "MIT OR Apache-2.0")
+
+    @unittest.skipUnless(shutil.which("appstreamcli"), "needs AppStream validator")
+    def test_appstream_metadata_is_valid(self):
+        subprocess.run(["appstreamcli", "validate", "--no-net",
+                        str(ROOT / f"packaging/linux/{package_linux.APP_ID}.metainfo.xml")], check=True)
 
     @unittest.skipUnless(platform.system() == "Linux" and all(shutil.which(tool) for tool in
-                         ("dpkg-shlibdeps", "dpkg-deb", "desktop-file-validate")), "needs Linux packaging tools")
+                         ("dpkg-shlibdeps", "dpkg-deb", "desktop-file-validate", "appstreamcli")), "needs Linux packaging tools")
     def test_packages_have_correct_paths_dependencies_and_checksums(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
@@ -58,6 +68,7 @@ class LinuxPackageTests(unittest.TestCase):
             with tarfile.open(archive) as tar:
                 names = tar.getnames()
                 self.assertTrue(any(name.endswith("/bin/ganymede") for name in names))
+                self.assertTrue(any(name.endswith(f"/share/metainfo/{package_linux.APP_ID}.metainfo.xml") for name in names))
                 self.assertFalse(any("DEBIAN" in name for name in names))
                 self.assertTrue(all(item.uid == 0 and item.gid == 0 for item in tar.getmembers()))
             metadata = subprocess.check_output(["dpkg-deb", "--field", str(deb)], text=True)
@@ -68,6 +79,9 @@ class LinuxPackageTests(unittest.TestCase):
             extracted = output / "extracted"
             subprocess.run(["dpkg-deb", "--extract", str(deb), str(extracted)], check=True)
             self.assertEqual((extracted / "usr/bin/ganymede").read_bytes(), Path(shutil.which("true")).read_bytes())
+            metainfo = Path(f"share/metainfo/{package_linux.APP_ID}.metainfo.xml")
+            self.assertEqual((extracted / "usr" / metainfo).read_bytes(),
+                             (ROOT / "packaging/linux" / metainfo.name).read_bytes())
             for line in manifest.read_text().splitlines():
                 digest, name = line.split()
                 self.assertEqual(digest, hashlib.sha256((output / name).read_bytes()).hexdigest())

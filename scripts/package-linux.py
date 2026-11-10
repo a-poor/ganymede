@@ -22,6 +22,7 @@ def stage(binary, destination, source=ROOT):
     files = {
         "bin/ganymede": binary,
         f"share/applications/{APP_ID}.desktop": source / f"packaging/linux/{APP_ID}.desktop",
+        f"share/metainfo/{APP_ID}.metainfo.xml": source / f"packaging/linux/{APP_ID}.metainfo.xml",
         f"share/icons/hicolor/512x512@2/apps/{APP_ID}.png": source / "ganymede-gui/branding/icon-source.png",
         "share/doc/ganymede/LICENSE-MIT": source / "LICENSE-MIT",
         "share/doc/ganymede/LICENSE-APACHE": source / "LICENSE-APACHE",
@@ -44,6 +45,7 @@ def package(binary, version, arch, output, source=ROOT):
         bundle = work / name
         stage(binary, bundle, source)
         run("desktop-file-validate", str(bundle / f"share/applications/{APP_ID}.desktop"))
+        run("appstreamcli", "validate", "--no-net", str(bundle / f"share/metainfo/{APP_ID}.metainfo.xml"))
         archive = output / f"{name}.tar.gz"
         with tarfile.open(archive, "w:gz") as tar:
             def normalize(info):

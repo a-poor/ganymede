@@ -34,7 +34,8 @@ The tarball contains a prefix-relative `bin/` and `share/` tree. Extract it and
 run `bin/ganymede`, or copy those directories into `~/.local/` and ensure
 `~/.local/bin` is on PATH. To remove a manual installation, remove only
 `~/.local/bin/ganymede`, `~/.local/share/applications/com.austinpoor.ganymede.desktop`,
-`~/.local/share/icons/hicolor/512x512@2/apps/com.austinpoor.ganymede.png`, and
+`~/.local/share/icons/hicolor/512x512@2/apps/com.austinpoor.ganymede.png`,
+`~/.local/share/metainfo/com.austinpoor.ganymede.metainfo.xml`, and
 `~/.local/share/doc/ganymede`. Application data is separate and retained.
 
 These are dynamically linked native packages, not self-contained AppImages.
@@ -49,6 +50,58 @@ Python/Jupyter are needed only for local servers, not remote connections.
 
 The desktop entry follows the [freedesktop specification](https://specifications.freedesktop.org/desktop-entry/latest-single/).
 Dependency generation follows [Debian shared-library guidance](https://www.debian.org/doc/debian-policy/ch-sharedlibs.html).
+
+## Software listings
+
+Both Linux packages include AppStream metadata in `share/metainfo/`, describing
+the application, developer, license, screenshot, and project links. The packager
+validates it with `appstreamcli` (installed by `scripts/install-linux-deps.sh`).
+Keep `packaging/linux/com.austinpoor.ganymede.metainfo.xml` current when changing
+the application's description or screenshot. Software catalogs can use this
+metadata when indexing the package; installing the file alone does not publish
+an App Center listing.
+
+Ubuntu App Center's local `.deb` installer currently does not use the AppStream
+developer or release date for its title and information fields. It also always
+shows a third-party package warning. Adding metadata or a detached signature
+does not remove that warning. The package remains unsandboxed, so its
+“Unrestricted” permissions label is expected.
+
+## Signing release downloads
+
+The packager writes a `.sha256` manifest covering the `.deb` and `.tar.gz`.
+For public downloads, the release maintainer can sign that manifest with an
+existing GPG signing key on their release machine. This is separate from macOS
+code signing and notarization; neither packaging nor CI currently signs Linux
+downloads automatically.
+
+After downloading the final artifacts into one directory, first verify their
+checksums, then sign the manifest. Replace `YOUR_SIGNING_KEY_FINGERPRINT` with
+the full fingerprint of the intended signing key:
+
+```sh
+sha256sum --check ganymede-0.3.1-linux-amd64.sha256
+gpg --armor --detach-sign --local-user YOUR_SIGNING_KEY_FINGERPRINT ganymede-0.3.1-linux-amd64.sha256
+gpg --armor --export YOUR_SIGNING_KEY_FINGERPRINT > ganymede-release-key.asc
+```
+
+On macOS, use `shasum -a 256 --check` instead of `sha256sum --check`.
+Upload the manifest, its `.asc` signature, and the public key alongside the exact
+artifacts it covers. Publish the key fingerprint through a trusted project
+channel so users can check it independently. Never upload the private key.
+
+Users who have verified and imported the public key can verify the signature
+and then the artifact checksums:
+
+```sh
+gpg --verify ganymede-0.3.1-linux-amd64.sha256.asc ganymede-0.3.1-linux-amd64.sha256
+sha256sum --check ganymede-0.3.1-linux-amd64.sha256
+```
+
+A detached signature supports manual download verification; App Center does
+not verify this sidecar file when opening a local `.deb`. Authenticated APT
+updates would require a separately configured signed repository, which is not
+provided yet.
 
 ## Desktop verification
 
