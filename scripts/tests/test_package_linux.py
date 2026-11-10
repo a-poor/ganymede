@@ -1,3 +1,4 @@
+import configparser
 import hashlib
 import importlib.util
 from pathlib import Path
@@ -15,6 +16,27 @@ spec.loader.exec_module(package_linux)
 
 
 class LinuxPackageTests(unittest.TestCase):
+    @unittest.skipUnless(Path("/usr/share/icons/hicolor/index.theme").is_file(),
+                         "needs the system hicolor icon theme")
+    def test_staged_icon_uses_a_registered_theme_directory_and_matching_size(self):
+        theme = configparser.ConfigParser()
+        theme.read("/usr/share/icons/hicolor/index.theme")
+        with tempfile.TemporaryDirectory() as directory:
+            stage = Path(directory)
+            package_linux.stage(Path(shutil.which("true")), stage)
+            theme_root = stage / "share/icons/hicolor"
+            icons = list(theme_root.rglob("*.png"))
+            self.assertTrue(icons)
+            for icon in icons:
+                subdirectory = icon.parent.relative_to(theme_root).as_posix()
+                self.assertIn(subdirectory, theme["Icon Theme"]["Directories"].split(","))
+                entry = theme[subdirectory]
+                pixels = entry.getint("Size") * entry.getint("Scale", fallback=1)
+                png = icon.read_bytes()
+                self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n")
+                self.assertEqual(int.from_bytes(png[16:20], "big"), pixels)
+                self.assertEqual(int.from_bytes(png[20:24], "big"), pixels)
+
     def test_staged_launcher_matches_executable_and_icon(self):
         with tempfile.TemporaryDirectory() as directory:
             stage = Path(directory)
@@ -23,7 +45,7 @@ class LinuxPackageTests(unittest.TestCase):
             self.assertIn("Exec=ganymede\n", desktop)
             self.assertIn(f"Icon={package_linux.APP_ID}\n", desktop)
             self.assertEqual((stage / "bin/ganymede").stat().st_mode & 0o777, 0o755)
-            self.assertTrue((stage / f"share/icons/hicolor/1024x1024/apps/{package_linux.APP_ID}.png").is_file())
+            self.assertTrue((stage / f"share/icons/hicolor/512x512@2/apps/{package_linux.APP_ID}.png").is_file())
             self.assertNotIn("MimeType=", desktop)  # CLI file opening is not implemented.
 
     @unittest.skipUnless(platform.system() == "Linux" and all(shutil.which(tool) for tool in

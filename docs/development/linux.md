@@ -27,14 +27,14 @@ files. Linked-library dependencies are calculated with `dpkg-shlibdeps`; desktop
 runtime dependencies are included explicitly. Install a downloaded package with:
 
 ```sh
-sudo apt install ./ganymede_0.3.0_amd64.deb
+sudo apt install ./ganymede_0.3.1_amd64.deb
 ```
 
 The tarball contains a prefix-relative `bin/` and `share/` tree. Extract it and
 run `bin/ganymede`, or copy those directories into `~/.local/` and ensure
 `~/.local/bin` is on PATH. To remove a manual installation, remove only
 `~/.local/bin/ganymede`, `~/.local/share/applications/com.austinpoor.ganymede.desktop`,
-`~/.local/share/icons/hicolor/1024x1024/apps/com.austinpoor.ganymede.png`, and
+`~/.local/share/icons/hicolor/512x512@2/apps/com.austinpoor.ganymede.png`, and
 `~/.local/share/doc/ganymede`. Application data is separate and retained.
 
 These are dynamically linked native packages, not self-contained AppImages.

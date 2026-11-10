@@ -22,7 +22,7 @@ def stage(binary, destination, source=ROOT):
     files = {
         "bin/ganymede": binary,
         f"share/applications/{APP_ID}.desktop": source / f"packaging/linux/{APP_ID}.desktop",
-        f"share/icons/hicolor/1024x1024/apps/{APP_ID}.png": source / "ganymede-gui/branding/icon-source.png",
+        f"share/icons/hicolor/512x512@2/apps/{APP_ID}.png": source / "ganymede-gui/branding/icon-source.png",
         "share/doc/ganymede/LICENSE-MIT": source / "LICENSE-MIT",
         "share/doc/ganymede/LICENSE-APACHE": source / "LICENSE-APACHE",
         "share/doc/ganymede/README.md": source / "docs/development/linux.md",
