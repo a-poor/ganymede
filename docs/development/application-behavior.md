@@ -161,8 +161,11 @@ out as a whole; output-internal virtualization is not implemented.
 
 Notebook cell editors soft-wrap and grow vertically with their source. Code cells
 use Python Tree-sitter syntax highlighting, cached until their source changes;
-cells over 256 KiB fall back to plain text. Markdown/Raw cells and standalone text
-files remain unhighlighted. Tab inserts spaces using the configured indentation width, or
+cells over 256 KiB fall back to plain text. Markdown/Raw notebook cells remain
+unhighlighted. Standalone Python, Markdown, TOML, JSON, YAML, and SQL files use cached
+Tree-sitter highlighting with the same size limit and theme palette. Language
+detection follows file extensions, including after rename or Save As. Markdown
+includes inline syntax and Python, TOML, JSON, YAML, and SQL fenced code. Tab inserts spaces using the configured indentation width, or
 indents selected lines; Shift+Tab outdents. Enter preserves leading whitespace
 and, in Code cells, indents Python block headers and bracket continuations.
 Backspace in leading spaces removes one indentation step. Block indentation is
@@ -242,9 +245,8 @@ Markdown, and Python files using server-allocated names. Save with
 work for text files too. Detection uses the returned content rather than an extension
 allowlist: UTF-8 text (including base64-encoded UTF-8 responses) is accepted; binary
 content and unsupported encodings produce an error toast. UTF-8 BOM and uniform CRLF
-line endings returned by the server are preserved on save. Syntax highlighting and
-specialized Markdown/Python behavior are not implemented yet; paths and document kinds
-are retained for that future work.
+line endings returned by the server are preserved on save. Specialized Markdown/Python
+behavior beyond syntax highlighting is not implemented yet.
 
 Right-click a file or folder for its context menu. Files offer Open, Rename, Save As,
 and Delete; folders offer New notebook, New text file, New folder, Upload here,

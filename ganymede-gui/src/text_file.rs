@@ -1,4 +1,4 @@
-//! Plain-text file view; file paths retain the extension for future language support.
+//! Editable text files with extension-based syntax highlighting.
 use crate::{
     autosave::{AutosaveClock, AutosavePreference},
     code_cell::{CellEvent, CodeCell},
@@ -52,6 +52,7 @@ impl TextFile {
     ) -> Self {
         let editor = cx.new(|cx| {
             let mut editor = CodeCell::new_document(window, cx);
+            editor.set_language(crate::syntax::Language::for_path(&controller.path()), cx);
             editor.set_text(controller.snapshot().text, cx);
             editor
         });
@@ -126,6 +127,12 @@ impl TextFile {
     pub fn file_controller(&self) -> TextFileController {
         self.controller.clone()
     }
+    pub fn refresh_language(&mut self, cx: &mut Context<Self>) {
+        let language = crate::syntax::Language::for_path(&self.controller.path());
+        self.editor
+            .update(cx, |editor, cx| editor.set_language(language, cx));
+    }
+
     pub fn file_saved_as(&mut self, cx: &mut Context<Self>) {
         self.recovery_pending = false;
         self.conflict = false;

@@ -327,6 +327,7 @@ const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '�
 pub struct CodeCell {
     current: bool,
     document: bool,
+    language: Option<crate::syntax::Language>,
     filter_input: bool,
     name_input: bool,
     search_input: bool,
@@ -410,6 +411,7 @@ impl CodeCell {
         Self {
             current: false,
             document: false,
+            language: None,
             filter_input: false,
             name_input: false,
             search_input: false,
@@ -461,6 +463,28 @@ impl CodeCell {
         let mut this = Self::new(window, cx);
         this.document = true;
         this
+    }
+
+    pub fn set_language(
+        &mut self,
+        language: Option<crate::syntax::Language>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.language != language {
+            self.language = language;
+            self.text_layouts.borrow_mut().entries.clear();
+            cx.notify();
+        }
+    }
+
+    fn syntax_language(&self) -> Option<crate::syntax::Language> {
+        if self.document {
+            self.language
+        } else if self.python_code() {
+            Some(crate::syntax::Language::Python)
+        } else {
+            None
+        }
     }
 
     pub fn new_name_input(value: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -1913,8 +1937,8 @@ impl Element for CellText {
                 .shape_line("M".into(), font_size, &[style.to_run(1)], None);
         let empty_baseline = (line_height - caret_metrics.ascent - caret_metrics.descent) / 2.
             + caret_metrics.ascent;
-        let highlights = if cell.python_code() {
-            cell.syntax.borrow_mut().get(&cell.buffer.text)
+        let highlights = if let Some(language) = cell.syntax_language() {
+            cell.syntax.borrow_mut().get(language, &cell.buffer.text)
         } else {
             Rc::new(vec![])
         };
@@ -1948,7 +1972,7 @@ impl Element for CellText {
             line_height,
             width: None,
             marked: cell.marked.clone(),
-            syntax: cell.python_code().then_some(colors),
+            syntax: cell.syntax_language().map(|_| colors),
         };
         let marked = cell.marked.clone();
         let wrap = !cell.document && !cell.filter_input;

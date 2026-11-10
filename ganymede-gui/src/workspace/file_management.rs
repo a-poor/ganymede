@@ -645,6 +645,9 @@ impl Workspace {
                 if doc.kind != DocumentKind::Notebook {
                     doc.kind = DocumentKind::for_text_path(&path);
                 }
+                if let Content::Text(view) = &doc.content {
+                    view.update(cx, |view, cx| view.refresh_language(cx));
+                }
                 doc.path = Some(path);
                 active = Some(doc.id);
                 if saved_as {
