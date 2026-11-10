@@ -1,5 +1,5 @@
-//! Read-only, bounded probes. Never resolves symlinks: a venv's Python must retain
-//! its original path to keep its environment identity.
+//! Bounded discovery and explicitly requested environment setup. Never resolves
+//! Python symlinks: a venv must retain its original path for environment identity.
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
@@ -142,6 +142,33 @@ fn install_command(python: &Path, uv: Option<&Path>, packages: &[&str]) -> Comma
     };
     command.args(packages);
     command
+}
+
+fn venv_command(folder: &Path) -> Command {
+    let mut command = Command::new("python3");
+    command.args(["-I", "-m", "venv", "--"]).arg(folder);
+    command
+}
+
+async fn create_venv(folder: &Path) -> Result<(), String> {
+    // Reserve a new directory exclusively. Never merge into an existing directory
+    // (including an empty one) or follow an existing symlink.
+    std::fs::create_dir(folder).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            "That folder already exists. Select an existing environment or choose a new folder."
+        } else {
+            "Could not create the environment folder. Check its parent folder and permissions."
+        }
+        .to_string()
+    })?;
+    run_installer(venv_command(folder), Duration::from_secs(120)).await
+        .map_err(|_| "Could not create the environment with python3. Check that python3 and its venv module are available. The partially created folder has been kept.".to_string())
+}
+
+/// Creates only a new folder, then installs the packages named in the confirmation.
+pub(super) async fn create_environment(folder: PathBuf) -> Result<(), String> {
+    create_venv(&folder).await?;
+    install(venv_python(&folder), vec!["jupyter-server", "ipykernel"]).await
 }
 
 /// Only called after the user confirms the target interpreter and packages.
@@ -339,6 +366,48 @@ pub(super) async fn discover(folder: PathBuf, selected: PathBuf) -> Vec<Environm
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn venv_creation_uses_default_python_and_a_separate_path_argument() {
+        let command = venv_command(Path::new("/project with spaces/.venv"));
+        assert_eq!(command.as_std().get_program(), "python3");
+        let args: Vec<_> = command.as_std().get_args().collect();
+        assert_eq!(
+            args,
+            ["-I", "-m", "venv", "--", "/project with spaces/.venv"]
+        );
+    }
+
+    #[tokio::test]
+    async fn environment_creation_preserves_existing_folders() {
+        let folder =
+            std::env::temp_dir().join(format!("ganymede-existing-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&folder).unwrap();
+        let file = folder.join("keep.txt");
+        std::fs::write(&file, "keep me").unwrap();
+        let result = create_environment(folder.clone()).await.unwrap_err();
+        assert!(result.contains("already exists"));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep me");
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires python3 with venv; creates a disposable environment without downloading packages"]
+    async fn creates_a_working_venv_with_default_python() {
+        let folder = std::env::temp_dir().join(format!("ganymede venv {}", uuid::Uuid::new_v4()));
+        let result = create_venv(&folder).await;
+        let probe = output(
+            &venv_python(&folder),
+            &[
+                "-I",
+                "-c",
+                "import sys; print(sys.prefix != sys.base_prefix)",
+            ],
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(&folder);
+        result.unwrap();
+        assert_eq!(String::from_utf8(probe.unwrap()).unwrap().trim(), "True");
+    }
     #[test]
     fn installers_target_the_exact_interpreter_without_overriding_protections() {
         let python = Path::new("/project with spaces/.venv/bin/python");

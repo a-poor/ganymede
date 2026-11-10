@@ -191,7 +191,17 @@ fn start_launch(
     let token = reuse
         .map(|l| l.token.clone())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let port = reuse.map(|l| l.port).unwrap_or(0);
+    // Some Jupyter versions leave port 0 in their runtime URL instead of the
+    // assigned port. Select a concrete loopback port before launching. If another
+    // process claims it before Jupyter binds, port_retries=0 makes startup fail.
+    let port = if let Some(launch) = reuse {
+        launch.port
+    } else {
+        std::net::TcpListener::bind(("127.0.0.1", 0))
+            .and_then(|listener| listener.local_addr())
+            .map_err(|_| "Could not choose a local server port.".to_string())?
+            .port()
+    };
     let mut command = Command::new(executable);
     #[cfg(unix)]
     {
@@ -359,6 +369,64 @@ mod connection_tests {
         assert_eq!(b.unwrap(), "julia");
         one.await.unwrap();
         two.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "downloads Jupyter packages into a disposable venv using python3"]
+    async fn created_environment_starts_server_and_executes_a_cell() {
+        use ganymede_core::notebook::{CellKind, NotebookController, NotebookDocument};
+        struct Project(PathBuf);
+        impl Drop for Project {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let root =
+            Project(std::env::temp_dir().join(format!("ganymede setup {}", uuid::Uuid::new_v4())));
+        std::fs::create_dir(&root.0).unwrap();
+        super::super::discovery::create_environment(root.0.join(".venv"))
+            .await
+            .unwrap();
+        let folder = root.0.to_string_lossy().into_owned();
+        let pending =
+            tokio::task::spawn_blocking(move || start(Environment::Venv, ".venv", &folder))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_ne!(pending.config.base_url().port(), Some(0));
+        let kernel = validate(pending.config.clone()).await.unwrap();
+        let mut document = NotebookDocument::new();
+        let cell = document.insert_cell(0, CellKind::Code, "6 * 7").unwrap();
+        let notebook =
+            NotebookController::new(pending.config.clone(), "setup-smoke.ipynb", document).unwrap();
+        notebook.connect(&kernel).await.unwrap();
+        let work = async {
+            let mut snapshots = notebook.watch();
+            notebook.run_cell(&cell, false).await.unwrap();
+            loop {
+                let complete = snapshots
+                    .borrow_and_update()
+                    .executions
+                    .get(&cell)
+                    .is_some_and(|run| !run.phase.is_active());
+                if complete {
+                    break;
+                }
+                snapshots.changed().await.unwrap();
+            }
+            notebook.save().await.unwrap();
+            let snapshot = notebook.snapshot();
+            let outputs =
+                serde_json::to_value(snapshot.document.cell(&cell).unwrap().outputs()).unwrap();
+            assert_eq!(outputs[0]["output_type"], "execute_result");
+            assert_eq!(outputs[0]["data"]["text/plain"], "42");
+        };
+        let result = tokio::time::timeout(Duration::from_secs(60), work).await;
+        notebook.shutdown_session().await.unwrap();
+        result.unwrap();
+        assert!(root.0.join("setup-smoke.ipynb").is_file());
+        // Dropping an unaccepted test server terminates only the process we started.
+        drop(pending);
     }
 
     #[tokio::test]

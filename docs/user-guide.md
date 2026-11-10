@@ -13,6 +13,12 @@ A ready project environment is preferred automatically until you make a choice.
 The **Python runtimes** section includes `python3 (PATH)` and detected interpreters.
 Below the divider, choose **Virtual environment** or **Custom Python path** to enter
 your own location.
+For a virtual-environment folder that does not exist, **Create environment…**
+creates it with `python3` from PATH and installs `jupyter-server` and `ipykernel`
+after confirmation. The default folder is `.venv` inside your project. To use a
+different Python or environment setup, create it yourself and select its folder.
+Existing folders are never overwritten. If setup fails or is cancelled, any
+partially created folder is kept; you can finish setup yourself or select a new path.
 That environment must have `jupyter-server` and `ipykernel` installed. Click
 **Start server** to open the workspace.
 

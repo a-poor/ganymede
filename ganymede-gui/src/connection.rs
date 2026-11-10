@@ -330,6 +330,7 @@ struct ConnectionWindow {
     environment_chosen: bool,
     detected_choice: Option<(PathBuf, String)>,
     installing: bool,
+    creating_environment: bool,
     install_task: gpui::Task<()>,
     environment_open: bool,
     environment_index: usize,
@@ -420,6 +421,7 @@ impl ConnectionWindow {
             environment_chosen: false,
             detected_choice: None,
             installing: false,
+            creating_environment: false,
             install_task: gpui::Task::ready(()),
             environment_open: false,
             environment_index: 0,
@@ -1044,32 +1046,69 @@ impl ConnectionWindow {
     fn cancel_install(&mut self, cx: &mut Context<Self>) {
         self.install_task = gpui::Task::ready(());
         self.installing = false;
-        self.error = Some("Installation cancelled. Some packages may already be installed.".into());
+        self.error = Some(if self.creating_environment {
+            "Setup cancelled. The environment folder may be partially created; it has been kept."
+        } else {
+            "Installation cancelled. Some packages may already be installed."
+        }.into());
+        self.creating_environment = false;
         self.rescan_environments(cx);
+    }
+    fn missing_venv(&self, cx: &App) -> Option<PathBuf> {
+        if self.environment != server::Environment::Venv {
+            return None;
+        }
+        let python = self.selected_python(cx);
+        let folder = python.parent()?.parent()?;
+        match std::fs::symlink_metadata(folder) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Some(folder.to_path_buf())
+            }
+            _ => None,
+        }
     }
     fn install_missing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.installing || self.busy || self.discovering || window.has_active_prompt() {
             return;
         }
         let python = self.selected_python(cx);
-        let Some(found) = self
+        let create_folder = self.missing_venv(cx);
+        let found = self
             .detected
             .iter()
-            .find(|e| e.path == python && !e.missing.is_empty())
-        else {
+            .find(|e| e.path == python && !e.missing.is_empty());
+        if found.is_none() && create_folder.is_none() {
             return;
+        }
+        let packages = found.map(|e| e.missing.clone()).unwrap_or_default();
+        let detail = if let Some(folder) = &create_folder {
+            format!(
+                "Create a virtual environment using python3 from PATH at:\n{}\n\nThen download and install jupyter-server, ipykernel, and their dependencies. Existing folders will not be overwritten.",
+                folder.display()
+            )
+        } else {
+            format!(
+                "Install {} and their dependencies into:\n{}\n\nThis downloads packages and modifies this Python environment.",
+                packages.join(" and "),
+                python.display()
+            )
         };
-        let packages = found.missing.clone();
-        let detail = format!(
-            "Install {} and their dependencies into:\n{}\n\nThis downloads packages and modifies this Python environment.",
-            packages.join(" and "),
-            python.display()
-        );
         let prompt = window.prompt(
             gpui::PromptLevel::Info,
-            "Install missing packages?",
+            if create_folder.is_some() {
+                "Create environment?"
+            } else {
+                "Install missing packages?"
+            },
             Some(&detail),
-            &["Cancel", "Install"],
+            &[
+                "Cancel",
+                if create_folder.is_some() {
+                    "Create"
+                } else {
+                    "Install"
+                },
+            ],
             cx,
         );
         self.install_task = cx.spawn_in(window, async move |this, cx| {
@@ -1082,16 +1121,19 @@ impl ConnectionWindow {
                         return None;
                     }
                     this.installing = true;
+                    this.creating_environment = create_folder.is_some();
                     this.environment_chosen = true;
                     this.error = None;
                     this.environment_open = false;
                     this.discovery_task = gpui::Task::ready(());
                     cx.notify();
-                    Some(
-                        cx.global::<Runtime>()
-                            .handle
-                            .spawn(discovery::install(python, packages)),
-                    )
+                    Some(cx.global::<Runtime>().handle.spawn(async move {
+                        if let Some(folder) = create_folder {
+                            discovery::create_environment(folder).await
+                        } else {
+                            discovery::install(python, packages).await
+                        }
+                    }))
                 })
                 .ok()
                 .flatten();
@@ -1110,6 +1152,7 @@ impl ConnectionWindow {
                 .unwrap_or_else(|_| Err("Installation interrupted.".into()));
             let _ = this.update(cx, |this, cx| {
                 this.installing = false;
+                this.creating_environment = false;
                 this.error = result.err();
                 this.rescan_environments(cx);
             });
@@ -1482,7 +1525,11 @@ impl ConnectionWindow {
                 .child(
                     div()
                         .text_color(t.app.muted_fg)
-                        .child("Installing packages…"),
+                        .child(if self.creating_environment {
+                            "Creating environment and installing packages…"
+                        } else {
+                            "Installing packages…"
+                        }),
                 )
                 .child(
                     div()
@@ -1588,6 +1635,7 @@ impl ConnectionWindow {
                     .child(div().flex().items_center().gap_2()
                         .child(div().flex_1().min_w_0().text_size(t.font.xs).text_color(t.card.muted_fg).child(
                             if self.discovering { "Checking environments…".to_string() }
+                            else if self.missing_venv(cx).is_some() { "No environment here yet. Create one with python3.".into() }
                             else if let Some(found) = self.detected.iter().find(|e| e.path == self.selected_python(cx)) {
                                 if found.ready { "Ready to start".into() }
                                 else if !found.missing.is_empty() { found.status.clone() }
@@ -1595,6 +1643,9 @@ impl ConnectionWindow {
                             } else { "Choose an environment or enter a custom Python path.".into() }))
                         .when(!self.discovering && self.detected.iter().any(|e| e.path == self.selected_python(cx) && !e.missing.is_empty()), |v| v
                             .child(button("install-packages", "Install…", false, cx).flex_shrink_0()
+                                .on_click(cx.listener(|this, _, window, cx| this.install_missing(window, cx)))))
+                        .when(!self.discovering && self.missing_venv(cx).is_some(), |v| v
+                            .child(button("create-environment", "Create environment…", false, cx).flex_shrink_0()
                                 .on_click(cx.listener(|this, _, window, cx| this.install_missing(window, cx)))))
                         .child(button("refresh-environments", "Refresh", false, cx).flex_shrink_0()
                             .on_click(cx.listener(|this, _, _, cx| this.rescan_environments(cx)))))
@@ -2184,7 +2235,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn cancelling_package_prompt_does_not_start_installation(cx: &mut gpui::TestAppContext) {
+    fn cancelling_setup_prompts_does_not_install_or_create_a_folder(cx: &mut gpui::TestAppContext) {
         let window = cx.update(|cx| {
             cx.set_global(
                 crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
@@ -2221,6 +2272,34 @@ mod tests {
             window
                 .update(cx, |this, _, _| assert!(!this.installing))
                 .unwrap()
+        });
+        let target = std::env::temp_dir().join(format!("ganymede-cancel-{}", uuid::Uuid::new_v4()));
+        cx.update(|cx| {
+            window
+                .update(cx, |this, window, cx| {
+                    this.environment = server::Environment::Venv;
+                    this.environment_chosen = true;
+                    this.python.update(cx, |field, cx| {
+                        field.set_value(target.to_string_lossy().into_owned(), cx)
+                    });
+                    this.discovering = false;
+                    assert_eq!(this.missing_venv(cx).as_ref(), Some(&target));
+                    this.install_missing(window, cx);
+                })
+                .unwrap();
+        });
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert!(!target.exists());
+        cx.update(|cx| {
+            window
+                .update(cx, |this, _, _| {
+                    assert!(!this.installing);
+                    assert!(!this.creating_environment);
+                })
+                .unwrap();
         });
     }
 
