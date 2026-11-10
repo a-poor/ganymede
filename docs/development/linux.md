@@ -27,7 +27,7 @@ files. Linked-library dependencies are calculated with `dpkg-shlibdeps`; desktop
 runtime dependencies are included explicitly. Install a downloaded package with:
 
 ```sh
-sudo apt install ./ganymede_0.2.0_amd64.deb
+sudo apt install ./ganymede_0.3.0_amd64.deb
 ```
 
 The tarball contains a prefix-relative `bin/` and `share/` tree. Extract it and
