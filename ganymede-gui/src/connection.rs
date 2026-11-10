@@ -1,5 +1,6 @@
 //! One connection picker / workspace per native window.
 mod credentials;
+mod discovery;
 mod planet;
 pub(crate) mod server;
 pub(crate) mod ssh;
@@ -322,6 +323,14 @@ struct ConnectionWindow {
     save_token: Option<(String, String)>,
     python: Entity<Field>,
     environment: server::Environment,
+    detected: Vec<discovery::Environment>,
+    discovering: bool,
+    discovery_key: (String, String),
+    discovery_task: gpui::Task<()>,
+    environment_chosen: bool,
+    detected_choice: Option<(PathBuf, String)>,
+    installing: bool,
+    install_task: gpui::Task<()>,
     environment_open: bool,
     environment_index: usize,
     environment_keyboard: bool,
@@ -339,11 +348,14 @@ impl ConnectionWindow {
             crate::theme::follow_system_appearance(window, cx)
         })
         .detach();
-        let address =
-            cx.new(|cx| Field::field("http://127.0.0.1:8888/".into(), false, "Server URL", cx));
-        let ssh_host = cx.new(|cx| Field::field(String::new(), false, "SSH host (optional)", cx));
+        let address = cx.new(|cx| {
+            Field::field("http://127.0.0.1:8888/".into(), false, "Server URL", cx).monospace()
+        });
+        let ssh_host =
+            cx.new(|cx| Field::field(String::new(), false, "SSH host (optional)", cx).monospace());
         let token = cx.new(|cx| Field::field(String::new(), true, "Token", cx));
-        let python = cx.new(|cx| Field::field("python3".into(), false, "Python executable", cx));
+        let python =
+            cx.new(|cx| Field::field("python3".into(), false, "Python executable", cx).monospace());
         let folder = cx.new(|cx| {
             Field::field(
                 std::env::current_dir()
@@ -354,6 +366,7 @@ impl ConnectionWindow {
                 "Project folder",
                 cx,
             )
+            .monospace()
         });
         for input in [&address, &token, &ssh_host, &python, &folder] {
             cx.subscribe_in(input, window, |this, _, _: &FieldSubmit, window, cx| {
@@ -361,6 +374,20 @@ impl ConnectionWindow {
             })
             .detach();
         }
+        cx.observe(&folder, |this, _, cx| this.refresh_environments(cx))
+            .detach();
+        cx.observe(&python, |this, _, cx| {
+            if this.selected_python(cx).to_string_lossy() != this.discovery_key.1 {
+                this.environment_chosen = true;
+                this.detected_choice = None;
+            }
+            this.refresh_environments(cx);
+        })
+        .detach();
+        let discovery_view = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let _ = discovery_view.update(cx, |this, cx| this.refresh_environments(cx));
+        });
         let weak = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
             let _ = weak.update(cx, |this, cx| this.close(false, window, cx));
@@ -386,6 +413,14 @@ impl ConnectionWindow {
             save_token: None,
             python,
             environment: server::Environment::Global,
+            detected: Vec::new(),
+            discovering: false,
+            discovery_key: (String::new(), String::new()),
+            discovery_task: gpui::Task::ready(()),
+            environment_chosen: false,
+            detected_choice: None,
+            installing: false,
+            install_task: gpui::Task::ready(()),
             environment_open: false,
             environment_index: 0,
             environment_keyboard: false,
@@ -415,7 +450,7 @@ impl ConnectionWindow {
         }
     }
     fn page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
-        if page == self.page || self.transition.is_some() {
+        if page == self.page || self.transition.is_some() || self.installing {
             return;
         }
         if !cx.reduce_motion() {
@@ -492,7 +527,7 @@ impl ConnectionWindow {
         cx.notify();
     }
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy || self.workspace.is_some() {
+        if self.busy || self.installing || self.workspace.is_some() {
             return;
         }
         match self.page {
@@ -713,6 +748,8 @@ impl ConnectionWindow {
             && let Some(server) = managed_server(&recent.address, cx)
         {
             let (mode, python, folder) = server.launch_options();
+            self.environment_chosen = true;
+            self.detected_choice = None;
             self.environment = mode;
             self.python
                 .update(cx, |input, cx| input.set_value(python, cx));
@@ -1004,18 +1041,226 @@ fn choice_row(
 }
 
 impl ConnectionWindow {
+    fn cancel_install(&mut self, cx: &mut Context<Self>) {
+        self.install_task = gpui::Task::ready(());
+        self.installing = false;
+        self.error = Some("Installation cancelled. Some packages may already be installed.".into());
+        self.rescan_environments(cx);
+    }
+    fn install_missing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.installing || self.busy || self.discovering || window.has_active_prompt() {
+            return;
+        }
+        let python = self.selected_python(cx);
+        let Some(found) = self
+            .detected
+            .iter()
+            .find(|e| e.path == python && !e.missing.is_empty())
+        else {
+            return;
+        };
+        let packages = found.missing.clone();
+        let detail = format!(
+            "Install {} and their dependencies into:\n{}\n\nThis downloads packages and modifies this Python environment.",
+            packages.join(" and "),
+            python.display()
+        );
+        let prompt = window.prompt(
+            gpui::PromptLevel::Info,
+            "Install missing packages?",
+            Some(&detail),
+            &["Cancel", "Install"],
+            cx,
+        );
+        self.install_task = cx.spawn_in(window, async move |this, cx| {
+            if prompt.await != Ok(1) {
+                return;
+            }
+            let task = this
+                .update(cx, |this, cx| {
+                    if this.selected_python(cx) != python {
+                        return None;
+                    }
+                    this.installing = true;
+                    this.environment_chosen = true;
+                    this.error = None;
+                    this.environment_open = false;
+                    this.discovery_task = gpui::Task::ready(());
+                    cx.notify();
+                    Some(
+                        cx.global::<Runtime>()
+                            .handle
+                            .spawn(discovery::install(python, packages)),
+                    )
+                })
+                .ok()
+                .flatten();
+            let Some(task) = task else {
+                return;
+            };
+            struct Abort(tokio::task::AbortHandle);
+            impl Drop for Abort {
+                fn drop(&mut self) {
+                    self.0.abort();
+                }
+            }
+            let _abort = Abort(task.abort_handle());
+            let result = task
+                .await
+                .unwrap_or_else(|_| Err("Installation interrupted.".into()));
+            let _ = this.update(cx, |this, cx| {
+                this.installing = false;
+                this.error = result.err();
+                this.rescan_environments(cx);
+            });
+        });
+    }
+    fn rescan_environments(&mut self, cx: &mut Context<Self>) {
+        self.discovery_key = (String::new(), String::new());
+        self.refresh_environments(cx);
+    }
+    fn selected_python(&self, cx: &App) -> PathBuf {
+        server::launch_command(
+            self.environment,
+            self.python.read(cx).value(),
+            &PathBuf::from(self.folder.read(cx).value().trim()),
+        )
+        .map(|(path, _)| PathBuf::from(path))
+        .unwrap_or_default()
+    }
+    fn refresh_environments(&mut self, cx: &mut Context<Self>) {
+        let key = (
+            self.folder.read(cx).value().trim().to_string(),
+            self.selected_python(cx).to_string_lossy().into_owned(),
+        );
+        if key == self.discovery_key {
+            return;
+        }
+        self.discovery_key = key.clone();
+        self.detected.clear();
+        self.discovering = true;
+        let Some(runtime) = cx.try_global::<Runtime>() else {
+            return;
+        };
+        let handle = runtime.handle.clone();
+        self.discovery_task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(400))
+                .await;
+            let folder = PathBuf::from(&key.0);
+            let selected = PathBuf::from(&key.1);
+            let task = handle.spawn(discovery::discover(folder, selected));
+            // Abort Tokio work as well when a field edit replaces this GPUI task.
+            struct Abort(tokio::task::AbortHandle);
+            impl Drop for Abort {
+                fn drop(&mut self) {
+                    self.0.abort();
+                }
+            }
+            let _abort = Abort(task.abort_handle());
+            let results = task.await.unwrap_or_default();
+            let _ = this.update(cx, |this, cx| this.finish_discovery(key, results, cx));
+        });
+        cx.notify();
+    }
+    fn finish_discovery(
+        &mut self,
+        key: (String, String),
+        results: Vec<discovery::Environment>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.discovery_key != key
+            || self.folder.read(cx).value().trim() != key.0
+            || self.selected_python(cx).to_string_lossy() != key.1
+        {
+            return;
+        }
+        self.discovering = false;
+        if !self.environment_chosen
+            && !self.busy
+            && let Some(preferred) = results.iter().find(|e| e.ready)
+        {
+            self.environment = server::Environment::Custom;
+            self.detected_choice = Some((preferred.path.clone(), preferred.label.clone()));
+            let value = preferred.path.to_string_lossy().into_owned();
+            self.discovery_key.1 = value.clone();
+            self.python
+                .update(cx, |field, cx| field.set_value(value, cx));
+        }
+        self.detected = results;
+        cx.notify();
+    }
+    fn detected_options(&self) -> impl Iterator<Item = &discovery::Environment> {
+        self.detected.iter().filter(|e| {
+            (e.ready || !e.missing.is_empty()) && e.path != std::path::Path::new("python3")
+        })
+    }
+    fn environment_options(&self) -> usize {
+        3 + self.detected_options().count()
+    }
+    fn selected_environment_index(&self, _cx: &App) -> usize {
+        if let Some((path, _)) = &self.detected_choice
+            && let Some(i) = self.detected_options().position(|e| &e.path == path)
+        {
+            return i + 1;
+        }
+        if self
+            .detected_choice
+            .as_ref()
+            .is_some_and(|(path, _)| path == &PathBuf::from("python3"))
+        {
+            return 0;
+        }
+        match self.environment {
+            server::Environment::Global => 0,
+            server::Environment::Venv => self.environment_options() - 2,
+            server::Environment::Custom => self.environment_options() - 1,
+        }
+    }
+    fn environment_option_label(&self, index: usize) -> String {
+        if index == 0 {
+            return "python3 (PATH)".into();
+        }
+        if let Some(found) = self.detected_options().nth(index - 1) {
+            return found.label.clone();
+        }
+        if index == self.environment_options() - 2 {
+            "Virtual environment".into()
+        } else {
+            "Custom Python path".into()
+        }
+    }
     fn choose_environment(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.environment = server::Environment::ALL[index];
+        self.environment_chosen = true;
         self.environment_index = index;
         self.environment_open = false;
         self.error = None;
-        let value = if self.environment == server::Environment::Venv {
-            ".venv"
+        let detected = index
+            .checked_sub(1)
+            .and_then(|i| self.detected_options().nth(i))
+            .cloned();
+        let value = if let Some(found) = detected {
+            self.environment = server::Environment::Custom;
+            self.detected_choice = Some((found.path.clone(), found.label.clone()));
+            found.path.to_string_lossy().into_owned()
         } else {
-            "python3"
+            self.detected_choice = None;
+            self.environment = if index == 0 {
+                server::Environment::Global
+            } else if index == self.environment_options() - 2 {
+                server::Environment::Venv
+            } else {
+                server::Environment::Custom
+            };
+            if self.environment == server::Environment::Venv {
+                ".venv".into()
+            } else {
+                "python3".into()
+            }
         };
         self.python
-            .update(cx, |input, cx| input.set_value(value.into(), cx));
+            .update(cx, |input, cx| input.set_value(value, cx));
+        self.refresh_environments(cx);
         self.environment_focus.focus(window, cx);
         cx.notify();
     }
@@ -1040,13 +1285,13 @@ impl ConnectionWindow {
                     .border_color(t.app.border)
                     .cursor_pointer()
                     .hover(|s| s.bg(t.app.accent).text_color(t.app.accent_fg))
-                    .on_click(cx.listener(|this, _, window, cx| {
+                    .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
+                        if event.is_keyboard() {
+                            return;
+                        }
                         this.environment_open = !this.environment_open;
                         this.environment_keyboard = false;
-                        this.environment_index = server::Environment::ALL
-                            .iter()
-                            .position(|m| *m == this.environment)
-                            .unwrap();
+                        this.environment_index = this.selected_environment_index(cx);
                         this.environment_focus.focus(window, cx);
                         cx.notify();
                     }))
@@ -1059,8 +1304,15 @@ impl ConnectionWindow {
                             "enter" | "space" | "down" | "up" if !this.environment_open => {
                                 this.environment_open = true
                             }
-                            "down" => this.environment_index = (this.environment_index + 1) % 3,
-                            "up" => this.environment_index = (this.environment_index + 2) % 3,
+                            "down" => {
+                                this.environment_index =
+                                    (this.environment_index + 1) % this.environment_options()
+                            }
+                            "up" => {
+                                this.environment_index =
+                                    (this.environment_index + this.environment_options() - 1)
+                                        % this.environment_options()
+                            }
                             "escape" => this.environment_open = false,
                             "tab" => {
                                 this.environment_open = false;
@@ -1072,7 +1324,15 @@ impl ConnectionWindow {
                         cx.stop_propagation();
                         cx.notify();
                     }))
-                    .child(self.environment.label())
+                    .child(
+                        self.detected_choice
+                            .as_ref()
+                            .filter(|(path, _)| path != &PathBuf::from("python3"))
+                            .map(|(_, label)| label.clone())
+                            .unwrap_or_else(|| {
+                                self.environment_option_label(self.selected_environment_index(cx))
+                            }),
+                    )
                     .child(div().flex_1())
                     .child(
                         crate::icon::Icon::CaretDown
@@ -1095,7 +1355,9 @@ impl ConnectionWindow {
                                         cx.notify();
                                     }
                                 }))
-                                .w(px(220.))
+                                .w(px(390.))
+                                .max_h(px(280.))
+                                .overflow_y_scroll()
                                 .p_1()
                                 .rounded(t.radius.lg())
                                 .bg(t.popover.bg)
@@ -1111,40 +1373,83 @@ impl ConnectionWindow {
                                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                     cx.stop_propagation()
                                 })
-                                .children(server::Environment::ALL.into_iter().enumerate().map(
-                                    |(i, mode)| {
-                                        div()
-                                            .id(("environment-option", i))
-                                            .px_2()
-                                            .py_1()
-                                            .rounded(t.radius.md())
-                                            .cursor_pointer()
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .when(
-                                                self.environment_keyboard
-                                                    && self.environment_index == i,
-                                                |v| v.bg(t.launcher_option_hover_bg),
-                                            )
-                                            .hover(|s| s.bg(t.launcher_option_hover_bg))
-                                            .child(div().size(px(12.)).flex_shrink_0().when(
-                                                self.environment == mode,
-                                                |v| {
-                                                    v.child(
-                                                        crate::icon::Icon::Check
-                                                            .svg()
-                                                            .size(px(12.))
-                                                            .text_color(t.popover.fg),
-                                                    )
-                                                },
-                                            ))
-                                            .child(mode.label())
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.choose_environment(i, window, cx)
-                                            }))
-                                    },
-                                )),
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py_1()
+                                        .text_size(t.font.xs)
+                                        .text_color(t.popover.muted_fg)
+                                        .child("Python runtimes"),
+                                )
+                                .children((0..self.environment_options()).map(|i| {
+                                    div()
+                                        .when(i == self.environment_options() - 2, |v| {
+                                            v.child(div().my_1().h(px(1.)).bg(t.popover.border))
+                                        })
+                                        .child(
+                                            div()
+                                                .id(("environment-option", i))
+                                                .px_2()
+                                                .py_1()
+                                                .rounded(t.radius.md())
+                                                .cursor_pointer()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .when(
+                                                    self.environment_keyboard
+                                                        && self.environment_index == i,
+                                                    |v| v.bg(t.launcher_option_hover_bg),
+                                                )
+                                                .hover(|s| s.bg(t.launcher_option_hover_bg))
+                                                .child(div().size(px(12.)).flex_shrink_0().when(
+                                                    self.selected_environment_index(cx) == i,
+                                                    |v| {
+                                                        v.child(
+                                                            crate::icon::Icon::Check
+                                                                .svg()
+                                                                .size(px(12.))
+                                                                .text_color(t.popover.fg),
+                                                        )
+                                                    },
+                                                ))
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .child(self.environment_option_label(i))
+                                                        .when_some(
+                                                            self.detected_options()
+                                                                .nth(i.wrapping_sub(1)),
+                                                            |v, e| {
+                                                                v.child(
+                                                                    div()
+                                                                        .text_size(t.font.xs)
+                                                                        .font_family(
+                                                                            t.font.mono.clone(),
+                                                                        )
+                                                                        .text_color(
+                                                                            t.popover.muted_fg,
+                                                                        )
+                                                                        .truncate()
+                                                                        .child(
+                                                                            e.path
+                                                                                .to_string_lossy()
+                                                                                .into_owned(),
+                                                                        ),
+                                                                )
+                                                            },
+                                                        ),
+                                                )
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        this.choose_environment(i, window, cx)
+                                                    },
+                                                )),
+                                        )
+                                })),
                         ),
                 ))
             })
@@ -1171,7 +1476,26 @@ impl ConnectionWindow {
         };
         let divider = || div().mx_3().h(px(1.)).bg(t.launcher_border);
         let mut body = div().w_full().flex().flex_col().gap_3();
-        if self.busy {
+        if self.installing {
+            body = body
+                .items_center()
+                .child(
+                    div()
+                        .text_color(t.app.muted_fg)
+                        .child("Installing packages…"),
+                )
+                .child(
+                    div()
+                        .font_family(t.font.mono.clone())
+                        .text_size(t.font.xs)
+                        .text_color(t.app.muted_fg)
+                        .child(self.selected_python(cx).to_string_lossy().into_owned()),
+                )
+                .child(
+                    button("cancel-install", "Cancel", false, cx)
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_install(cx))),
+                );
+        } else if self.busy {
             body = body
                 .items_center()
                 .child(
@@ -1261,12 +1585,25 @@ impl ConnectionWindow {
                     .child(div().h(px(1.)).bg(t.launcher_border))
                     .child(div().text_size(t.font.xs).text_color(t.card.muted_fg).child("Environment"))
                     .child(self.environment_control(cx))
+                    .child(div().flex().items_center().gap_2()
+                        .child(div().flex_1().min_w_0().text_size(t.font.xs).text_color(t.card.muted_fg).child(
+                            if self.discovering { "Checking environments…".to_string() }
+                            else if let Some(found) = self.detected.iter().find(|e| e.path == self.selected_python(cx)) {
+                                if found.ready { "Ready to start".into() }
+                                else if !found.missing.is_empty() { found.status.clone() }
+                                else { format!("{}. Choose another Python or refresh to retry.", found.status) }
+                            } else { "Choose an environment or enter a custom Python path.".into() }))
+                        .when(!self.discovering && self.detected.iter().any(|e| e.path == self.selected_python(cx) && !e.missing.is_empty()), |v| v
+                            .child(button("install-packages", "Install…", false, cx).flex_shrink_0()
+                                .on_click(cx.listener(|this, _, window, cx| this.install_missing(window, cx)))))
+                        .child(button("refresh-environments", "Refresh", false, cx).flex_shrink_0()
+                            .on_click(cx.listener(|this, _, _, cx| this.rescan_environments(cx)))))
                     .when(matches!(self.environment, server::Environment::Venv | server::Environment::Custom), |v| v.child(field(
                         if self.environment == server::Environment::Venv { "Virtual environment folder" } else { "Python executable" }, self.python.clone(), cx)))
                     .child(div().text_size(t.font.xs).text_color(t.card.muted_fg).child(match self.environment {
-                        server::Environment::Global => "Uses python3 from PATH. Requires jupyter-server and ipykernel.",
-                        server::Environment::Venv => "Relative paths start at the project folder. Requires jupyter-server and ipykernel.",
-                        server::Environment::Custom => "Choose a Python executable with jupyter-server and ipykernel installed.",
+                        server::Environment::Global => "Uses python3 from PATH.",
+                        server::Environment::Venv => "Relative paths start at the project folder.",
+                        server::Environment::Custom => "Uses this Python interpreter directly, including uv-managed Python.",
                     })))
                     .child(div().flex().justify_end().child(self.submit_button("Start server", cx)));
             } else {
@@ -1581,7 +1918,7 @@ impl Render for ConnectionWindow {
                                     )
                                 )))
                             ))
-                            .when(!self.busy, |v| {
+                            .when(!self.busy && !self.installing, |v| {
                                 v.cursor_pointer()
                                     .hover(|s| {
                                         s.bg(t.launcher_recent_hover_bg)
@@ -1631,7 +1968,7 @@ impl Render for ConnectionWindow {
                         window.focus_next(cx);
                     }
                     cx.stop_propagation();
-                } else if event.keystroke.key == "escape" && !this.busy {
+                } else if event.keystroke.key == "escape" && !this.busy && !this.installing {
                     if this.recent_menu.take().is_none() {
                         this.page(Page::Recent, window, cx);
                     }
@@ -1727,6 +2064,164 @@ mod tests {
         assert_eq!(data[0]["url"], "https://example.test/");
         assert!(!data.to_string().contains("private-token"));
         assert!(data[0].get("config").is_none());
+    }
+
+    #[gpui::test]
+    fn environment_keyboard_selection_closes_the_menu(cx: &mut gpui::TestAppContext) {
+        let window = cx.update(|cx| {
+            cx.set_global(
+                crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+            );
+            cx.set_global(crate::theme::AppearancePreference::default());
+            cx.set_global(Connections::default());
+            let window = cx
+                .open_window(gpui::WindowOptions::default(), |window, cx| {
+                    cx.new(|cx| ConnectionWindow::new(window, cx))
+                })
+                .unwrap();
+            window
+                .update(cx, |this, window, cx| {
+                    this.page = Page::Local;
+                    this.environment_open = true;
+                    this.environment_index = 0;
+                    this.environment_focus.focus(window, cx);
+                    cx.notify();
+                })
+                .unwrap();
+            window
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes(window.into(), "down enter");
+        cx.update(|cx| {
+            window
+                .update(cx, |this, _, _| {
+                    assert!(this.environment == server::Environment::Venv);
+                    assert!(!this.environment_open);
+                })
+                .unwrap()
+        });
+    }
+
+    #[gpui::test]
+    fn discovery_preserves_manual_choices_and_rejects_stale_results(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(
+                crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+            );
+            cx.set_global(crate::theme::AppearancePreference::default());
+            cx.set_global(Connections::default());
+            let window = cx
+                .open_window(gpui::WindowOptions::default(), |window, cx| {
+                    cx.new(|cx| ConnectionWindow::new(window, cx))
+                })
+                .unwrap();
+            window
+                .update(cx, |this, window, cx| {
+                    let key = (
+                        this.folder.read(cx).value().trim().to_string(),
+                        "python3".into(),
+                    );
+                    this.discovery_key = key.clone();
+                    let ready = discovery::Environment {
+                        path: "/project/.venv/bin/python".into(),
+                        label: "Project .venv".into(),
+                        status: "Ready".into(),
+                        ready: true,
+                        missing: Vec::new(),
+                        project: true,
+                    };
+                    this.environment_chosen = true;
+                    this.finish_discovery(key.clone(), vec![ready.clone()], cx);
+                    assert_eq!(this.selected_python(cx), PathBuf::from("python3"));
+                    this.environment_chosen = false;
+                    this.finish_discovery(key.clone(), vec![ready.clone()], cx);
+                    assert_eq!(this.selected_python(cx), ready.path);
+                    this.choose_environment(0, window, cx);
+                    let global = discovery::Environment {
+                        path: "python3".into(),
+                        ..ready.clone()
+                    };
+                    this.finish_discovery(this.discovery_key.clone(), vec![global], cx);
+                    assert!(this.environment == server::Environment::Global);
+                    assert_eq!(this.selected_environment_index(cx), 0);
+                    assert!(this.detected_choice.is_none());
+                    this.detected.insert(
+                        0,
+                        discovery::Environment {
+                            path: "/missing/python".into(),
+                            ready: false,
+                            status: "Python was not found".into(),
+                            ..ready.clone()
+                        },
+                    );
+                    assert_eq!(this.environment_options(), 3);
+                    this.detected.push(ready.clone());
+                    assert_eq!(this.environment_options(), 4);
+                    assert_eq!(this.detected_options().next().unwrap().path, ready.path);
+                    this.choose_environment(1, window, cx);
+                    assert_eq!(this.selected_python(cx), ready.path);
+                    this.finish_discovery(this.discovery_key.clone(), vec![ready.clone()], cx);
+                    assert_eq!(this.selected_environment_index(cx), 1);
+                    this.choose_environment(2, window, cx);
+                    assert!(this.environment == server::Environment::Venv);
+                    this.finish_discovery(this.discovery_key.clone(), vec![ready.clone()], cx);
+                    assert_eq!(this.selected_environment_index(cx), 2);
+                    this.choose_environment(3, window, cx);
+                    assert!(this.environment == server::Environment::Custom);
+                    this.finish_discovery(this.discovery_key.clone(), vec![ready.clone()], cx);
+                    assert_eq!(this.selected_environment_index(cx), 3);
+                    // A new folder makes an old result stale, even before its observer runs.
+                    this.folder.update(cx, |field, cx| {
+                        field.set_value("/different/project".into(), cx)
+                    });
+                    this.detected.clear();
+                    this.discovery_key = key.clone();
+                    this.finish_discovery(key, vec![ready], cx);
+                    assert!(this.detected.is_empty());
+                })
+                .unwrap();
+        });
+    }
+
+    #[gpui::test]
+    fn cancelling_package_prompt_does_not_start_installation(cx: &mut gpui::TestAppContext) {
+        let window = cx.update(|cx| {
+            cx.set_global(
+                crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+            );
+            cx.set_global(crate::theme::AppearancePreference::default());
+            cx.set_global(Connections::default());
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                cx.new(|cx| ConnectionWindow::new(window, cx))
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            window
+                .update(cx, |this, window, cx| {
+                    this.discovering = false;
+                    this.detected = vec![discovery::Environment {
+                        path: "python3".into(),
+                        label: "Python".into(),
+                        status: "Missing ipykernel".into(),
+                        ready: false,
+                        project: false,
+                        missing: vec!["ipykernel"],
+                    }];
+                    this.install_missing(window, cx);
+                })
+                .unwrap()
+        });
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        cx.update(|cx| {
+            window
+                .update(cx, |this, _, _| assert!(!this.installing))
+                .unwrap()
+        });
     }
 
     #[gpui::test]

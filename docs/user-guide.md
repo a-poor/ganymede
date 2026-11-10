@@ -5,12 +5,30 @@
 ## Create a local server
 
 Choose **Create** on the welcome screen, select your project folder, and choose a
-Python environment: Global Python, Virtual environment, or Custom Python.
+Python environment. Ganymede checks the project's `.venv` and `venv`, Python
+installations on `PATH`, common macOS install locations, and installed Python
+versions reported by uv. Detected entries show their version and path. Readiness and missing packages appear
+below the picker after selection.
+A ready project environment is preferred automatically until you make a choice.
+The **Python runtimes** section includes `python3 (PATH)` and detected interpreters.
+Below the divider, choose **Virtual environment** or **Custom Python path** to enter
+your own location.
 That environment must have `jupyter-server` and `ipykernel` installed. Click
 **Start server** to open the workspace.
 
 Ganymede uses your existing Python installation; it does not bundle or install
-Python for you. The selected folder becomes the server's file root.
+Python for you. Discovery never installs packages or creates environments.
+Use **Install…** to install missing `jupyter-server` or `ipykernel` packages after
+confirming the selected interpreter. Ganymede uses uv when available, otherwise
+that interpreter's pip. OS-managed environments may reject installation; choose a
+virtual environment in that case. Installation does not edit `pyproject.toml` or
+`uv.lock`. **Refresh** checks again after changes made outside the app.
+
+These choices launch Python directly, including uv-managed interpreters. They do
+not run `uvx` or create an isolated tool environment. Relative virtual-environment
+paths are resolved from the project folder. The selected folder becomes the server's
+file root. Kernels are listed by the connected server after it starts; discovered
+Python installations are not automatically registered as kernels.
 
 ## Connect to an existing server
 

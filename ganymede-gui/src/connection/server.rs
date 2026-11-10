@@ -124,21 +124,11 @@ pub(super) enum Environment {
     Venv,
     Custom,
 }
-impl Environment {
-    pub const ALL: [Self; 3] = [Self::Global, Self::Venv, Self::Custom];
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Global => "Global Python",
-            Self::Venv => "Virtual environment",
-            Self::Custom => "Custom Python",
-        }
-    }
-}
 
 // Fixed script: user paths are separate process arguments, never interpolated code.
 const PYTHON_LAUNCH: &str = "import importlib.util,sys,runpy; sys.exit(81) if importlib.util.find_spec('jupyter_server') is None else None; sys.exit(82) if importlib.util.find_spec('ipykernel') is None else None; sys.argv[0]='jupyter-server'; runpy.run_module('jupyter_server',run_name='__main__')";
 
-fn launch_command(
+pub(super) fn launch_command(
     mode: Environment,
     value: &str,
     root: &std::path::Path,
