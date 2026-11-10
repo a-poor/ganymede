@@ -1853,8 +1853,9 @@ fn visible_rows(
     first..last.max(first)
 }
 
-// Preserve the document inset, but let it scroll with the text.
-const DOCUMENT_PADDING: f32 = 24.;
+// Keep a compact document inset that scrolls with the text.
+const DOCUMENT_PADDING: f32 = 8.;
+const DOCUMENT_GUTTER_EXTRA: f32 = 4.;
 
 struct CellText {
     cell: Entity<CodeCell>,
@@ -1929,7 +1930,13 @@ impl Element for CellText {
             .unwrap_or_else(|| Rc::from(cell.buffer.text.as_str()));
         let gutter = if !cell.filter_input && crate::preferences::editor(cx).line_numbers {
             let digits = cell.buffer.text.split('\n').count().to_string().len();
-            caret_metrics.width * digits as f32 + px(12.)
+            caret_metrics.width * digits as f32
+                + px(12.)
+                + if cell.document {
+                    px(DOCUMENT_GUTTER_EXTRA)
+                } else {
+                    px(0.)
+                }
         } else {
             px(0.)
         };
@@ -2187,7 +2194,27 @@ impl Element for CellText {
         cx: &mut App,
     ) {
         let layout = state.borrow();
+        let gutter_extra = if self.cell.read(cx).document {
+            px(DOCUMENT_GUTTER_EXTRA)
+        } else {
+            px(0.)
+        };
         if layout.gutter > px(0.) {
+            if self.cell.read(cx).document {
+                // Share the scrolling text origin, but span the viewport so the
+                // gutter remains a continuous divider at the first/last line.
+                let clip = window.content_mask().bounds;
+                window.paint_quad(fill(
+                    Bounds::new(
+                        point(
+                            bounds.left() + layout.gutter - gutter_extra - px(6.),
+                            clip.top(),
+                        ),
+                        size(px(1.), clip.size.height),
+                    ),
+                    cx.theme().app.border,
+                ));
+            }
             let style = window.text_style();
             let font_size = style.font_size.to_pixels(window.rem_size());
             for row in prepaint.visible.clone() {
@@ -2203,7 +2230,7 @@ impl Element for CellText {
                 number
                     .paint(
                         point(
-                            bounds.left() + layout.gutter - px(12.) - number.width,
+                            bounds.left() + layout.gutter - gutter_extra - px(12.) - number.width,
                             bounds.top() + layout.line_height * row as f32,
                         ),
                         layout.line_height,
@@ -2298,14 +2325,14 @@ mod tests {
                 let cell = cell.read(cx);
                 assert_eq!(cell.scroll.bounds().top(), px(0.));
                 assert_eq!(cell.scroll.bounds().bottom(), px(height));
-                assert_eq!(cell.bounds.unwrap().top(), px(24.));
+                assert_eq!(cell.bounds.unwrap().top(), px(8.));
                 cell.scroll
                     .set_offset(point(px(0.), -cell.line_height * 2.5));
             });
             draw(cx);
             cx.update(|_, cx| {
                 let cell = cell.read(cx);
-                assert_eq!(cell.bounds.unwrap().top(), px(24.) + cell.scroll.offset().y);
+                assert_eq!(cell.bounds.unwrap().top(), px(8.) + cell.scroll.offset().y);
                 assert_eq!(cell.scroll.bounds().top(), px(0.));
                 // Hit testing uses the same scrolled origin as text and gutter.
                 let bounds = cell.bounds.unwrap();
