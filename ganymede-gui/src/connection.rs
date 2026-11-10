@@ -1557,12 +1557,14 @@ impl ConnectionWindow {
                     ),
             );
         } else if self.busy {
-            body = body
-                .items_center()
-                .child(
-                    div()
-                        .text_color(t.app.muted_fg)
-                        .child(if page == Page::Local {
+            body = body.child(
+                group()
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(div().font_weight(gpui::FontWeight::MEDIUM).child(
+                        if page == Page::Local {
                             "Starting Jupyter…"
                         } else {
                             if self.reading_token {
@@ -1570,26 +1572,32 @@ impl ConnectionWindow {
                             } else {
                                 "Connecting…"
                             }
-                        }),
-                )
-                .child(
-                    button("cancel-connect", "Cancel", false, cx)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.task = gpui::Task::ready(());
-                            this.reading_token = false;
-                            this.busy = false;
-                            cx.notify();
-                        }))
-                        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                this.task = gpui::Task::ready(());
-                                this.reading_token = false;
-                                this.busy = false;
-                                cx.notify();
-                                cx.stop_propagation();
-                            }
-                        })),
-                );
+                        },
+                    ))
+                    .child(
+                        div().w_full().flex().justify_end().child(
+                            button("cancel-connect", "Cancel", false, cx)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.task = gpui::Task::ready(());
+                                    this.reading_token = false;
+                                    this.busy = false;
+                                    cx.notify();
+                                }))
+                                .on_key_down(cx.listener(
+                                    |this, event: &gpui::KeyDownEvent, _, cx| {
+                                        if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                        {
+                                            this.task = gpui::Task::ready(());
+                                            this.reading_token = false;
+                                            this.busy = false;
+                                            cx.notify();
+                                            cx.stop_propagation();
+                                        }
+                                    },
+                                )),
+                        ),
+                    ),
+            );
         } else if page == Page::Recent {
             body = body.child(
                 group()
