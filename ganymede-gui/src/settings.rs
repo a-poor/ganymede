@@ -66,6 +66,8 @@ impl Setting {
 
 #[derive(Clone, Copy)]
 enum ToggleSetting {
+    #[cfg(target_os = "macos")]
+    MenuBar,
     Autosave,
     LineNumbers,
     AutoCloseBrackets,
@@ -73,6 +75,8 @@ enum ToggleSetting {
 impl ToggleSetting {
     fn enabled(self, cx: &App) -> bool {
         match self {
+            #[cfg(target_os = "macos")]
+            Self::MenuBar => cx.global::<crate::preferences::MenuBarPreference>().0,
             Self::Autosave => cx.global::<crate::autosave::AutosavePreference>().0,
             Self::LineNumbers => crate::preferences::editor(cx).line_numbers,
             Self::AutoCloseBrackets => crate::preferences::editor(cx).auto_close_brackets,
@@ -80,6 +84,11 @@ impl ToggleSetting {
     }
     fn toggle(self, cx: &mut App) {
         match self {
+            #[cfg(target_os = "macos")]
+            Self::MenuBar => {
+                cx.update_global::<crate::preferences::MenuBarPreference, _>(|p, _| p.0 = !p.0);
+                crate::tray::refresh(cx);
+            }
             Self::Autosave => {
                 cx.update_global::<crate::autosave::AutosavePreference, _>(|p, _| p.0 = !p.0)
             }
@@ -289,6 +298,8 @@ impl Settings {
         let t = cx.theme();
         let enabled = setting.enabled(cx);
         let (id, label) = match setting {
+            #[cfg(target_os = "macos")]
+            ToggleSetting::MenuBar => ("menu-bar-toggle", "Show menu bar icon"),
             ToggleSetting::Autosave => ("autosave-toggle", "Autosave"),
             ToggleSetting::LineNumbers => ("line-numbers-toggle", "Line numbers"),
             ToggleSetting::AutoCloseBrackets => {
@@ -466,6 +477,30 @@ impl Render for Settings {
                                     .child("Theme")
                                     .child(self.appearance_selector(cx)),
                             )
+                            .children({
+                                #[cfg(target_os = "macos")]
+                                {
+                                    Some(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .child(div().mx_3().h(px(1.)).bg(t.card.border))
+                                            .child(
+                                                div()
+                                                    .p_3()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .child("Show menu bar icon")
+                                                    .child(self.toggle(ToggleSetting::MenuBar, cx)),
+                                            ),
+                                    )
+                                }
+                                #[cfg(not(target_os = "macos"))]
+                                {
+                                    None::<gpui::Div>
+                                }
+                            })
                             .child(div().mx_3().h(px(1.)).bg(t.card.border))
                             .child(
                                 div()

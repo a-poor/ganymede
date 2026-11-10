@@ -55,6 +55,16 @@ impl Server {
     }
 }
 impl Workspace {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn has_server(&self, address: &str) -> bool {
+        self.runtime.tunnel.is_none()
+            && self
+                .runtime
+                .config
+                .as_ref()
+                .is_ok_and(|c| c.base_url().as_str() == address)
+    }
+
     fn hover_server(&mut self, region: usize, over: bool, cx: &mut Context<Self>) {
         self.server.hovered[region] = over;
         self.server.dismiss = None;
@@ -95,7 +105,7 @@ impl Workspace {
             .and_then(|config| crate::connection::managed_server(config.base_url().as_str(), cx))
     }
 
-    fn local_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn local_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(server) = self.local_server(cx) else {
             return;
         };

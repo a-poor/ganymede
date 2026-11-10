@@ -240,13 +240,18 @@ pub fn reopen(cx: &mut App) {
     cx.activate(true);
 }
 pub fn open(cx: &mut App) {
+    let _ = open_launcher(true, cx);
+}
+fn open_launcher(show: bool, cx: &mut App) -> Option<gpui::WindowHandle<ConnectionWindow>> {
     if cx.global::<Connections>().quitting {
-        return;
+        return None;
     }
     let bounds = gpui::Bounds::centered(None, gpui::size(px(760.), px(560.)), cx);
     let result = cx.open_window(
         gpui::WindowOptions {
             window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
+            show,
+            focus: show,
             is_resizable: false,
             is_minimizable: true,
             window_min_size: Some(gpui::size(px(480.), px(320.))),
@@ -257,11 +262,18 @@ pub fn open(cx: &mut App) {
             }),
             ..Default::default()
         },
-        |window, cx| cx.new(|cx| ConnectionWindow::new(window, cx)),
+        |window, cx| {
+            cx.new(|cx| {
+                let mut view = ConnectionWindow::new(window, cx);
+                view.hidden = !show;
+                view
+            })
+        },
     );
     if result.is_err() {
         eprintln!("Could not open connection window");
     }
+    result.ok()
 }
 
 fn open_workspace(
@@ -308,6 +320,7 @@ struct PageTransition {
     started: Instant,
 }
 struct ConnectionWindow {
+    hidden: bool,
     toasts: Entity<crate::toast::ToastHost>,
     workspace: Option<Entity<crate::Ganymede>>,
     planet: Option<Entity<planet::Planet>>,
@@ -401,6 +414,7 @@ impl ConnectionWindow {
         Self {
             toasts,
             workspace: None,
+            hidden: false,
             planet: None,
             page: Page::Recent,
             transition: None,
@@ -478,6 +492,15 @@ impl ConnectionWindow {
             Page::Recent => self.focus.focus(window, cx),
         }
         cx.notify();
+    }
+    /// Tray reconnects prepare in an invisible picker; reveal only when input or
+    /// error recovery is needed. Successful connections open just the workspace.
+    fn reveal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.hidden {
+            self.hidden = false;
+            window.activate_window();
+            cx.activate(true);
+        }
     }
     fn connect(
         &mut self,
@@ -648,6 +671,7 @@ impl ConnectionWindow {
                         // Replace the fixed picker with a normal workspace window.
                         if open_workspace(runtime, &label, cx).is_err() {
                             this.error = Some("Could not open the workspace window.".into());
+                            this.reveal(window, cx);
                             cx.notify();
                             return;
                         }
@@ -677,7 +701,10 @@ impl ConnectionWindow {
                             .update(cx, |input, cx| input.set_value(String::new(), cx));
                         window.remove_window();
                     }
-                    Err(error) => this.error = Some(error),
+                    Err(error) => {
+                        this.error = Some(error);
+                        this.reveal(window, cx);
+                    }
                 }
                 cx.notify();
             });
@@ -711,6 +738,7 @@ impl ConnectionWindow {
                         }
                         None => this.error = Some("Could not read the saved token. Enter it again, or unlock Keychain and retry.".into()),
                     }
+                    if !this.busy { this.reveal(window, cx); }
                     cx.notify();
                 });
             });
@@ -2119,9 +2147,181 @@ pub(crate) fn update_local_history(address: &str, cx: &mut App) {
     }
 }
 
+/// Menu snapshots contain display metadata only, never authentication material.
+#[cfg(target_os = "macos")]
+type TrayEntries = Vec<(String, String)>;
+
+#[cfg(target_os = "macos")]
+pub(crate) fn tray_connections(cx: &App) -> (TrayEntries, TrayEntries) {
+    let connections = cx.global::<Connections>();
+    let recent = connections
+        .recent
+        .iter()
+        .map(|r| {
+            let label = if let Some(host) = &r.ssh_host {
+                format!("{} — SSH: {host}", r.label)
+            } else {
+                r.label.clone()
+            };
+            (r.key(), label)
+        })
+        .collect();
+    let mut running: Vec<_> = connections
+        .managed
+        .iter()
+        .filter(|(_, server)| server.state() == server::LocalState::Running)
+        .map(|(address, _)| {
+            let label = connections
+                .recent
+                .iter()
+                .find(|r| r.address == *address && r.ssh_host.is_none())
+                .map(|r| r.label.clone())
+                .unwrap_or_else(|| address.clone());
+            (address.clone(), label)
+        })
+        .collect();
+    running.sort();
+    (recent, running)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn open_recent(key: &str, cx: &mut App) {
+    let recent = cx
+        .global::<Connections>()
+        .recent
+        .iter()
+        .find(|r| r.key() == key)
+        .cloned();
+    if let Some(recent) = recent
+        && let Some(handle) = open_launcher(false, cx)
+    {
+        let _ = handle.update(cx, |view, window, cx| {
+            view.recent(recent, window, cx);
+            if !view.busy {
+                view.reveal(window, cx);
+            }
+        });
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn tray_server(address: &str, stop: bool, cx: &mut App) {
+    let Some(server) = managed_server(address, cx) else {
+        return;
+    };
+    let existing = cx
+        .windows()
+        .into_iter()
+        .filter_map(|w| w.downcast::<ConnectionWindow>())
+        .find(|w| {
+            w.read(cx)
+                .ok()
+                .and_then(|v| v.workspace.as_ref())
+                .is_some_and(|v| v.read(cx).workspace.read(cx).has_server(address))
+        });
+    let handle = existing.or_else(|| {
+        let mut runtime = cx.global::<Runtime>().clone();
+        runtime.config = Ok(server.connection().0);
+        open_workspace(runtime, address, cx).ok()
+    });
+    if let Some(handle) = handle {
+        cx.activate(true);
+        let _ = handle.update(cx, |view, window, cx| {
+            window.activate_window();
+            if stop
+                && server.state() == server::LocalState::Running
+                && let Some(view) = &view.workspace
+            {
+                let workspace = view.read(cx).workspace.clone();
+                workspace.update(cx, |workspace, cx| workspace.local_action(window, cx));
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn background_connection_stays_hidden_until_failure(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let task = runtime.spawn(async { Err::<Connected, String>("Server unavailable".into()) });
+        runtime.block_on(async { tokio::task::yield_now().await });
+        let window = cx.update(|cx| {
+            cx.set_global(
+                crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+            );
+            cx.set_global(crate::theme::AppearancePreference::default());
+            cx.set_global(Connections::default());
+            let window = open_launcher(false, cx).unwrap();
+            window
+                .update(cx, |view, window, cx| {
+                    assert!(view.hidden);
+                    view.busy = true;
+                    view.finish(task, window, cx);
+                    assert!(view.hidden);
+                })
+                .unwrap();
+            window
+        });
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let view = window.read(cx).unwrap();
+            assert!(!view.hidden);
+            assert!(!view.busy);
+            assert_eq!(view.error.as_deref(), Some("Server unavailable"));
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn tray_recents_keep_ssh_identity_and_open_missing_credentials_in_form(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_global(
+                crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+            );
+            cx.set_global(crate::theme::AppearancePreference::default());
+            let recent = Recent {
+                label: "Research".into(),
+                address: "http://127.0.0.1:8888/".into(),
+                config: None,
+                local_info: None,
+                local_id: None,
+                saved_token: false,
+                ssh_host: Some("research".into()),
+            };
+            let key = recent.key();
+            cx.set_global(Connections {
+                recent: vec![recent],
+                ..Default::default()
+            });
+            let (recent, running) = tray_connections(cx);
+            assert_eq!(
+                recent,
+                vec![(key.clone(), "Research — SSH: research".into())]
+            );
+            assert!(running.is_empty());
+            open_recent("removed-entry", cx);
+            assert!(cx.windows().is_empty());
+            open_recent(&key, cx);
+            let window = cx.windows()[0].downcast::<ConnectionWindow>().unwrap();
+            window
+                .update(cx, |view, _, cx| {
+                    assert!(view.workspace.is_none());
+                    assert!(!view.hidden);
+                    assert!(!view.busy);
+                    assert_eq!(view.address.read(cx).value(), "http://127.0.0.1:8888/");
+                    assert_eq!(view.ssh_host.read(cx).value(), "research");
+                    assert!(view.advanced);
+                })
+                .unwrap();
+        });
+    }
 
     #[test]
     fn connection_history_never_persists_authentication() {

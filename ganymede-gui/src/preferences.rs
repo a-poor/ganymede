@@ -13,6 +13,7 @@ struct Preferences {
     version: u32,
     appearance: AppearancePreference,
     autosave: bool,
+    show_menu_bar_icon: bool,
     editor: EditorPreferences,
 }
 impl Default for Preferences {
@@ -21,6 +22,7 @@ impl Default for Preferences {
             version: 1,
             appearance: AppearancePreference::default(),
             autosave: true,
+            show_menu_bar_icon: true,
             editor: EditorPreferences::default(),
         }
     }
@@ -77,6 +79,9 @@ pub fn editor(cx: &App) -> EditorPreferences {
         .cloned()
         .unwrap_or_default()
 }
+
+pub struct MenuBarPreference(pub bool);
+impl gpui::Global for MenuBarPreference {}
 
 #[derive(Default)]
 pub struct Persistence {
@@ -138,6 +143,7 @@ pub fn init(cx: &mut App) {
     };
     preferences.appearance.apply(cx.window_appearance(), cx);
     cx.set_global(AutosavePreference(preferences.autosave));
+    cx.set_global(MenuBarPreference(preferences.show_menu_bar_icon));
     let mut editor = preferences.editor;
     editor.font_size = editor.font_size.clamp(10, 24);
     cx.set_global(editor);
@@ -150,6 +156,7 @@ pub fn save(cx: &mut App) {
         appearance: *cx.global::<AppearancePreference>(),
         autosave: cx.global::<AutosavePreference>().0,
         editor: editor(cx),
+        show_menu_bar_icon: cx.global::<MenuBarPreference>().0,
         ..Preferences::default()
     };
     let error = write(&path(), &preferences)
@@ -168,6 +175,7 @@ mod tests {
         assert_eq!(read(&path).unwrap(), Preferences::default());
         let preferences: Preferences = serde_json::from_str(r#"{"autosave":false}"#).unwrap();
         assert!(!preferences.autosave);
+        assert!(preferences.show_menu_bar_icon);
         assert_eq!(preferences.appearance, AppearancePreference::Light);
     }
 
@@ -184,6 +192,7 @@ mod tests {
             let expected = Preferences {
                 appearance,
                 autosave: false,
+                show_menu_bar_icon: false,
                 editor: EditorPreferences {
                     font_size: 18,
                     line_numbers: true,

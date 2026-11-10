@@ -138,6 +138,14 @@ For servers created by Ganymede, the server card also offers **Stop Server** and
 other clients. Closing a window or quitting Ganymede leaves servers and kernels
 running. SSH tunnels close when their workspace closes.
 
+## macOS menu bar
+
+The Ganymede menu-bar icon provides quick access to a new connection, recent
+connections, running local servers, Settings, and Quit. Recent connections use the
+same saved settings and credentials as the launcher. Stopping a local server
+requires confirmation and ends its kernels. Hide the icon with **Show menu bar
+icon** in Settings.
+
 ## Settings and local data
 
 Settings controls the theme, autosave, and supported editor preferences. Preferences
