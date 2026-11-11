@@ -1,5 +1,6 @@
 //! Server-backed notebook editor.
 pub(crate) mod commands;
+mod drag;
 mod history;
 mod kernel;
 mod list_row;
@@ -209,6 +210,7 @@ pub struct Notebook {
     counter: SubmissionCounter,
     runs: RunQueue,
     scroll: ListState,
+    cell_drag: drag::CellDrag,
     listed_cells: Vec<gpui::EntityId>,
     reveal_cell: Option<usize>,
     find_open: bool,
@@ -285,6 +287,7 @@ impl Notebook {
             counter: SubmissionCounter::default(),
             runs: RunQueue::default(),
             scroll: ListState::new(0, ListAlignment::Top, gpui::px(200.)),
+            cell_drag: Default::default(),
             listed_cells: vec![],
             reveal_cell: None,
             find_open: false,
@@ -1602,6 +1605,7 @@ impl Render for Notebook {
         if self.find_open && self.find_dirty {
             self.schedule_find(window, cx);
         }
+        self.cell_drag.rows.borrow_mut().clear();
         let notebook = cx.entity().downgrade();
         let row_order = std::rc::Rc::new(list_row::RowOrder::default());
         let row_scroll = self.scroll.clone();
@@ -1612,6 +1616,11 @@ impl Render for Notebook {
             .flex()
             .flex_col()
             .key_context("Notebook")
+            .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" && this.cancel_cell_drag(window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(|this, _: &ChangeCellsToCode, window, cx| {
                 this.choose_cell_type(CellKind::Code, window, cx)
             }))
@@ -1677,31 +1686,71 @@ impl Render for Notebook {
                         .child(error.clone()),
                 )
             })
-            .child(
-                gpui::list(self.scroll.clone(), move |index, _, cx| {
-                    let cell = notebook
-                        .upgrade()
-                        .and_then(|notebook| notebook.read(cx).cells.get(index).cloned());
-                    // Padding belongs to each row, since virtual lists don't use
-                    // a flex gap. Keep cell entities alive independently of rows.
-                    list_row::ListRow {
-                        index,
-                        order: row_order.clone(),
-                        scroll: row_scroll.clone(),
-                        child: div()
-                            .w_full()
-                            .min_w_0()
-                            .pb_3()
-                            .children(cell)
-                            .into_any_element(),
-                    }
-                    .into_any_element()
-                })
-                .flex_1()
-                .min_h_0()
-                .p_4()
-                .pl_3(),
-            )
+            .child({
+                use crate::theme::ActiveTheme;
+                let viewport = self.cell_drag.viewport.clone();
+                let indicator = cx.entity();
+                let ring = cx.theme().app.ring;
+                div()
+                    .id("notebook-cell-list")
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .on_drop(cx.listener(|this, drag: &drag::DragCells, window, cx| {
+                        this.drop_cells(drag, window, cx);
+                    }))
+                    .child(
+                        gpui::list(self.scroll.clone(), move |index, _, cx| {
+                            let child = notebook.upgrade().map(|notebook| {
+                                notebook.update(cx, |book, cx| book.drag_row(index, cx))
+                            });
+                            list_row::ListRow {
+                                index,
+                                order: row_order.clone(),
+                                scroll: row_scroll.clone(),
+                                child: div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .pb_3()
+                                    .children(child)
+                                    .into_any_element(),
+                            }
+                            .into_any_element()
+                        })
+                        .size_full()
+                        .px_4()
+                        .pl_3(),
+                    )
+                    .child(
+                        gpui::canvas(
+                            move |bounds, _, _| {
+                                viewport.set(bounds);
+                            },
+                            move |bounds, _, window, cx| {
+                                let book = indicator.read(cx);
+                                if book.cell_drag.order.is_some()
+                                    && cx.has_active_drag()
+                                    && window.is_window_hovered()
+                                    && let Some((_, y)) =
+                                        book.cell_drop_position(window.mouse_position())
+                                {
+                                    window.paint_quad(gpui::fill(
+                                        gpui::Bounds::new(
+                                            gpui::point(bounds.left() + gpui::px(12.), y),
+                                            gpui::size(
+                                                bounds.size.width - gpui::px(28.),
+                                                gpui::px(2.),
+                                            ),
+                                        ),
+                                        ring,
+                                    ));
+                                }
+                            },
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+            })
             .when(self.find_open, |view| view.child(self.find_bar(cx)))
     }
 }

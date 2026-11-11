@@ -96,21 +96,7 @@ impl Notebook {
         {
             return;
         }
-        if !self.record_structure(None, cx) {
-            return;
-        }
-        if down {
-            self.cells[range.start..=range.end].rotate_right(1);
-        } else {
-            self.cells[range.start - 1..range.end].rotate_left(1);
-        }
-        self.runs.remap(|index| moved_index(index, &range, down));
-        self.selected = moved_index(self.selected, &range, down);
-        self.selection_anchor = moved_index(self.selection_anchor, &range, down);
-        self.paint_selection(cx);
-        self.sync(cx);
-        self.reveal_cell = Some(self.selected);
-        cx.notify();
+        self.move_selection_to_gap(if down { range.end + 1 } else { range.start - 1 }, cx);
     }
 
     fn selected_payload(&mut self, cx: &mut Context<Self>) -> Option<Vec<Value>> {
@@ -222,18 +208,6 @@ impl Notebook {
     }
 }
 
-fn moved_index(index: usize, range: &Range<usize>, down: bool) -> usize {
-    if range.contains(&index) {
-        if down { index + 1 } else { index - 1 }
-    } else if down && index == range.end {
-        range.start
-    } else if !down && index + 1 == range.start {
-        range.end - 1
-    } else {
-        index
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +235,335 @@ mod tests {
             let toasts = cx.new(|cx| crate::toast::ToastHost::new(window, cx));
             cx.new(|cx| Notebook::new(session, toasts, window, cx))
         })
+    }
+
+    #[gpui::test]
+    fn drag_group_moves_preserve_payloads_execution_selection_and_history(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let cx = cx.add_empty_window();
+        let book = fixture(cx, &runtime);
+        cx.update(|window, cx| {
+            book.update(cx, |book, cx| {
+                let original = book.session.document().to_json();
+                let editors = book.cells.clone();
+                book.select(2, cx);
+                book.extend_selection(0, window, cx);
+                book.runs.active = Some(0);
+                book.runs.pending.push_back((3, 8, "queued source".into()));
+                book.move_selection_to_gap(4, cx);
+                assert_eq!(
+                    book.cells,
+                    vec![
+                        editors[3].clone(),
+                        editors[0].clone(),
+                        editors[1].clone(),
+                        editors[2].clone()
+                    ]
+                );
+                assert_eq!((book.selected, book.selection_anchor), (1, 3));
+                assert_eq!(book.runs.active, Some(1));
+                assert_eq!(book.runs.pending.front().unwrap().0, 0);
+                assert_eq!(book.undo_structure.len(), 1);
+                let saved = book.session.document().to_json();
+                for (new, old) in [3, 0, 1, 2].into_iter().enumerate() {
+                    assert_eq!(saved["cells"][new], original["cells"][old]);
+                }
+                assert_eq!(
+                    NotebookDocument::from_json(saved.clone())
+                        .unwrap()
+                        .to_json(),
+                    saved
+                );
+                assert!(book.session.document().is_dirty());
+                book.move_selection_to_gap(2, cx);
+                book.move_selection_to_gap(99, cx);
+                assert_eq!(book.undo_structure.len(), 1);
+                book.restore_history(false, window, cx);
+                assert_eq!(book.session.document().to_json(), original);
+                assert_eq!(book.runs.active, Some(0));
+                assert_eq!(book.runs.pending.front().unwrap().0, 3);
+                book.restore_history(true, window, cx);
+                assert_eq!(book.session.document().to_json(), saved);
+                book.move_selection_to_gap(0, cx);
+                assert_eq!(book.session.document().to_json(), original);
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn cell_drag_mouse_drop_escape_and_outside_drop(cx: &mut gpui::TestAppContext) {
+        use gpui::{MouseButton, point, px};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let cx = cx.add_empty_window();
+        let book = fixture(cx, &runtime);
+        struct Root(Entity<Notebook>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.0.clone()
+            }
+        }
+        cx.update(|window, cx| {
+            window.replace_root(cx, |_, _| Root(book.clone()));
+            book.update(cx, |book, cx| book.extend_selection(0, window, cx));
+        });
+        cx.run_until_parked();
+        let positions = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| {
+                let book = book.read(cx);
+                let first = book.scroll.bounds_for_item(1).unwrap();
+                let last = book.scroll.bounds_for_item(3).unwrap();
+                (
+                    point(first.left() + px(9.), first.top() + px(13.)),
+                    point(last.center().x, last.bottom() - px(2.)),
+                )
+            })
+        };
+        let original = cx.update(|_, cx| book.read(cx).cells.clone());
+        // Dragging an unselected cell must work after native-style redraws.
+        cx.update(|window, cx| {
+            book.update(cx, |book, cx| {
+                book.select(2, cx);
+                book.cells[2].read(cx).list_focus_handle().focus(window, cx);
+            })
+        });
+        cx.run_until_parked();
+        let (start, end) = positions(cx);
+        cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        cx.run_until_parked();
+        cx.simulate_mouse_move(end, MouseButton::Left, Default::default());
+        cx.update(|_, cx| {
+            assert!(cx.has_active_drag());
+            assert_eq!(book.read(cx).cells, original);
+        });
+        cx.update(|_, cx| {
+            book.update(cx, |book, _| {
+                let painted_target = book.cell_drop_position(end);
+                assert!(painted_target.is_some());
+                book.scroll.remeasure();
+                assert_eq!(book.cell_drop_position(end), painted_target);
+            })
+        });
+        cx.simulate_mouse_up(end, MouseButton::Left, Default::default());
+        cx.update(|window, cx| {
+            book.update(cx, |book, cx| {
+                assert_eq!(book.cells[3], original[1]);
+                assert_eq!(book.undo_structure.len(), 1);
+                book.restore_history(false, window, cx);
+            })
+        });
+        cx.run_until_parked();
+        for cancel in [true, false] {
+            let (start, end) = positions(cx);
+            let end = if cancel { end } else { point(end.x, px(2.)) };
+            cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+            cx.simulate_mouse_move(end, MouseButton::Left, Default::default());
+            if cancel {
+                cx.simulate_keystrokes("escape");
+            }
+            cx.simulate_mouse_up(end, MouseButton::Left, Default::default());
+            cx.update(|_, cx| {
+                assert_eq!(book.read(cx).cells, original);
+                assert!(book.read(cx).undo_structure.is_empty());
+                assert_eq!(book.read(cx).redo_structure.len(), 1);
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn cell_margin_drags_groups_but_input_and_output_keep_text_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::{MouseButton, point, px};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let cx = cx.add_empty_window();
+        let book = fixture(cx, &runtime);
+        struct Root(Entity<Notebook>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.0.clone()
+            }
+        }
+        cx.update(|window, cx| {
+            crate::output_selection::init(cx);
+            window.replace_root(cx, |_, _| Root(book.clone()));
+        });
+        cx.run_until_parked();
+        let original = cx.update(|_, cx| book.read(cx).cells.clone());
+        for output in [false, true] {
+            let start = cx.update(|_, cx| {
+                let cell = original[0].read(cx);
+                (if output {
+                    cell.output_position(0)
+                } else {
+                    cell.input_position()
+                }) + point(px(1.), px(5.))
+            });
+            let end = start + point(px(30.), px(0.));
+            cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+            cx.simulate_mouse_move(end, MouseButton::Left, Default::default());
+            cx.update(|_, cx| assert!(!cx.has_active_drag()));
+            cx.simulate_mouse_up(end, MouseButton::Left, Default::default());
+            if output {
+                cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+                    "cmd-c"
+                } else {
+                    "ctrl-c"
+                });
+                cx.update(|_, cx| {
+                    assert!(!cx.read_from_clipboard().unwrap().text().unwrap().is_empty())
+                });
+            } else {
+                cx.update(|_, cx| assert!(!original[0].read(cx).selected_text().is_empty()));
+            }
+            cx.update(|_, cx| assert_eq!(book.read(cx).cells, original));
+        }
+        // Pressing the margin beside an output must keep the selected group
+        // intact until the drag starts, even with a different active cell.
+        cx.update(|window, cx| {
+            book.update(cx, |book, cx| {
+                book.select(0, cx);
+                book.extend_selection(1, window, cx);
+            })
+        });
+        cx.run_until_parked();
+        let (start, end) = cx.update(|_, cx| {
+            let book = book.read(cx);
+            let first = book.scroll.bounds_for_item(0).unwrap();
+            let last = book.scroll.bounds_for_item(3).unwrap();
+            (
+                point(
+                    first.left() + px(9.),
+                    original[0].read(cx).output_position(0).y + px(5.),
+                ),
+                point(last.center().x, last.bottom() - px(2.)),
+            )
+        });
+        // Releasing back over the source must not dispatch a nested click
+        // that collapses the group or invalidates the pending drop geometry.
+        let within_source = start + point(px(0.), px(8.));
+        cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(within_source, MouseButton::Left, Default::default());
+        cx.update(|_, cx| assert!(cx.has_active_drag()));
+        cx.simulate_mouse_up(within_source, MouseButton::Left, Default::default());
+        cx.update(|_, cx| {
+            assert_eq!(book.read(cx).selected_range(), 0..2);
+            assert_eq!(book.read(cx).cells, original);
+        });
+        cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        cx.update(|_, cx| assert_eq!(book.read(cx).selected_range(), 0..2));
+        cx.simulate_mouse_move(end, MouseButton::Left, Default::default());
+        cx.update(|_, cx| assert!(cx.has_active_drag()));
+        cx.simulate_mouse_up(end, MouseButton::Left, Default::default());
+        cx.update(|_, cx| {
+            let book = book.read(cx);
+            assert_eq!(
+                book.cells,
+                vec![
+                    original[2].clone(),
+                    original[3].clone(),
+                    original[0].clone(),
+                    original[1].clone()
+                ]
+            );
+            assert_eq!(book.selected_range(), 2..4);
+            assert_eq!(book.undo_structure.len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn cell_drag_scrolls_both_ways_and_pauses_outside_window(cx: &mut gpui::TestAppContext) {
+        use gpui::{MouseButton, point, px};
+        use std::time::Duration;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let cx = cx.add_empty_window();
+        let book = fixture(cx, &runtime);
+        struct Root(Entity<Notebook>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.0.clone()
+            }
+        }
+        cx.update(|window, cx| {
+            window.replace_root(cx, |_, _| Root(book.clone()));
+            book.update(cx, |book, cx| {
+                for _ in 0..25 {
+                    book.append_cell(window, cx);
+                }
+                book.select(0, cx);
+                book.reveal_cell = Some(0);
+            });
+        });
+        cx.run_until_parked();
+        let original = cx.update(|_, cx| book.read(cx).cells[0].clone());
+        for down in [true, false] {
+            let (start, end) = cx.update(|_, cx| {
+                let book = book.read(cx);
+                let index = book
+                    .cells
+                    .iter()
+                    .position(|cell| cell == &original)
+                    .unwrap();
+                let row = book.scroll.bounds_for_item(index).unwrap();
+                let viewport = book.cell_drag.viewport.get();
+                (
+                    point(row.left() + px(9.), row.top() + px(13.)),
+                    point(
+                        viewport.center().x,
+                        if down {
+                            viewport.bottom() - px(1.)
+                        } else {
+                            viewport.top() + px(1.)
+                        },
+                    ),
+                )
+            });
+            cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+            cx.simulate_mouse_move(end, MouseButton::Left, Default::default());
+            let before = cx.update(|_, cx| {
+                book.update(cx, |book, _| {
+                    assert!(book.cell_drag.order.is_some());
+                    book.cell_drag.simulated_window_hover = Some(false);
+                    book.scroll.logical_scroll_top()
+                })
+            });
+            for _ in 0..3 {
+                cx.executor().advance_clock(Duration::from_millis(16));
+                cx.run_until_parked();
+            }
+            cx.update(|_, cx| {
+                book.update(cx, |book, _| {
+                    assert_eq!(book.scroll.logical_scroll_top(), before);
+                    book.cell_drag.simulated_window_hover = Some(true);
+                })
+            });
+            for _ in 0..250 {
+                cx.executor().advance_clock(Duration::from_millis(16));
+                cx.run_until_parked();
+            }
+            cx.simulate_mouse_up(end, MouseButton::Left, Default::default());
+            cx.update(|_, cx| {
+                let book = book.read(cx);
+                assert_eq!(
+                    book.cells[if down { book.cells.len() - 1 } else { 0 }],
+                    original
+                );
+            });
+            cx.run_until_parked();
+        }
     }
 
     #[gpui::test]

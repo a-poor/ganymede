@@ -247,6 +247,9 @@ impl Selection {
         let events = self.clone();
         div()
             .key_context("OutputText")
+            // Text, images, and blank space within the output body belong to
+            // output interactions, never to the enclosing cell's drag gesture.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .track_focus(&focus)
             .min_w_0()
             .flex_1()

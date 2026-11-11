@@ -345,6 +345,16 @@ operation and selection. A group containing a running cell cannot be cut or dele
 queued and running cells retain their identities when moved. Shift+Enter runs the
 range in document order and advances to the following cell.
 
+Dragging a cell’s surrounding surface moves the selected range as a group, or
+selects and moves an unselected cell. Input editors, Markdown previews, output
+bodies, and controls consume mouse-down events so their content cannot start a
+cell drag. Margin clicks select on release to preserve groups during dragging. Only a valid drop within the same notebook commits the move;
+Escape, outside drops, and a changed cell order/selection cancel it. Edge scrolling
+runs while the pointer is inside the notebook viewport and the window is hovered.
+Moves retain editor entities and remap active/queued execution by identity, including
+pending input prompts. Each move records one structural undo entry and participates
+in revision-based saving. Editor and output text areas do not initiate cell drags.
+
 ### Cell execution shortcut
 
 The release Settings window exposes Run cell shortcut (Shift+Enter by default,

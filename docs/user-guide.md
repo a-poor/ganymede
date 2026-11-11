@@ -98,6 +98,12 @@ a tab keeps the active document and unsaved edits intact.
 Open a notebook from the Files sidebar or create one from the workspace launcher.
 Choose a kernel using the notebook's kernel control.
 
+Drag a cell’s margin, outside its input and output content, to reorder it.
+Dragging a selected cell moves the entire selected group. The insertion line marks the destination;
+hold near the top or bottom of the notebook to scroll. Press **Escape** or drop
+outside the notebook content to cancel. Each completed move is one undoable
+operation and preserves cell content, outputs, and running work.
+
 - **Shift+Enter** runs the selected cell. Variables persist in its kernel between runs.
   In Settings, **Run cell shortcut** can swap Enter and Shift+Enter while editing;
   the other shortcut inserts an indented newline. Cell navigation mode keeps

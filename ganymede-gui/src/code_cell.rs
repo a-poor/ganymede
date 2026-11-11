@@ -468,6 +468,11 @@ impl CodeCell {
         self.output_selection.position_for_index(index)
     }
 
+    #[cfg(test)]
+    pub(crate) fn input_position(&self) -> Point<Pixels> {
+        self.bounds.expect("input must be rendered").origin
+    }
+
     pub fn view_offset(&self) -> (f32, f32) {
         let offset = self.scroll.offset();
         (offset.x.into(), offset.y.into())
@@ -1817,6 +1822,7 @@ impl Render for CodeCell {
             .child(if let Some(preview) = &self.markdown_preview {
                 div()
                     .id("markdown-preview")
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .flex_1()
                     .min_w_0()
                     .px_3()
@@ -1826,6 +1832,7 @@ impl Render for CodeCell {
                     .child(preview.render(window, cx, &self.images))
                     .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
                         cx.emit(CellEvent::Selected);
+                        this.cell_focus.focus(window, cx);
                         if event.click_count() == 2 {
                             this.markdown_preview = None;
                             this.focus.focus(window, cx);
@@ -1888,13 +1895,16 @@ impl Render for CodeCell {
                     window.blur(cx);
                 }
             }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
+            // Wait for a click so pressing a selected cell's margin does not
+            // collapse the group before a drag has crossed its threshold.
+            .on_click(cx.listener(|this, _, window, cx| {
+                // A parent drag does not clear GPUI's nested click state.
+                // Do not change selection or invalidate row measurements on drop.
+                if !cx.has_active_drag() {
                     cx.emit(CellEvent::Selected);
                     this.cell_focus.focus(window, cx);
-                }),
-            )
+                }
+            }))
             .on_action(cx.listener(|this, _: &EditCell, window, cx| {
                 this.markdown_preview = None;
                 this.focus.focus(window, cx);
