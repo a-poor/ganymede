@@ -281,6 +281,9 @@ fn open_workspace(
     cx.open_window(
         gpui::WindowOptions {
             app_id: Some("com.austinpoor.ganymede".into()),
+            // AppKit otherwise treats our tabs as native titlebar drag targets,
+            // before GPUI can dispatch their pointer events.
+            app_owns_titlebar_drag: true,
             window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::centered(
                 None,
                 gpui::size(px(1000.), px(700.)),

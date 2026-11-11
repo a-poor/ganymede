@@ -83,6 +83,11 @@ is unavailable for them because your browser does not share Ganymede's SSH tunne
 
 ## Work with notebooks
 
+Drag a notebook, file, or Launcher tab to rearrange it within the window. The
+insertion line marks the drop position; hold near either end of an overflowing
+tab strip to scroll. Press **Escape** or drop outside the strip to cancel. Moving
+a tab keeps the active document and unsaved edits intact.
+
 Open a notebook from the Files sidebar or create one from the workspace launcher.
 Choose a kernel using the notebook's kernel control.
 

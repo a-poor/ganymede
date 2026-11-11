@@ -7,6 +7,7 @@ mod persistence;
 mod recovery;
 mod selection;
 mod server;
+mod tab_drag;
 use crate::execution::{Runtime, Session};
 use crate::{
     code_cell::CodeCell,
@@ -240,6 +241,7 @@ pub struct Workspace {
     header_tabs: Vec<HeaderTab>,
     reveal_tab: Option<u64>,
     tab_scroll: ScrollHandle,
+    tab_drag: tab_drag::TabDrag,
     file_scroll: ScrollHandle,
     reveal_file: Option<String>,
     next_id: u64,
@@ -308,6 +310,7 @@ impl Workspace {
             header_tabs: Vec::new(),
             reveal_tab: None,
             tab_scroll: ScrollHandle::new(),
+            tab_drag: tab_drag::TabDrag::default(),
             file_scroll: ScrollHandle::new(),
             reveal_file: None,
             next_id: 0,
@@ -1069,6 +1072,7 @@ impl Workspace {
             window.request_animation_frame();
         }
         let t = cx.theme();
+        let drop_target = entity.clone();
         div()
             .relative()
             .flex()
@@ -1089,6 +1093,9 @@ impl Workspace {
                     .min_w_0()
                     .overflow_x_scroll()
                     .track_scroll(&this.tab_scroll)
+                    .on_drop(move |drag: &tab_drag::DragTab, window, cx| {
+                        drop_target.update(cx, |this, cx| this.drop_tab(drag, window, cx));
+                    })
                     .children(this.header_tabs.iter().map(|tab| {
                         let id = tab.id;
                         let leaving = tab.motion.to == 0.;
@@ -1114,6 +1121,14 @@ impl Workspace {
                         let select_key = entity.clone();
                         let close = entity.clone();
                         let close_key = entity.clone();
+                        let close_drop = entity.clone();
+                        let drag_source = entity.clone();
+                        let drag = tab_drag::DragTab {
+                            workspace: entity.entity_id(),
+                            id,
+                            name: name.clone(),
+                            icon,
+                        };
                         let leading = if let Some(glyph) = running {
                             div()
                                 .size_full()
@@ -1152,6 +1167,14 @@ impl Workspace {
                                     .rounded(t.radius.md())
                                     .text_size(t.font.xs)
                                     .cursor_pointer()
+                                    .when(!leaving, |tab| {
+                                        tab.on_drag(drag, move |drag, _, window, cx| {
+                                            drag_source.update(cx, |this, cx| {
+                                                this.begin_tab_drag(drag.id, window, cx);
+                                            });
+                                            cx.new(|_| drag.clone())
+                                        })
+                                    })
                                     .when(selected, |s| {
                                         // Inset shadows use this element's rounded bounds; clipping
                                         // also keeps tab content inside the same silhouette.
@@ -1196,7 +1219,15 @@ impl Workspace {
                                     .child(
                                         div()
                                             .id(("close-tab", id))
+                                            .debug_selector(move || format!("close-tab-{id}"))
                                             .group("tab-close")
+                                            // Don't arm the parent's drag when pressing Close.
+                                            .block_mouse_except_scroll()
+                                            .on_drop(move |drag: &tab_drag::DragTab, window, cx| {
+                                                close_drop.update(cx, |this, cx| {
+                                                    this.drop_tab(drag, window, cx)
+                                                });
+                                            })
                                             .aria_label(if dirty {
                                                 "Close tab — unsaved changes"
                                             } else {
@@ -1254,9 +1285,11 @@ impl Workspace {
             .child({
                 let scroll = this.tab_scroll.clone();
                 let colors = t.tab_overflow_fade;
+                let indicator = entity.clone();
+                let ring = t.sidebar.ring;
                 gpui::canvas(
                     |_, _, _| (),
-                    move |_, _, window, _| {
+                    move |_, _, window, cx| {
                         // Read after the scroll area's prepaint, so resize and
                         // animated tab widths are reflected in this same frame.
                         let bounds = scroll.bounds();
@@ -1287,6 +1320,21 @@ impl Workspace {
                                     gpui::linear_color_stop(colors[0], 0.),
                                     gpui::linear_color_stop(colors[1], 1.),
                                 ),
+                            ));
+                        }
+                        let workspace = indicator.read(cx);
+                        if workspace.tab_drag.id.is_some()
+                            && cx.has_active_drag()
+                            && window.is_window_hovered()
+                            && let Some((_, x)) =
+                                workspace.tab_drop_position(window.mouse_position())
+                        {
+                            window.paint_quad(gpui::fill(
+                                gpui::Bounds::new(
+                                    gpui::point(x, bounds.top()),
+                                    gpui::size(px(2.), bounds.size.height),
+                                ),
+                                ring,
                             ));
                         }
                     },
@@ -2182,12 +2230,10 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[gpui::test]
-    fn tab_shortcuts_cross_launcher_and_wrap_in_both_directions(cx: &mut gpui::TestAppContext) {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+    fn tab_fixture(
+        cx: &mut gpui::TestAppContext,
+        runtime: &tokio::runtime::Runtime,
+    ) -> gpui::WindowHandle<crate::Ganymede> {
         let window = cx.update(|cx| {
             cx.set_global(
                 crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
@@ -2272,6 +2318,16 @@ mod tests {
                 })
                 .unwrap()
         });
+        window
+    }
+
+    #[gpui::test]
+    fn tab_shortcuts_cross_launcher_and_wrap_in_both_directions(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let window = tab_fixture(cx, &runtime);
         cx.run_until_parked();
         for (key, expected) in [
             ("ctrl-tab", LAUNCHER),
@@ -2327,6 +2383,212 @@ mod tests {
                 .unwrap()
         });
     }
+    #[gpui::test]
+    fn tab_drag_commits_on_drop_preserves_editors_and_cancels_safely(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::{MouseButton, point};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let window = tab_fixture(cx, &runtime);
+        let workspace = cx.update(|cx| {
+            window
+                .update(cx, |app, _, _| app.workspace.clone())
+                .unwrap()
+        });
+        cx.simulate_window_resize(window.into(), gpui::size(px(1200.), px(800.)));
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|_, cx| {
+            workspace.update(cx, |this, cx| {
+                this.sync_header_tabs(Instant::now(), true);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        let positions = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| {
+                let workspace = workspace.read(cx);
+                workspace
+                    .header_tabs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, tab)| {
+                        let bounds = workspace.tab_scroll.bounds_for_item(index).unwrap();
+                        (tab.id, bounds + workspace.tab_scroll.offset())
+                    })
+                    .collect::<HashMap<_, _>>()
+            })
+        };
+        let identities = cx.update(|_, cx| {
+            let workspace = workspace.read(cx);
+            let Content::Notebook(book) = &workspace.documents[0].content else {
+                panic!()
+            };
+            let Content::Text(file) = &workspace.documents[1].content else {
+                panic!()
+            };
+            assert!(file.read(cx).is_dirty());
+            (book.entity_id(), file.entity_id())
+        });
+        let bounds = positions(&mut cx);
+        let start = bounds[&2].center();
+        let end = point(bounds[&1].left() + px(3.), start.y);
+        cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(end, MouseButton::Left, Default::default());
+        cx.update(|_, cx| {
+            assert!(cx.has_active_drag());
+            assert_eq!(workspace.read(cx).tabs.open, [1, LAUNCHER, 2]);
+        });
+        cx.simulate_mouse_up(end, MouseButton::Left, Default::default());
+        cx.update(|_, cx| {
+            let workspace = workspace.read(cx);
+            assert_eq!(workspace.tabs.open, [2, 1, LAUNCHER]);
+            assert_eq!(workspace.tabs.active, 1);
+            let Content::Notebook(book) = &workspace.documents[0].content else {
+                panic!()
+            };
+            let Content::Text(file) = &workspace.documents[1].content else {
+                panic!()
+            };
+            assert_eq!((book.entity_id(), file.entity_id()), identities);
+            assert!(file.read(cx).is_dirty());
+        });
+        // Escape cancels even though focus remains in the notebook, outside the header.
+        let bounds = positions(&mut cx);
+        let start = bounds[&2].center();
+        let end = point(bounds[&LAUNCHER].right() - px(3.), start.y);
+        cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(end, MouseButton::Left, Default::default());
+        cx.simulate_keystrokes("escape");
+        cx.simulate_mouse_up(end, MouseButton::Left, Default::default());
+        cx.update(|_, cx| assert_eq!(workspace.read(cx).tabs.open, [2, 1, LAUNCHER]));
+        // An invalid drop also leaves the order alone.
+        cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        let outside = point(start.x, start.y + px(100.));
+        cx.simulate_mouse_move(outside, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(outside, MouseButton::Left, Default::default());
+        cx.update(|_, cx| assert_eq!(workspace.read(cx).tabs.open, [2, 1, LAUNCHER]));
+        // A click still activates; Close cannot start a drag.
+        cx.simulate_click(start, Default::default());
+        cx.update(|_, cx| assert_eq!(workspace.read(cx).tabs.active, 2));
+        let close = cx.debug_bounds("close-tab-0").unwrap().center();
+        cx.simulate_mouse_down(close, MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(
+            point(close.x - px(40.), close.y),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.update(|_, cx| {
+            assert!(
+                !cx.has_active_drag(),
+                "drag {:?}, close {:?}",
+                workspace.read(cx).tab_drag.id,
+                close
+            )
+        });
+        cx.simulate_mouse_up(
+            point(close.x - px(40.), close.y),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_click(close, Default::default());
+        cx.update(|_, cx| assert_eq!(workspace.read(cx).tabs.open, [2, 1]));
+    }
+
+    #[gpui::test]
+    fn tab_drag_scrolls_to_offscreen_drop_positions_in_both_directions(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::{MouseButton, point};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let window = tab_fixture(cx, &runtime);
+        cx.simulate_window_resize(window.into(), gpui::size(px(650.), px(600.)));
+        let workspace = cx.update(|cx| {
+            window
+                .update(cx, |app, _, _| app.workspace.clone())
+                .unwrap()
+        });
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            window.activate_window();
+            workspace.update(cx, |this, cx| {
+                this.reveal_tab = None;
+                this.sync_header_tabs(Instant::now(), true);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        for toward_end in [true, false] {
+            let (start, end) = cx.update(|_, cx| {
+                let workspace = workspace.read(cx);
+                let index = workspace
+                    .header_tabs
+                    .iter()
+                    .position(|tab| tab.id == 1)
+                    .unwrap();
+                let tab = workspace.tab_scroll.bounds_for_item(index).unwrap()
+                    + workspace.tab_scroll.offset();
+                let bounds = workspace.tab_scroll.bounds();
+                (
+                    tab.center(),
+                    point(
+                        if toward_end {
+                            bounds.right() - px(2.)
+                        } else {
+                            bounds.left() + px(2.)
+                        },
+                        bounds.center().y,
+                    ),
+                )
+            });
+            cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+            cx.simulate_mouse_move(end, MouseButton::Left, Default::default());
+            for _ in 0..80 {
+                cx.executor().advance_clock(Duration::from_millis(16));
+                cx.run_until_parked();
+            }
+            cx.update(|_, cx| {
+                let workspace = workspace.read(cx);
+                let scroll = &workspace.tab_scroll;
+                assert!(scroll.max_offset().x > px(0.));
+                assert_eq!(
+                    scroll.offset().x,
+                    if toward_end {
+                        -scroll.max_offset().x
+                    } else {
+                        px(0.)
+                    }
+                );
+                assert_eq!(
+                    workspace.tabs.open,
+                    if toward_end {
+                        vec![1, LAUNCHER, 2]
+                    } else {
+                        vec![LAUNCHER, 2, 1]
+                    }
+                );
+            });
+            cx.simulate_mouse_up(end, MouseButton::Left, Default::default());
+            cx.update(|_, cx| {
+                let workspace = workspace.read(cx);
+                assert_eq!(
+                    workspace.tabs.open,
+                    if toward_end {
+                        vec![LAUNCHER, 2, 1]
+                    } else {
+                        vec![1, LAUNCHER, 2]
+                    }
+                );
+                assert_eq!(workspace.tabs.active, 1);
+            });
+        }
+    }
+
     fn tree_entry(path: &str, kind: &str) -> Contents {
         serde_json::from_value(serde_json::json!({
             "name": path.rsplit('/').next().unwrap(), "path": path, "type": kind,

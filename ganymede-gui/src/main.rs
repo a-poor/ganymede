@@ -234,6 +234,15 @@ impl Render for Ganymede {
         let body = theme.app;
         menus::handlers(div().id("main-window"), self, cx)
             .track_focus(&self.focus)
+            .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape"
+                    && this
+                        .workspace
+                        .update(cx, |workspace, cx| workspace.cancel_tab_drag(window, cx))
+                {
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(
                 cx.listener(|this, _: &menus::in_window::OpenMenu, window, cx| {
                     this.app_menu
@@ -286,19 +295,25 @@ impl Render for Ganymede {
                     .text_size(theme.font.sm)
                     .text_color(outer.muted_fg)
                     .window_control_area(WindowControlArea::Drag)
-                    .when(cfg!(target_os = "linux"), |bar| {
-                        // Linux needs an explicit move request. Toolbar controls
-                        // stop mouse-down propagation so they remain clickable.
+                    .when(cfg!(any(target_os = "linux", target_os = "macos")), |bar| {
+                        // The workspace owns titlebar dragging on macOS as well.
+                        // Tabs and controls stop propagation before this handler.
                         bar.on_mouse_down(gpui::MouseButton::Left, |event, window, _| {
                             if event.click_count == 2 {
-                                window.zoom_window();
+                                if cfg!(target_os = "macos") {
+                                    window.titlebar_double_click();
+                                } else {
+                                    window.zoom_window();
+                                }
                             } else {
                                 window.start_window_move();
                             }
                         })
                     })
                     .on_click(|event, window, _| {
-                        if !cfg!(target_os = "linux") && event.click_count() == 2 {
+                        if !cfg!(any(target_os = "linux", target_os = "macos"))
+                            && event.click_count() == 2
+                        {
                             window.titlebar_double_click();
                         }
                     })
