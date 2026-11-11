@@ -20,11 +20,21 @@ For each release:
 
 1. Set the stable `X.Y.Z` version in the workspace `Cargo.toml` and refresh
    `Cargo.lock` with `cargo check --workspace`.
-2. Commit and push the release changes to `main`. The command requires a clean
+2. Move `CHANGELOG.md`'s `Unreleased` entries into a dated `X.Y.Z — YYYY-MM-DD`
+   section, leaving an empty `Unreleased` section for future changes. Group concise,
+   user-visible changes under Added, Changed, Fixed, or Removed; omit empty groups.
+   Include Downloads with platform requirements and known limitations, and a full
+   comparison link from the previous tag. Verify entries against the commit range.
+3. Commit and push the release changes to `main`. The command requires a clean
    checkout matching remote `main`. It does not commit, push, or bump versions.
-3. Write release notes in a Markdown file. Keep it outside the checkout, or commit
-   it with the release changes.
-4. Run:
+4. Extract that version's section verbatim as the release notes, excluding its
+   version heading. This keeps the changelog and GitHub notes consistent. For example:
+
+```sh
+awk '/^## 0[.]4[.]0 — / { found=1; next } found && /^## / { exit } found { print }' CHANGELOG.md > /tmp/ganymede-release-notes.md
+```
+
+5. Run:
 
 ```sh
 export GANYMEDE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"

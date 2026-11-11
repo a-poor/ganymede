@@ -17,8 +17,8 @@ Download the signed and notarized DMG from the
 and drag **Ganymede** into **Applications**. A ZIP is also available.
 
 The published macOS release requires **macOS 15 or later and Apple Silicon (M1 or newer)**.
-Linux preview packages can be [built from source](docs/development/linux.md) or
-downloaded from full CI workflow artifacts once available.
+Linux x86-64 packages (`.deb` and `.tar.gz`) are also available from Releases.
+See [Linux requirements and setup](docs/development/linux.md) before installing.
 Automatic updates are not implemented yet; download new versions from Releases.
 
 ## Get started
@@ -47,6 +47,7 @@ roadmap.
 
 ## Documentation
 
+- [Changelog](CHANGELOG.md): release notes and upcoming changes.
 - [User guide](docs/user-guide.md): connections, notebooks, files, recovery, and storage.
 - [Contributing](CONTRIBUTING.md): build from source, checks, and development conventions.
 - [Core API](docs/development/core-api.md): Rust clients and notebook controllers.

@@ -41,6 +41,13 @@ Use `#[test]` and `#[tokio::test]`; name tests after observable behavior. Add re
 
 ## Commit & Pull Request Guidelines
 
+Maintain `CHANGELOG.md` for user-visible changes under `Unreleased`. Use concise
+behavior-focused bullets grouped under Added, Changed, Fixed, or Removed; omit
+empty groups and internal-only work. At release time, move those entries into a
+dated version section and use that section verbatim for GitHub release notes,
+including Downloads, known limitations, and a full comparison link. Follow
+`docs/development/distribution.md` for the release checklist.
+
 Use concise, action-oriented commit subjects, such as `Add application-facing notebook documents and controller`. Keep unrelated edits separate. PR descriptions should explain behavior, relevant issues, and validation; include screenshots for visible GUI changes.
 
 Prefer rebasing feature branches onto `main` when possible to bring them up to date. When integrating a multi-commit feature branch into `main`, prefer squash merge.
