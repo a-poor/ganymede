@@ -2548,6 +2548,50 @@ mod tests {
             });
             cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
             cx.simulate_mouse_move(end, MouseButton::Left, Default::default());
+            // Native hover is separate from activation and simulated mouse events.
+            // The pinned GPUI test platform has no API to deliver hover changes.
+            let initial_offset = cx.update(|_, cx| {
+                workspace.update(cx, |this, _| {
+                    this.tab_drag.simulated_window_hover = Some(false);
+                    this.tab_scroll.offset()
+                })
+            });
+            for _ in 0..4 {
+                cx.executor().advance_clock(Duration::from_millis(16));
+                cx.run_until_parked();
+            }
+            cx.update(|_, cx| {
+                workspace.update(cx, |this, _| {
+                    assert_eq!(this.tab_scroll.offset(), initial_offset);
+                    this.tab_drag.simulated_window_hover = Some(true);
+                })
+            });
+            for _ in 0..4 {
+                cx.executor().advance_clock(Duration::from_millis(16));
+                cx.run_until_parked();
+            }
+            let paused_offset = cx.update(|_, cx| {
+                workspace.update(cx, |this, _| {
+                    let offset = this.tab_scroll.offset();
+                    if toward_end {
+                        assert!(offset.x < initial_offset.x);
+                    } else {
+                        assert!(offset.x > initial_offset.x);
+                    }
+                    this.tab_drag.simulated_window_hover = Some(false);
+                    offset
+                })
+            });
+            for _ in 0..4 {
+                cx.executor().advance_clock(Duration::from_millis(16));
+                cx.run_until_parked();
+            }
+            cx.update(|_, cx| {
+                workspace.update(cx, |this, _| {
+                    assert_eq!(this.tab_scroll.offset(), paused_offset);
+                    this.tab_drag.simulated_window_hover = Some(true);
+                })
+            });
             for _ in 0..80 {
                 cx.executor().advance_clock(Duration::from_millis(16));
                 cx.run_until_parked();

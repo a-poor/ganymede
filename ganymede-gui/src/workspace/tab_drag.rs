@@ -36,6 +36,20 @@ impl Render for DragTab {
 pub(super) struct TabDrag {
     pub id: Option<u64>,
     task: Option<Task<()>>,
+    // GPUI a19e194's test platform cannot simulate native window hover changes.
+    // Keep this explicit and per-workspace so tests can exercise both states.
+    #[cfg(test)]
+    pub simulated_window_hover: Option<bool>,
+}
+
+impl TabDrag {
+    fn window_hovered(&self, window: &Window) -> bool {
+        #[cfg(test)]
+        if let Some(hovered) = self.simulated_window_hover {
+            return hovered;
+        }
+        window.is_window_hovered()
+    }
 }
 
 impl Tabs {
@@ -95,7 +109,7 @@ impl Workspace {
                         cx.notify();
                         return false;
                     }
-                    if window.is_window_hovered() {
+                    if this.tab_drag.window_hovered(window) {
                         let scroll = &this.tab_scroll;
                         let step = edge_scroll(scroll.bounds(), window.mouse_position());
                         let offset = scroll.offset();
