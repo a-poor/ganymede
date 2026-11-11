@@ -427,6 +427,12 @@ impl Render for StdinPrompt {
                 this.buffer.anchor = 0;
                 this.select(this.buffer.text.len(), true, cx);
             }))
+            .on_action(cx.listener(|this, _: &DeleteWordBackward, _, cx| {
+                let range = this.buffer.backward_word_deletion();
+                if !range.is_empty() {
+                    this.edit(range, "", cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &Backspace, _, cx| {
                 let mut r = this.buffer.selection();
                 if r.is_empty() {

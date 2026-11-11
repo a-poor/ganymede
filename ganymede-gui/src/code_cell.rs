@@ -35,6 +35,7 @@ actions!(
         SelectEnd,
         SelectAll,
         Backspace,
+        DeleteWordBackward,
         Delete,
         Enter,
         RunAndAdvance,
@@ -78,6 +79,15 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("shift-tab", Outdent, context),
     ]);
     cx.bind_keys([
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "alt-backspace"
+            } else {
+                "ctrl-backspace"
+            },
+            DeleteWordBackward,
+            context,
+        ),
         KeyBinding::new(
             if cfg!(target_os = "macos") {
                 "alt-left"
@@ -315,6 +325,13 @@ impl Buffer {
             .map_or(self.text.len(), |(start, segment)| {
                 self.head + start + segment.len()
             })
+    }
+    fn backward_word_deletion(&self) -> Range<usize> {
+        let mut range = self.selection();
+        if range.is_empty() {
+            range.start = self.word_left();
+        }
+        range
     }
     fn word_at(&self, offset: usize) -> Range<usize> {
         self.text
@@ -1415,6 +1432,12 @@ impl Render for CodeCell {
             .on_action(cx.listener(|this, _: &SelectAll, w, cx| {
                 this.buffer.anchor = 0;
                 this.move_cursor(this.buffer.text.len(), true, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DeleteWordBackward, w, cx| {
+                let range = this.buffer.backward_word_deletion();
+                if !range.is_empty() {
+                    this.replace_text_in_range(Some(this.buffer.to_utf16(range)), "", w, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &Backspace, w, cx| {
                 if this.buffer.selection().is_empty()
@@ -2703,6 +2726,93 @@ mod tests {
                             .unwrap()
                     });
                 }
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn word_deletion_shortcut_preserves_undo_and_selection(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(
+                crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+            );
+            init(cx);
+        });
+        for document in [false, true] {
+            for (source, anchor, head, expected) in [
+                ("one café", 9, 9, "one "),
+                ("one  \t", 6, 6, ""),
+                ("one.foo", 4, 4, "onefoo"),
+                ("one\n", 4, 4, ""),
+                ("a 👩‍💻", 13, 13, "a "),
+                ("cafe\u{301}", 6, 6, ""),
+                ("one two", 1, 5, "owo"),
+                ("one two", 5, 1, "owo"),
+                ("one", 0, 0, "one"),
+                ("", 0, 0, ""),
+            ] {
+                let window = cx.update(|cx| {
+                    cx.open_window(Default::default(), |window, cx| {
+                        cx.new(|cx| {
+                            let mut cell = if document {
+                                CodeCell::new_document(window, cx)
+                            } else {
+                                CodeCell::new(window, cx)
+                            };
+                            cell.buffer.text = source.into();
+                            cell.buffer.anchor = anchor;
+                            cell.buffer.head = head;
+                            cell.focus.focus(window, cx);
+                            cell
+                        })
+                    })
+                    .unwrap()
+                });
+                cx.run_until_parked();
+                cx.simulate_keystrokes(
+                    window.into(),
+                    if cfg!(target_os = "macos") {
+                        "alt-backspace"
+                    } else {
+                        "ctrl-backspace"
+                    },
+                );
+                cx.update(|cx| {
+                    window
+                        .update(cx, |cell, _, _| {
+                            assert_eq!(cell.text(), expected, "{source:?}")
+                        })
+                        .unwrap()
+                });
+                cx.simulate_keystrokes(
+                    window.into(),
+                    if cfg!(target_os = "macos") {
+                        "cmd-z"
+                    } else {
+                        "ctrl-z"
+                    },
+                );
+                cx.update(|cx| {
+                    window
+                        .update(cx, |cell, _, _| {
+                            assert_eq!(cell.text(), source);
+                            assert_eq!((cell.buffer.anchor, cell.buffer.head), (anchor, head));
+                        })
+                        .unwrap()
+                });
+                cx.simulate_keystrokes(
+                    window.into(),
+                    if cfg!(target_os = "macos") {
+                        "cmd-shift-z"
+                    } else {
+                        "ctrl-shift-z"
+                    },
+                );
+                cx.update(|cx| {
+                    window
+                        .update(cx, |cell, _, _| assert_eq!(cell.text(), expected))
+                        .unwrap()
+                });
             }
         }
     }
