@@ -1,5 +1,6 @@
 //! A standalone, in-memory code cell. Notebook persistence and execution can be
 //! connected later without coupling the text-input machinery to a kernel.
+mod output_menu;
 mod pairing;
 pub(crate) mod stdin_prompt;
 use std::{cell::RefCell, ops::Range, rc::Rc, time::Duration};
@@ -52,6 +53,7 @@ actions!(
 );
 
 pub fn init(cx: &mut App) {
+    output_menu::init(cx);
     cx.bind_keys([
         KeyBinding::new("escape", SelectCell, Some("CodeCell")),
         KeyBinding::new(
@@ -432,6 +434,7 @@ pub struct CodeCell {
     output: Vec<crate::execution::OutputBlock>,
     rich_output: Vec<crate::rich::Rich>,
     output_selection: crate::output_selection::Selection,
+    output_menu: output_menu::Menu,
     markdown_preview: Option<crate::rich::Rich>,
     input_prompt: Option<Entity<stdin_prompt::StdinPrompt>>,
     input_return_focus: Option<FocusHandle>,
@@ -487,7 +490,16 @@ impl CodeCell {
             .detach();
         let focus = cx.focus_handle();
         let cell_focus = cx.focus_handle();
+        let output_menu = output_menu::Menu::new(cx);
         let subscriptions = vec![
+            cx.on_blur(&output_menu.focus, window, |this, window, cx| {
+                if this.output_menu.focus.is_focused(window) {
+                    return;
+                }
+                this.output_menu.open = None;
+                this.output_selection.set_menu_open(false);
+                cx.notify();
+            }),
             cx.on_focus(&cell_focus, window, |_, _, cx| {
                 cx.emit(CellEvent::CommandSelected);
                 cx.notify();
@@ -528,6 +540,7 @@ impl CodeCell {
             output: Vec::new(),
             rich_output: Vec::new(),
             output_selection: crate::output_selection::Selection::new(cx),
+            output_menu,
             markdown_preview: None,
             input_prompt: None,
             input_return_focus: None,
@@ -1319,6 +1332,9 @@ impl EntityInputHandler for CodeCell {
 
 impl Render for CodeCell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.output.is_empty() && self.output_menu.open.is_some() {
+            self.dismiss_output_menu(true, window, cx);
+        }
         if let Some(focus) = self.input_return_focus.take()
             && focus.is_focused(window)
         {
@@ -1849,7 +1865,9 @@ impl Render for CodeCell {
             .group("notebook-cell")
             // Single-letter notebook commands only match the cell itself,
             // never its editor, output controls, or kernel input descendants.
-            .key_context(if self.cell_focus.is_focused(window) {
+            .key_context(if self.output_menu.focus.is_focused(window) {
+                "OutputMenuHost"
+            } else if self.cell_focus.is_focused(window) {
                 "NotebookCell NotebookCommand"
             } else {
                 "NotebookCell"
@@ -1962,6 +1980,11 @@ impl Render for CodeCell {
                                     .child(
                                         div()
                                             .id(("cell-output", index))
+                                            .debug_selector(move || format!("cell-output-{index}"))
+                                            .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                                this.open_output_menu(index, event.position, window, cx);
+                                                cx.stop_propagation();
+                                            }))
                                             .flex_1()
                                             .min_w_0()
                                             .overflow_x_scroll()
@@ -1993,6 +2016,7 @@ impl Render for CodeCell {
                         ))),
                 )
             })
+            .children(self.render_output_menu(cx))
             .when_some(self.input_prompt.as_ref(), |cell, prompt| {
                 cell.child(
                     div()

@@ -43,6 +43,7 @@ struct State {
     anchor: usize,
     head: usize,
     dragging: bool,
+    menu_open: bool,
 }
 impl State {
     fn range(&self) -> Range<usize> {
@@ -81,6 +82,7 @@ impl Selection {
             anchor: 0,
             head: 0,
             dragging: false,
+            menu_open: false,
         })))
     }
     #[cfg(test)]
@@ -124,6 +126,33 @@ impl Selection {
         state.text = text;
         state.segments = segments;
         state.next = 0;
+    }
+    pub fn has_text(&self) -> bool {
+        !self.0.borrow().text.is_empty()
+    }
+    pub fn copy_all(&self, cx: &mut App) {
+        cx.write_to_clipboard(ClipboardItem::new_string(self.0.borrow().text.clone()));
+    }
+    pub fn copy(&self, cx: &mut App) {
+        let state = self.0.borrow();
+        if !state.range().is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                state.text[state.range()].to_owned(),
+            ));
+        }
+    }
+    pub fn select_all(&self) {
+        let mut state = self.0.borrow_mut();
+        state.anchor = 0;
+        state.head = state.text.len();
+    }
+    pub fn focus(&self, window: &mut gpui::Window, cx: &mut App) {
+        self.0.borrow().focus.focus(window, cx);
+    }
+    pub fn set_menu_open(&self, open: bool) {
+        let mut state = self.0.borrow_mut();
+        state.menu_open = open;
+        state.dragging = false;
     }
     pub fn text(&self, text: StyledText, cx: &App) -> AnyElement {
         self.linked_text(text, Vec::new(), cx)
@@ -194,7 +223,7 @@ impl Selection {
                     move |_, _, _| {},
                     move |_, _, window, _| {
                         let state = paint.0.borrow();
-                        if !state.focus.is_focused(window) {
+                        if !state.focus.is_focused(window) && !state.menu_open {
                             return;
                         }
                         let selected = state.range();
@@ -254,18 +283,11 @@ impl Selection {
             .min_w_0()
             .flex_1()
             .on_action(move |_: &Copy, _, cx| {
-                let state = copy.0.borrow();
-                if !state.range().is_empty() {
-                    cx.write_to_clipboard(ClipboardItem::new_string(
-                        state.text[state.range()].to_owned(),
-                    ));
-                }
+                copy.copy(cx);
                 cx.stop_propagation();
             })
             .on_action(move |_: &SelectAll, window, cx| {
-                let mut state = all.0.borrow_mut();
-                state.anchor = 0;
-                state.head = state.text.len();
+                all.select_all();
                 window.refresh();
                 cx.stop_propagation();
             })

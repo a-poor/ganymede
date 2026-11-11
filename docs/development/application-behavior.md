@@ -194,6 +194,12 @@ HTML preview is bounded to 2 MiB, 2,048 blocks, and tables to 500 rows/64 column
 limited table/block previews show a notice. Original notebook MIME data is preserved
 when saving, including unsupported representations.
 
+Right-clicking an output opens a single **Copy output** action that copies all
+rendered output text in the cell, falling back to the clicked output's plain-text
+or LaTeX representation when no rendered text is available. It is disabled when
+no text is available. Menu focus preserves selection and isolates keyboard input
+from cell editing and execution. Copying does not change notebook contents.
+
 Markdown cells open in preview. Double-click or select and press Enter to edit;
 Run or Shift+Enter renders the source again. Headings, emphasis, links, nested lists,
 fenced code, tables, embedded raster attachments, and LaTeX formulas are supported.

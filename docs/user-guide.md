@@ -144,6 +144,11 @@ wrapped lines and rendered paragraphs, code blocks, and tables; copied tables
 use tabs between columns and newlines between rows. Scroll with the wheel or
 trackpad while dragging to reach more of a long output. Output text is read-only.
 
+Right-click the output area and choose **Copy output** to copy all text in that
+cell's outputs. Opening the menu preserves your selection. Press Enter to copy
+or Escape to dismiss. For non-text output, an available plain-text or LaTeX
+representation is used; copying is disabled when no text is available.
+
 Appending streamed text preserves the selection. Replacing or clearing existing
 output text resets it. Selection stays within one cell's outputs. Use
 **Cmd-click / Ctrl-click** to open links in rendered output without selecting text.
