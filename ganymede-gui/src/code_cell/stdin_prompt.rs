@@ -6,6 +6,7 @@ pub(crate) struct StdinPrompt {
     pub id: String,
     prompt: String,
     password: bool,
+    secret_visible: bool,
     monospace: bool,
     session: Option<crate::execution::Session>,
     generation: u64,
@@ -35,6 +36,7 @@ impl StdinPrompt {
             id: input.id,
             prompt: input.prompt,
             password: input.password,
+            secret_visible: false,
             monospace: false,
             generation: session.input_generation(),
             session: Some(session),
@@ -66,6 +68,7 @@ impl StdinPrompt {
             id: String::new(),
             prompt: label.into(),
             password,
+            secret_visible: false,
             monospace: false,
             session: None,
             generation: 0,
@@ -92,10 +95,24 @@ impl StdinPrompt {
         self.monospace = true;
         self
     }
+    pub(crate) fn secret_visible(&self) -> bool {
+        self.secret_visible
+    }
+    pub(crate) fn set_secret_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.secret_visible = visible && self.password && self.session.is_none();
+        self.line = None;
+        self.scroll_x = px(0.);
+        self.reveal = true;
+        cx.notify();
+    }
+    fn masked(&self) -> bool {
+        self.password && !self.secret_visible
+    }
     pub(crate) fn value(&self) -> &str {
         &self.buffer.text
     }
     pub(crate) fn set_value(&mut self, value: String, cx: &mut Context<Self>) {
+        self.secret_visible = false;
         self.buffer = Buffer {
             text: value,
             ..Default::default()
@@ -166,14 +183,14 @@ impl StdinPrompt {
         cx.notify();
     }
     fn display_offset(&self, offset: usize) -> usize {
-        if self.password {
+        if self.masked() {
             self.buffer.text[..offset].graphemes(true).count() * '•'.len_utf8()
         } else {
             offset
         }
     }
     fn source_offset(&self, offset: usize) -> usize {
-        if self.password {
+        if self.masked() {
             self.buffer
                 .text
                 .grapheme_indices(true)
@@ -505,7 +522,7 @@ impl Render for StdinPrompt {
                         if this.reveal {
                             window.request_autoscroll(bounds);
                         }
-                        let display = if this.password {
+                        let display = if this.masked() {
                             "•".repeat(this.buffer.text.graphemes(true).count())
                         } else {
                             this.buffer.text.clone()
@@ -628,6 +645,35 @@ impl Render for StdinPrompt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[gpui::test]
+    fn revealing_connection_secret_preserves_selection_and_secure_copy(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let input = cx.new(|cx| StdinPrompt::field("é😀e\u{301}".into(), true, "Token", cx));
+        input.update(cx, |input, cx| {
+            input.buffer.anchor = "é".len();
+            input.buffer.head = input.buffer.text.len();
+            let selection = input.buffer.selection();
+            assert_eq!(input.display_offset(input.buffer.head), 9);
+            input.set_secret_visible(true, cx);
+            assert_eq!(
+                input.display_offset(input.buffer.head),
+                input.buffer.text.len()
+            );
+            assert_eq!(input.source_offset("é".len()), "é".len());
+            assert_eq!(input.buffer.selection(), selection);
+            cx.write_to_clipboard(ClipboardItem::new_string("unchanged".into()));
+            input.copy(cx);
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().unwrap(),
+                "unchanged"
+            );
+            input.set_secret_visible(false, cx);
+            assert_eq!(input.buffer.selection(), selection);
+            assert_eq!(input.display_offset(input.buffer.head), 9);
+        });
+    }
+
     #[gpui::test]
     fn cell_type_shortcuts_type_into_kernel_input(cx: &mut gpui::TestAppContext) {
         struct Root(Entity<CodeCell>);

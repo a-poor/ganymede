@@ -45,7 +45,10 @@ pub(crate) fn history_path() -> PathBuf {
     crate::storage::Paths::current().connections
 }
 fn load_recent() -> Vec<Recent> {
-    let data = std::fs::read(history_path())
+    load_recent_from(&history_path())
+}
+fn load_recent_from(path: &std::path::Path) -> Vec<Recent> {
+    let data = std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
     data.and_then(|data| data.as_array().cloned())
@@ -87,40 +90,73 @@ fn history_data(recent: &[Recent]) -> serde_json::Value {
     )
 }
 
-fn remember(recent: Recent, cx: &mut App) {
-    let connections = cx.global_mut::<Connections>();
-    connections.recent.retain(|item| item.key() != recent.key());
-    connections.recent.insert(0, recent);
-    connections.recent.truncate(10);
-    // Never persist tokens. Local Jupyter servers maintain their own protected runtime file.
-    let data = history_data(&connections.recent);
-    let path = history_path();
+fn updated_history(mut items: Vec<Recent>, recent: Recent, previous: Option<&str>) -> Vec<Recent> {
+    items.retain(|item| item.key() != recent.key() && Some(item.key().as_str()) != previous);
+    items.insert(0, recent);
+    items.truncate(10);
+    items
+}
+
+fn persist_history(recent: &[Recent], path: &std::path::Path) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)?;
     }
-    if let Ok(bytes) = serde_json::to_vec_pretty(&data) {
-        let _ = std::fs::write(path, bytes);
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        std::fs::write(
+            &temporary,
+            serde_json::to_vec_pretty(&history_data(recent))?,
+        )?;
+        std::fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
     }
+    result
+}
+
+fn remember_edited(recent: Recent, previous: Option<&str>, cx: &mut App) -> Result<(), String> {
+    let items = updated_history(cx.global::<Connections>().recent.clone(), recent, previous);
+    persist_history(&items, &history_path()).map_err(|_| {
+        "Could not save the recent connection. Check storage permissions and retry.".to_owned()
+    })?;
+    cx.global_mut::<Connections>().recent = items;
     cx.refresh_windows();
+    Ok(())
+}
+
+fn remember(recent: Recent, cx: &mut App) {
+    let _ = remember_edited(recent, None, cx);
+}
+
+fn add_configured_recent(recent: &mut Vec<Recent>, config: &ServerConfig) {
+    let address = config.base_url().to_string();
+    // A user-edited entry (and its credential-store flag) takes precedence.
+    if recent
+        .iter()
+        .any(|r| r.address == address && r.ssh_host.is_none())
+    {
+        return;
+    }
+    recent.insert(
+        0,
+        Recent {
+            label: address.clone(),
+            address,
+            config: Some(config.clone()),
+            local_info: None,
+            local_id: None,
+            saved_token: false,
+            ssh_host: None,
+        },
+    );
 }
 
 pub fn init(cx: &mut App) {
     let mut recent = load_recent();
     if let Ok(config) = &cx.global::<Runtime>().config {
-        let address = config.base_url().to_string();
-        recent.retain(|r| r.address != address || r.ssh_host.is_some());
-        recent.insert(
-            0,
-            Recent {
-                label: address.clone(),
-                address,
-                config: Some(config.clone()),
-                local_info: None,
-                local_id: None,
-                saved_token: false,
-                ssh_host: None,
-            },
-        );
+        add_configured_recent(&mut recent, config);
     }
     let ids = recent
         .iter()
@@ -341,6 +377,7 @@ struct ConnectionWindow {
     advanced: bool,
     recent_menu: Option<usize>,
     save_token: Option<(String, String)>,
+    editing_recent: Option<String>,
     python: Entity<Field>,
     environment: server::Environment,
     detected: Vec<discovery::Environment>,
@@ -440,6 +477,7 @@ impl ConnectionWindow {
             advanced: false,
             recent_menu: None,
             save_token: None,
+            editing_recent: None,
             python,
             environment: server::Environment::Global,
             detected: Vec::new(),
@@ -489,6 +527,11 @@ impl ConnectionWindow {
                 started: Instant::now(),
             });
         }
+        if page != Page::Existing {
+            self.editing_recent = None;
+        }
+        self.token
+            .update(cx, |input, cx| input.set_secret_visible(false, cx));
         self.page = page;
         self.environment_open = false;
         self.error = None;
@@ -689,15 +732,7 @@ impl ConnectionWindow {
                             tunnel,
                             kernel,
                         };
-                        // Native resize/minimize capabilities are fixed at window creation.
-                        // Replace the fixed picker with a normal workspace window.
-                        if open_workspace(runtime, &label, cx).is_err() {
-                            this.error = Some("Could not open the workspace window.".into());
-                            this.reveal(window, cx);
-                            cx.notify();
-                            return;
-                        }
-                        remember(
+                        if let Err(error) = remember_edited(
                             Recent {
                                 label: label.clone(),
                                 address: address.clone(),
@@ -724,8 +759,22 @@ impl ConnectionWindow {
                                     }
                                 }),
                             },
+                            this.editing_recent.as_deref(),
                             cx,
-                        );
+                        ) {
+                            this.error = Some(error);
+                            this.reveal(window, cx);
+                            cx.notify();
+                            return;
+                        }
+                        // Native resize/minimize capabilities are fixed at window creation.
+                        // Replace the fixed picker with a normal workspace window.
+                        if open_workspace(runtime, &label, cx).is_err() {
+                            this.error = Some("Could not open the workspace window.".into());
+                            this.reveal(window, cx);
+                            cx.notify();
+                            return;
+                        }
                         if let Some(pending) = pending {
                             cx.global_mut::<Connections>()
                                 .managed
@@ -751,10 +800,12 @@ impl ConnectionWindow {
             return;
         }
         self.save_token = None;
+        self.editing_recent = None;
         self.ssh_host.update(cx, |input, cx| {
             input.set_value(recent.ssh_host.clone().unwrap_or_default(), cx)
         });
         if recent.saved_token
+            && recent.config.is_none()
             && (recent.ssh_host.is_some() || managed_server(&recent.address, cx).is_none())
         {
             self.edit_recent(&recent, window, cx);
@@ -854,6 +905,7 @@ impl ConnectionWindow {
     }
     fn edit_saved(&mut self, recent: &Recent, window: &mut Window, cx: &mut Context<Self>) {
         self.edit_recent(recent, window, cx);
+        self.editing_recent = (self.page == Page::Existing).then(|| recent.key());
         if self.page != Page::Existing || !recent.saved_token {
             return;
         }
@@ -935,6 +987,54 @@ impl ConnectionWindow {
             self.error = Some(credentials::forget_error());
         }
         cx.notify();
+    }
+    fn toggle_token_visibility(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.token.update(cx, |input, cx| {
+            input.set_secret_visible(!input.secret_visible(), cx);
+            input.focus_handle(cx).focus(window, cx);
+        });
+        cx.notify();
+    }
+    fn token_field(&self, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.theme();
+        let visible = self.token.read(cx).secret_visible();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().text_color(t.app.muted_fg).child("Token (optional)"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .max_w(px(420.))
+                    .child(self.token.clone())
+                    .child(
+                        crate::workspace::icon_button(
+                            "toggle-token-visibility",
+                            if visible { "Hide token" } else { "Show token" },
+                            if visible {
+                                crate::icon::Icon::EyeSlash
+                            } else {
+                                crate::icon::Icon::Eye
+                            },
+                            cx,
+                        )
+                        .debug_selector(|| "toggle-token-visibility".into())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_token_visibility(window, cx)
+                        }))
+                        .on_key_down(cx.listener(
+                            |this, event: &gpui::KeyDownEvent, window, cx| {
+                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                    cx.stop_propagation();
+                                    this.toggle_token_visibility(window, cx);
+                                }
+                            },
+                        )),
+                    ),
+            )
     }
     fn remember_control(&self, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.theme();
@@ -1772,7 +1872,7 @@ impl ConnectionWindow {
                             .flex_col()
                             .gap_2()
                             .child(field("Server URL", self.address.clone(), cx))
-                            .child(field("Token (optional)", self.token.clone(), cx))
+                            .child(self.token_field(cx))
                             .child(div().w_full().max_w(px(420.)).flex().items_center().justify_between()
                             .child(self.remember_control(cx))
                             .when_some(server::parse_connection(self.address.read(cx).value(), "").ok().and_then(|(a, _)| ssh::host(self.ssh_host.read(cx).value()).ok().map(|host| ssh::identity(&a, host.as_deref()))).filter(|address| cx.global::<Connections>().recent.iter().any(|r| r.key() == *address && r.saved_token)), |v, address| {
@@ -1807,7 +1907,7 @@ impl ConnectionWindow {
                         div()
                             .flex()
                             .justify_end()
-                            .child(self.submit_button("Connect", cx)),
+                            .child(self.submit_button(if self.editing_recent.is_some() { "Save and connect" } else { "Connect" }, cx)),
                     );
             }
         }
@@ -2336,6 +2436,141 @@ mod tests {
         let mut view = ConnectionWindow::new(window, cx);
         view.page = Page::Existing;
         view
+    }
+
+    fn example_recent(address: &str, token: &str) -> Recent {
+        let (address, config) = server::parse_connection(address, token).unwrap();
+        Recent {
+            label: address.clone(),
+            address,
+            config: Some(config),
+            saved_token: true,
+            ssh_host: None,
+            local_info: None,
+            local_id: None,
+        }
+    }
+
+    #[test]
+    fn edited_connection_replaces_old_identity_and_survives_restart() {
+        let old = example_recent("https://old.example/", "old-secret");
+        let mut edited = example_recent("https://new.example/prefix/", "new-secret");
+        edited.ssh_host = Some("research".into());
+        let items = updated_history(
+            vec![old.clone(), edited.clone()],
+            edited.clone(),
+            Some(&old.key()),
+        );
+        assert_eq!(items.len(), 1);
+        let dir = std::env::temp_dir().join(format!("ganymede-history-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("connections.json");
+        persist_history(&items, &path).unwrap();
+        let json = std::fs::read_to_string(&path).unwrap();
+        assert!(!json.contains("secret"));
+        let loaded = load_recent_from(&path);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].key(), edited.key());
+        assert!(loaded[0].saved_token);
+        assert!(loaded[0].config.is_none());
+        // A failed replacement must retain the existing history.
+        assert!(persist_history(&items, &path.join("invalid.json")).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), json);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn configured_server_does_not_replace_edited_credentials_on_startup() {
+        let edited = example_recent("https://example.test/", "new-secret");
+        let config = server::parse_connection(&edited.address, "old-secret")
+            .unwrap()
+            .1;
+        let mut items = vec![edited];
+        add_configured_recent(&mut items, &config);
+        assert_eq!(items.len(), 1);
+        assert!(items[0].saved_token);
+        let mut empty = vec![];
+        add_configured_recent(&mut empty, &config);
+        assert_eq!(empty.len(), 1);
+        assert!(!empty[0].saved_token);
+    }
+
+    #[gpui::test]
+    fn reconnect_uses_edited_session_token_before_older_saved_credentials(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}/", listener.local_addr().unwrap());
+        let (sent, received) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let mut bytes = [0; 1024];
+                let n = socket.read(&mut bytes).unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&bytes[..n]);
+            }
+            sent.send(
+                String::from_utf8(request)
+                    .unwrap()
+                    .to_lowercase()
+                    .contains("authorization: token edited-session-token\r\n"),
+            )
+            .unwrap();
+            // Avoid opening a workspace; the request itself proves credential precedence.
+            socket
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (view, cx) = cx.add_window_view(credential_form);
+        cx.update(|window, cx| {
+            cx.set_global(Runtime {
+                handle: runtime.handle().clone(),
+                config: Err("No configured server".into()),
+                kernel: "python3".into(),
+                tunnel: None,
+            });
+            view.update(cx, |view, cx| {
+                view.recent(example_recent(&address, "edited-session-token"), window, cx);
+            });
+        });
+        assert!(received.recv_timeout(Duration::from_secs(5)).unwrap());
+        server.join().unwrap();
+    }
+
+    #[gpui::test]
+    fn token_visibility_toggle_preserves_value_and_resets_for_another_connection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(credential_form);
+        view.update(cx, |view, cx| {
+            view.token
+                .update(cx, |input, cx| input.set_value("sample-token".into(), cx))
+        });
+        let bounds = cx.debug_bounds("toggle-token-visibility").unwrap();
+        cx.simulate_click(bounds.center(), Default::default());
+        view.read_with(cx, |view, cx| {
+            assert!(view.token.read(cx).secret_visible());
+            assert_eq!(view.token.read(cx).value(), "sample-token");
+        });
+        cx.simulate_click(bounds.center(), Default::default());
+        view.read_with(cx, |view, cx| {
+            assert!(!view.token.read(cx).secret_visible())
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.toggle_token_visibility(window, cx);
+                view.edit_recent(&example_recent("https://another.example/", ""), window, cx);
+                assert!(!view.token.read(cx).secret_visible());
+            })
+        });
     }
 
     #[gpui::test]

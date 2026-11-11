@@ -63,9 +63,16 @@ saved token cannot be loaded, the form turns remembering off and lets you enter
 the token manually. Turning remembering off does not delete an existing saved
 token; use **Forget token** for that.
 
+Use the eye icon beside the token field to show or hide it while editing. Tokens
+start hidden; opening another connection hides them again.
+
 Recent connections let you reopen a server. Their overflow menu offers **Edit connection…**
 to review or change the connection before opening it, and **Remove from recents**.
-Use **Forget token** in the connection form to remove a saved credential.
+Choose **Save and connect** to validate and save your edits. Changing the URL or
+SSH host replaces the original Recent entry after a successful connection. Storage
+failures keep the form open so you can retry. With Remember token off, an edited
+token is used for reconnects during this app session; an older saved token is not
+deleted or replaced. Use **Forget token** to remove that saved credential.
 
 ### Connect through SSH
 

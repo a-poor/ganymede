@@ -52,6 +52,8 @@ define_icons! {
     CaretDown => "regular/caret-down.svg",
     RunAll => "regular/fast-forward.svg",
 
+    Eye => "regular/eye.svg",
+    EyeSlash => "regular/eye-slash.svg",
     Info => "regular/info.svg",
     Check => "regular/check.svg",
     CheckCircle => "regular/check-circle.svg",
