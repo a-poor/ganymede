@@ -35,19 +35,22 @@ pub fn init(cx: &mut gpui::App) {
     } else {
         "ctrl-f"
     };
-    let modifier = if cfg!(target_os = "macos") {
-        "cmd"
-    } else {
-        "ctrl"
-    };
     cx.bind_keys([
         gpui::KeyBinding::new(
-            &format!("{modifier}-z"),
+            if cfg!(target_os = "macos") {
+                "cmd-z"
+            } else {
+                "ctrl-z"
+            },
             UndoStructure,
             Some("Notebook && !CodeCell"),
         ),
         gpui::KeyBinding::new(
-            &format!("{modifier}-shift-z"),
+            if cfg!(target_os = "macos") {
+                "cmd-shift-z"
+            } else {
+                "ctrl-shift-z"
+            },
             RedoStructure,
             Some("Notebook && !CodeCell"),
         ),
@@ -60,17 +63,29 @@ pub fn init(cx: &mut gpui::App) {
         gpui::KeyBinding::new("up", PreviousCell, Some("NotebookCell && !CodeCell")),
         gpui::KeyBinding::new("down", NextCell, Some("NotebookCell && !CodeCell")),
         gpui::KeyBinding::new(
-            &format!("{modifier}-c"),
+            if cfg!(target_os = "macos") {
+                "cmd-c"
+            } else {
+                "ctrl-c"
+            },
             CopyCells,
             Some("NotebookCell && !CodeCell"),
         ),
         gpui::KeyBinding::new(
-            &format!("{modifier}-x"),
+            if cfg!(target_os = "macos") {
+                "cmd-x"
+            } else {
+                "ctrl-x"
+            },
             CutCells,
             Some("NotebookCell && !CodeCell"),
         ),
         gpui::KeyBinding::new(
-            &format!("{modifier}-v"),
+            if cfg!(target_os = "macos") {
+                "cmd-v"
+            } else {
+                "ctrl-v"
+            },
             PasteCells,
             Some("NotebookCell && !CodeCell"),
         ),

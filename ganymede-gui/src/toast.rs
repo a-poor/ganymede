@@ -485,7 +485,7 @@ impl Render for ToastHost {
                         .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                             match event.keystroke.key.as_str() {
                                 "escape" => {
-                                    window.blur();
+                                    window.blur(cx);
                                     this.focused = false;
                                     cx.notify();
                                 }
@@ -595,12 +595,6 @@ struct SlidePosition {
     duration: Duration,
     child: gpui::AnyElement,
     position: Rc<RefCell<Option<PositionMotion>>>,
-}
-impl IntoElement for SlidePosition {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
 }
 impl gpui::Element for SlidePosition {
     type RequestLayoutState = ();

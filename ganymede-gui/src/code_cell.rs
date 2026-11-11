@@ -77,37 +77,99 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("tab", Tab, context),
         KeyBinding::new("shift-tab", Outdent, context),
     ]);
-    let word_modifier = if cfg!(target_os = "macos") {
-        "alt"
-    } else {
-        "ctrl"
-    };
     cx.bind_keys([
-        KeyBinding::new(&format!("{word_modifier}-left"), WordLeft, context),
-        KeyBinding::new(&format!("{word_modifier}-right"), WordRight, context),
         KeyBinding::new(
-            &format!("{word_modifier}-shift-left"),
+            if cfg!(target_os = "macos") {
+                "alt-left"
+            } else {
+                "ctrl-left"
+            },
+            WordLeft,
+            context,
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "alt-right"
+            } else {
+                "ctrl-right"
+            },
+            WordRight,
+            context,
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "alt-shift-left"
+            } else {
+                "ctrl-shift-left"
+            },
             SelectWordLeft,
             context,
         ),
         KeyBinding::new(
-            &format!("{word_modifier}-shift-right"),
+            if cfg!(target_os = "macos") {
+                "alt-shift-right"
+            } else {
+                "ctrl-shift-right"
+            },
             SelectWordRight,
             context,
         ),
     ]);
-    let modifier = if cfg!(target_os = "macos") {
-        "cmd"
-    } else {
-        "ctrl"
-    };
     cx.bind_keys([
-        KeyBinding::new(&format!("{modifier}-a"), SelectAll, context),
-        KeyBinding::new(&format!("{modifier}-c"), Copy, context),
-        KeyBinding::new(&format!("{modifier}-x"), Cut, context),
-        KeyBinding::new(&format!("{modifier}-v"), Paste, context),
-        KeyBinding::new(&format!("{modifier}-z"), Undo, context),
-        KeyBinding::new(&format!("{modifier}-shift-z"), Redo, context),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-a"
+            } else {
+                "ctrl-a"
+            },
+            SelectAll,
+            context,
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-c"
+            } else {
+                "ctrl-c"
+            },
+            Copy,
+            context,
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-x"
+            } else {
+                "ctrl-x"
+            },
+            Cut,
+            context,
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-v"
+            } else {
+                "ctrl-v"
+            },
+            Paste,
+            context,
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-z"
+            } else {
+                "ctrl-z"
+            },
+            Undo,
+            context,
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-shift-z"
+            } else {
+                "ctrl-shift-z"
+            },
+            Redo,
+            context,
+        ),
     ]);
     if cfg!(target_os = "macos") {
         cx.bind_keys([
@@ -1477,9 +1539,9 @@ impl Render for CodeCell {
 
         if self.filter_input {
             return div()
-                .on_mouse_down_out(cx.listener(|this, _, window, _| {
+                .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                     if !this.name_input && this.focus.is_focused(window) {
-                        window.blur();
+                        window.blur(cx);
                     }
                 }))
                 .relative()
@@ -1774,9 +1836,9 @@ impl Render for CodeCell {
                     }
                 },
             ))
-            .on_mouse_down_out(cx.listener(|this, _, window, _| {
+            .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                 if this.focus.is_focused(window) || this.cell_focus.is_focused(window) {
-                    window.blur();
+                    window.blur(cx);
                 }
             }))
             .on_mouse_down(
@@ -1949,13 +2011,6 @@ struct Prepaint {
     cursor: Option<PaintQuad>,
 }
 
-impl IntoElement for CellText {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 impl Element for CellText {
     type RequestLayoutState = Rc<RefCell<Rc<Layout>>>;
     type PrepaintState = Prepaint;
@@ -2063,6 +2118,7 @@ impl Element for CellText {
                                 .wrap_line(
                                     &[gpui::LineFragment::text(logical)],
                                     (width - gutter - px(4.)).max(px(1.)),
+                                    gpui::IndentAdjustment::NoIndent,
                                 )
                                 .map(|boundary| boundary.ix),
                         );

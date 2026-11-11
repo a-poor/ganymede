@@ -264,7 +264,7 @@ impl Workspace {
 
     fn server_action(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.server.menu = false;
-        window.blur();
+        window.blur(cx);
         match index {
             0 => self.check_server(true, cx),
             1 => {

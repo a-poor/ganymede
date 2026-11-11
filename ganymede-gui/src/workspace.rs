@@ -410,7 +410,7 @@ impl Workspace {
         self.filter_requested.clear();
         self.filter_input
             .update(cx, |input, cx| input.set_text(String::new(), cx));
-        window.blur();
+        window.blur(cx);
         cx.notify();
     }
     fn scan_filter_folders(&mut self, cx: &mut Context<Self>) {

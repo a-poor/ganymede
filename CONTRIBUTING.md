@@ -5,8 +5,9 @@ are welcome. Please discuss larger features in an issue before implementing them
 
 ## Development setup
 
-The supported development and release target is macOS 15 or later. Install Xcode
-and its command-line tools, Rust through rustup, and the Metal compiler toolchain.
+The supported development and release target is macOS 15 or later. Install Xcode 26 or newer
+with macOS SDK 26 or newer, its command-line tools, Rust through rustup, and the
+Metal compiler toolchain.
 The repository pins Rust in `rust-toolchain.toml`; rustup selects it automatically.
 CI in `.github/workflows/ci.yml` is the reference build configuration.
 

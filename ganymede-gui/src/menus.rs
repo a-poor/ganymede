@@ -86,21 +86,72 @@ pub fn init(cx: &mut App) {
             w.update(cx, |_, w, _| w.toggle_fullscreen()).ok();
         }
     });
-    let modifier = if cfg!(target_os = "macos") {
-        "cmd"
-    } else {
-        "ctrl"
-    };
     cx.bind_keys([
-        KeyBinding::new(&format!("{modifier}-,"), OpenSettings, None),
-        KeyBinding::new(&format!("{modifier}-h"), Hide, None),
-        KeyBinding::new(&format!("{modifier}-alt-h"), HideOthers, None),
-        KeyBinding::new(&format!("{modifier}-m"), Minimize, None),
-        KeyBinding::new(&format!("{modifier}-b"), ToggleSidebar, Some("Workspace")),
-        KeyBinding::new(&format!("{modifier}-shift-s"), SaveAs, Some("Workspace")),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-,"
+            } else {
+                "ctrl-,"
+            },
+            OpenSettings,
+            None,
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-h"
+            } else {
+                "ctrl-h"
+            },
+            Hide,
+            None,
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-alt-h"
+            } else {
+                "ctrl-alt-h"
+            },
+            HideOthers,
+            None,
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-m"
+            } else {
+                "ctrl-m"
+            },
+            Minimize,
+            None,
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-b"
+            } else {
+                "ctrl-b"
+            },
+            ToggleSidebar,
+            Some("Workspace"),
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-shift-s"
+            } else {
+                "ctrl-shift-s"
+            },
+            SaveAs,
+            Some("Workspace"),
+        ),
         KeyBinding::new("ctrl-tab", NextTab, Some("Workspace")),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some("Workspace")),
-        KeyBinding::new(&format!("{modifier}-enter"), RunCell, Some("Notebook")),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-enter"
+            } else {
+                "ctrl-enter"
+            },
+            RunCell,
+            Some("Notebook"),
+        ),
         KeyBinding::new("alt-enter", RunInsert, Some("Notebook")),
     ]);
     if cfg!(target_os = "linux") {

@@ -741,7 +741,7 @@ impl Workspace {
                                     match event.keystroke.key.as_str() {
                                         "escape" | "tab" => {
                                             this.file_menu = None;
-                                            window.blur();
+                                            window.blur(cx);
                                         }
                                         "down" => {
                                             menu.selected = Some(

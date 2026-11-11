@@ -2,7 +2,7 @@
 //! the visible rows. Preserve its focus dispatch, but clip that extra rendering.
 use gpui::{
     AnyElement, App, Bounds, ContentMask, Element, ElementId, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, Pixels, Window,
+    LayoutId, Pixels, Window,
 };
 use std::{cell::Cell, rc::Rc};
 
@@ -37,12 +37,6 @@ pub(super) struct ListRow {
     pub order: Rc<RowOrder>,
     pub child: AnyElement,
     pub scroll: gpui::ListState,
-}
-impl IntoElement for ListRow {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
 }
 impl Element for ListRow {
     type RequestLayoutState = ();

@@ -166,7 +166,7 @@ impl WindowMenu {
                             binding
                                 .keystrokes()
                                 .iter()
-                                .map(ToString::to_string)
+                                .map(|key| key.unparse(cx.platform_info().os))
                                 .collect::<Vec<_>>()
                                 .join(" ")
                         })
@@ -188,7 +188,7 @@ impl WindowMenu {
             if let Some(focus) = self.return_focus.take() {
                 focus.focus(window, cx);
             } else {
-                window.blur();
+                window.blur(cx);
             }
         }
         cx.notify();
