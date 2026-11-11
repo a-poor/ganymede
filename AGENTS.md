@@ -31,6 +31,8 @@ Use rustfmt defaults, four-space indentation, `snake_case` functions/modules, an
 
 In GPUI render code, obtain colors, fonts, and radii from `cx.theme()`. Consult relevant `.agents/skills/gpui*` instructions and verify APIs against the pinned source.
 
+When work reveals an error, omission, or reusable improvement in a user-maintained skill, verify it against the pinned source or a reproduction and check the upstream skill and existing issues. Create an issue when authorized, or suggest one with concrete evidence and the proposed correction. The `gpui`, `gpui-editor`, and `gpui-style` skills come from `a-poor/skills` (https://github.com/a-poor/skills); use `skills-lock.json` to identify the source of other skills. Include the affected skill/reference, relevant version or revision, observed behavior, and validation in reports. Avoid duplicate issues and keep credentials and private application data out of examples.
+
 Prefer compact, information-dense UI: small icons and text, restrained padding, and tight row spacing. Avoid oversized cards and controls. Settings selectors should fit on a single line where practical.
 
 ## Testing Guidelines
