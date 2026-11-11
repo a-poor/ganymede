@@ -1081,6 +1081,10 @@ impl Workspace {
             .child(
                 div()
                     .id("workspace-tabs")
+                    // Native window dragging uses hit testing before mouse handlers.
+                    // Occlude the titlebar behind the strip, retaining its own scrolling.
+                    .occlude()
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .flex()
                     .min_w_0()
                     .overflow_x_scroll()
