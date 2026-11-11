@@ -26,7 +26,10 @@ gpui::actions!(
         CopyCells,
         CutCells,
         PasteCells,
-        DeleteCells
+        DeleteCells,
+        ChangeCellsToCode,
+        ChangeCellsToMarkdown,
+        ChangeCellsToRaw
     ]
 );
 pub fn init(cx: &mut gpui::App) {
@@ -36,6 +39,9 @@ pub fn init(cx: &mut gpui::App) {
         "ctrl-f"
     };
     cx.bind_keys([
+        gpui::KeyBinding::new("y", ChangeCellsToCode, Some("NotebookCommand")),
+        gpui::KeyBinding::new("m", ChangeCellsToMarkdown, Some("NotebookCommand")),
+        gpui::KeyBinding::new("r", ChangeCellsToRaw, Some("NotebookCommand")),
         gpui::KeyBinding::new(
             if cfg!(target_os = "macos") {
                 "cmd-z"
@@ -1153,6 +1159,10 @@ impl Notebook {
         if self.selection_running() {
             return;
         }
+        let command_mode = self.cells[self.selected]
+            .read(cx)
+            .list_focus_handle()
+            .is_focused(window);
         let range = self.selected_range();
         if self.cells[range.clone()]
             .iter()
@@ -1168,7 +1178,14 @@ impl Notebook {
             self.start_next_run(cx);
         }
         self.type_menu_open = false;
-        self.focus_selected(window, cx);
+        if command_mode {
+            self.cells[self.selected]
+                .read(cx)
+                .list_focus_handle()
+                .focus(window, cx);
+        } else {
+            self.focus_selected(window, cx);
+        }
         cx.notify();
     }
 
@@ -1178,6 +1195,7 @@ impl Notebook {
         let t = cx.theme();
         let kinds = [CellKind::Code, CellKind::Markdown, CellKind::Raw];
         let labels = ["Code", "Markdown", "Raw"];
+        let shortcuts = ["Y", "M", "R"];
         let selected = kinds
             .iter()
             .position(|kind| *kind == self.cells[self.selected].read(cx).kind())
@@ -1188,6 +1206,14 @@ impl Notebook {
             .child(
                 div()
                     .id("cell-type")
+                    .tooltip(|_, cx| {
+                        cx.new(|_| {
+                            crate::workspace::Tip(
+                                "Change selected cells: Escape, then Y (Code), M (Markdown), or R (Raw)",
+                            )
+                        })
+                        .into()
+                    })
                     .track_focus(&self.type_focus)
                     .tab_index(0)
                     .h(px(26.))
@@ -1296,6 +1322,8 @@ impl Notebook {
                                             ""
                                         }))
                                         .child(labels[index])
+                                        .child(div().flex_1())
+                                        .child(div().text_color(t.popover.muted_fg).child(shortcuts[index]))
                                 })),
                         ),
                 ))
@@ -1560,6 +1588,15 @@ impl Render for Notebook {
             .flex()
             .flex_col()
             .key_context("Notebook")
+            .on_action(cx.listener(|this, _: &ChangeCellsToCode, window, cx| {
+                this.choose_cell_type(CellKind::Code, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ChangeCellsToMarkdown, window, cx| {
+                this.choose_cell_type(CellKind::Markdown, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ChangeCellsToRaw, window, cx| {
+                this.choose_cell_type(CellKind::Raw, window, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &ExtendCellsUp, w, cx| {
                     this.navigate_cells(false, true, w, cx)

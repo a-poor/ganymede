@@ -629,6 +629,80 @@ impl Render for StdinPrompt {
 mod tests {
     use super::*;
     #[gpui::test]
+    fn cell_type_shortcuts_type_into_kernel_input(cx: &mut gpui::TestAppContext) {
+        struct Root(Entity<CodeCell>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .key_context("Notebook")
+                    .on_action(|_: &crate::notebook::ChangeCellsToCode, _, _| {
+                        panic!("typed Y changed cell type")
+                    })
+                    .on_action(|_: &crate::notebook::ChangeCellsToMarkdown, _, _| {
+                        panic!("typed M changed cell type")
+                    })
+                    .on_action(|_: &crate::notebook::ChangeCellsToRaw, _, _| {
+                        panic!("typed R changed cell type")
+                    })
+                    .child(self.0.clone())
+            }
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let cx = cx.add_empty_window();
+        let prompt = cx.update(|window, cx| {
+            cx.set_global(
+                crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+            );
+            super::super::init(cx);
+            crate::notebook::init(cx);
+            let config = ganymede_core::jupyter::ServerConfig::new("http://127.0.0.1:9").unwrap();
+            let controller = ganymede_core::notebook::NotebookController::new(
+                config.clone(),
+                "input.ipynb",
+                ganymede_core::notebook::NotebookDocument::new(),
+            )
+            .unwrap();
+            let cell_id = controller
+                .insert_cell(0, ganymede_core::notebook::CellKind::Code, "input()")
+                .unwrap();
+            let session = crate::execution::Session::from_controller(
+                controller,
+                &crate::execution::Runtime {
+                    tunnel: None,
+                    handle: runtime.handle().clone(),
+                    config: Ok(config),
+                    kernel: "python3".into(),
+                },
+            );
+            let cell = cx.new(|cx| CodeCell::new(window, cx));
+            let parent = cell.read(cx).list_focus_handle();
+            parent.focus(window, cx);
+            let prompt = cx.new(|cx| {
+                StdinPrompt::new(
+                    ganymede_core::notebook::PendingInput {
+                        id: "request".into(),
+                        cell_id,
+                        prompt: "Input:".into(),
+                        password: false,
+                    },
+                    session,
+                    parent,
+                    cx,
+                )
+            });
+            cell.update(cx, |cell, _| cell.input_prompt = Some(prompt.clone()));
+            window.replace_root(cx, |_, _| Root(cell));
+            prompt
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("m y r");
+        cx.update(|_, cx| assert_eq!(prompt.read(cx).buffer.text, "myr"));
+    }
+
+    #[gpui::test]
     fn password_masks_unicode_geometry_accessibility_and_clipboard(cx: &mut gpui::TestAppContext) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let cx = cx.add_empty_window();

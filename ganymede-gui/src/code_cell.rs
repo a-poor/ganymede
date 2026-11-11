@@ -1823,7 +1823,13 @@ impl Render for CodeCell {
         div()
             .id("notebook-cell")
             .group("notebook-cell")
-            .key_context("NotebookCell")
+            // Single-letter notebook commands only match the cell itself,
+            // never its editor, output controls, or kernel input descendants.
+            .key_context(if self.cell_focus.is_focused(window) {
+                "NotebookCell NotebookCommand"
+            } else {
+                "NotebookCell"
+            })
             .track_focus(&self.cell_focus)
             .w_full()
             .min_w_0()

@@ -92,6 +92,10 @@ Choose a kernel using the notebook's kernel control.
   Enter to edit and Shift+Enter to run.
 - Double-click a Markdown cell, or select it and press **Enter**, to edit it.
   **Shift+Enter** renders the Markdown again.
+- Press **Escape** to select a cell, then **M** for Markdown, **Y** for code, or
+  **R** for raw. These commands change all selected cells as one undoable action
+  and keep cell selection focused; press **Enter** to resume editing. The keys
+  remain ordinary text in editors, text fields, and kernel input prompts.
 - **Command+S** saves. Autosave is on by default and can be changed in Settings.
 - **Command+F** searches cell source. **Enter** and **Shift+Enter** move between
   matches; **Escape** closes search. Outputs are not searched.

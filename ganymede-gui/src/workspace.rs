@@ -2139,7 +2139,7 @@ pub fn icon_button(
         .tooltip(move |_, cx| cx.new(|_| Tip(label)).into())
         .child(icon.svg().size(px(14.)).text_color(t.app.fg))
 }
-struct Tip(&'static str);
+pub(crate) struct Tip(pub(crate) &'static str);
 impl Render for Tip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme();

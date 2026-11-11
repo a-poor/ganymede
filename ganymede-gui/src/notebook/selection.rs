@@ -264,6 +264,170 @@ mod tests {
     }
 
     #[gpui::test]
+    fn cell_type_shortcuts_preserve_command_focus_and_group_history(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let cx = cx.add_empty_window();
+        let book = fixture(cx, &runtime);
+        struct Root(Entity<Notebook>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.0.clone()
+            }
+        }
+        cx.update(|window, cx| {
+            window.replace_root(cx, |_, _| Root(book.clone()));
+            book.update(cx, |book, cx| book.extend_selection(0, window, cx));
+        });
+        cx.run_until_parked();
+        let original = cx.update(|_, cx| book.read(cx).session.document().to_json());
+        for (key, kind) in [
+            ("m", CellKind::Markdown),
+            ("r", CellKind::Raw),
+            ("y", CellKind::Code),
+        ] {
+            cx.simulate_keystrokes(key);
+            cx.update(|window, cx| {
+                let book = book.read(cx);
+                assert_eq!(book.cells[0].read(cx).kind(), kind);
+                assert_eq!(book.cells[0].read(cx).text(), "a = 1");
+                assert!(
+                    book.cells[0]
+                        .read(cx)
+                        .list_focus_handle()
+                        .is_focused(window)
+                );
+                assert!(book.session.document().is_dirty());
+                assert!(book.session.document().cells()[0].outputs().is_empty());
+                assert_eq!(
+                    book.session.document().to_json()["cells"][0]["metadata"],
+                    original["cells"][0]["metadata"]
+                );
+            });
+        }
+        // A repeated type is a no-op, including its undo history.
+        cx.simulate_keystrokes("y");
+        cx.update(|_, cx| assert_eq!(book.read(cx).undo_structure.len(), 3));
+        for _ in 0..3 {
+            cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+                "cmd-z"
+            } else {
+                "ctrl-z"
+            });
+        }
+        cx.update(|window, cx| {
+            book.update(cx, |book, cx| {
+                assert_eq!(book.session.document().to_json(), original);
+                book.select(2, cx);
+                book.extend_selection(0, window, cx);
+            });
+        });
+        cx.simulate_keystrokes("y");
+        cx.update(|window, cx| {
+            let book = book.read(cx);
+            assert_eq!(book.selected_range(), 0..3);
+            assert_eq!(book.undo_structure.len(), 1);
+            assert!(
+                book.cells[..3]
+                    .iter()
+                    .all(|cell| cell.read(cx).kind() == CellKind::Code)
+            );
+            assert!(
+                book.cells[0]
+                    .read(cx)
+                    .list_focus_handle()
+                    .is_focused(window)
+            );
+        });
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-z"
+        } else {
+            "ctrl-z"
+        });
+        cx.update(|_, cx| assert_eq!(book.read(cx).session.document().to_json(), original));
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-shift-z"
+        } else {
+            "ctrl-shift-z"
+        });
+        cx.update(|_, cx| {
+            assert!(
+                book.read(cx).cells[..3]
+                    .iter()
+                    .all(|cell| cell.read(cx).kind() == CellKind::Code)
+            )
+        });
+        cx.update(|_, cx| book.update(cx, |book, _| book.runs.active = Some(1)));
+        cx.simulate_keystrokes("m");
+        cx.update(|_, cx| {
+            let book = book.read(cx);
+            assert_eq!(book.undo_structure.len(), 1);
+            assert!(
+                book.cells[..3]
+                    .iter()
+                    .all(|cell| cell.read(cx).kind() == CellKind::Code)
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn cell_type_shortcuts_do_not_activate_in_editors_or_find(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let cx = cx.add_empty_window();
+        let book = fixture(cx, &runtime);
+        struct Root(Entity<Notebook>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.0.clone()
+            }
+        }
+        cx.update(|window, cx| {
+            window.replace_root(cx, |_, _| Root(book.clone()));
+        });
+        for index in 0..3 {
+            let (kind, source) = cx.update(|window, cx| {
+                book.update(cx, |book, cx| {
+                    book.select(index, cx);
+                    book.focus_selected(window, cx);
+                    let cell = book.cells[index].read(cx);
+                    (cell.kind(), cell.text().to_owned())
+                })
+            });
+            if kind == CellKind::Markdown {
+                cx.simulate_keystrokes("enter");
+            }
+            cx.simulate_keystrokes("m y r");
+            cx.update(|_, cx| {
+                let book = book.read(cx);
+                assert_eq!(book.cells[index].read(cx).kind(), kind);
+                assert_eq!(book.cells[index].read(cx).text().len(), source.len() + 3);
+                assert!(book.undo_structure.is_empty());
+            });
+        }
+        cx.update(|window, cx| book.update(cx, |book, cx| book.open_find(window, cx)));
+        cx.simulate_keystrokes("m y r");
+        cx.update(|_, cx| {
+            let book = book.read(cx);
+            assert_eq!(book.find_input.read(cx).text(), "myr");
+            assert!(book.undo_structure.is_empty());
+        });
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| {
+            book.update(cx, |book, cx| {
+                book.close_find(window, cx);
+                book.focus_selected(window, cx);
+            })
+        });
+        cx.simulate_keystrokes("escape m");
+        cx.update(|_, cx| assert_eq!(book.read(cx).cells[2].read(cx).kind(), CellKind::Markdown));
+    }
+
+    #[gpui::test]
     fn range_edits_preserve_payloads_and_restore_selection_in_one_undo(
         cx: &mut gpui::TestAppContext,
     ) {
