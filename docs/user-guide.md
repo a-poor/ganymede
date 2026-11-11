@@ -124,6 +124,20 @@ Images, tables, Markdown, equations, and styled text outputs render natively.
 Interactive Jupyter widgets and browser-executed HTML or JavaScript are not
 supported. Unsupported output data is retained when saving the notebook.
 
+Drag across output text to select it, then use **Cmd+C** (**Ctrl+C** on Linux)
+or Edit → Copy. **Cmd+A / Ctrl+A** selects the text in that cell's outputs;
+**Escape** clears the selection. Shift-click extends it. Selection works across
+wrapped lines and rendered paragraphs, code blocks, and tables; copied tables
+use tabs between columns and newlines between rows. Scroll with the wheel or
+trackpad while dragging to reach more of a long output. Output text is read-only.
+
+Appending streamed text preserves the selection. Replacing or clearing existing
+output text resets it. Selection stays within one cell's outputs. Use
+**Cmd-click / Ctrl-click** to open links in rendered output without selecting text.
+Images and rendered equations offer **Copy text representation** when their MIME
+bundle contains plain text or LaTeX; otherwise a label indicates that no text
+representation is available.
+
 ## Manage files
 
 The Files sidebar browses the connected server's files. Open text files directly,

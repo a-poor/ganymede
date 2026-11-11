@@ -11,6 +11,7 @@ pub mod icon;
 mod image_loader;
 mod menus;
 mod notebook;
+mod output_selection;
 mod preferences;
 mod rich;
 mod settings;
@@ -497,6 +498,7 @@ fn main() {
         confirm::init(cx);
         assets::register_fonts(cx).expect("failed to register embedded fonts");
         code_cell::init(cx);
+        output_selection::init(cx);
         notebook::init(cx);
         let quit_key = if cfg!(target_os = "macos") {
             "cmd-q"

@@ -69,12 +69,17 @@ impl Inline {
             })
             .collect();
     }
-    fn render(&self, id: usize, cx: &App) -> AnyElement {
+    fn render(
+        &self,
+        id: usize,
+        cx: &App,
+        selection: Option<&crate::output_selection::Selection>,
+    ) -> AnyElement {
         let t = cx.theme();
         // Display-only spacing keeps source and saved notebook content untouched.
         let mut display = Inline::default();
         for (range, style) in &self.spans {
-            if style.code {
+            if style.code && selection.is_none() {
                 display.push(
                     &format!("\u{202f}{}\u{202f}", &self.text[range.clone()]),
                     style,
@@ -133,15 +138,19 @@ impl Inline {
             .iter()
             .filter_map(|(r, s)| s.link.as_ref().map(|u| (r.clone(), u.clone())))
             .collect();
-        let text = InteractiveText::new(("rich-inline", id), text)
-            .on_click(
-                links.iter().map(|(r, _)| r.clone()).collect(),
-                move |i, _, cx| {
-                    cx.stop_propagation();
-                    cx.open_url(&links[i].1);
-                },
-            )
-            .into_any_element();
+        let text = if let Some(selection) = selection {
+            selection.linked_text(text, links, cx)
+        } else {
+            InteractiveText::new(("rich-inline", id), text)
+                .on_click(
+                    links.iter().map(|(r, _)| r.clone()).collect(),
+                    move |i, _, cx| {
+                        cx.stop_propagation();
+                        cx.open_url(&links[i].1);
+                    },
+                )
+                .into_any_element()
+        };
         div()
             .relative()
             .when(has_code, |v| v.py(px(2.)))
@@ -205,6 +214,11 @@ pub enum Block {
 pub struct Rich {
     blocks: Vec<Block>,
     prose: bool,
+    plain_suffix: Option<&'static str>,
+}
+
+pub fn plain_text(source: &str) -> String {
+    ansi(source).text
 }
 
 pub fn mime_text(value: &Value) -> Option<String> {
@@ -266,6 +280,7 @@ impl Rich {
                 return Self {
                     blocks: vec![Block::Image(image)],
                     prose: false,
+                    plain_suffix: None,
                 };
             }
             if let Some(html) = data
@@ -282,6 +297,7 @@ impl Rich {
                 return Self {
                     blocks: vec![math(&latex)],
                     prose: true,
+                    plain_suffix: None,
                 };
             }
             if let Some(md) = data
@@ -294,6 +310,7 @@ impl Rich {
         }
         Self {
             prose: false,
+            plain_suffix: Some(if text.ends_with('\n') { "\n" } else { "" }),
             blocks: vec![Block::Text(
                 ansi(text.strip_suffix('\n').unwrap_or(text)),
                 0,
@@ -305,6 +322,7 @@ impl Rich {
             return Self {
                 blocks: vec![Block::Code(source.to_owned())],
                 prose: false,
+                plain_suffix: None,
             };
         }
         let options = pulldown_cmark::Options::ENABLE_TABLES
@@ -330,6 +348,7 @@ impl Rich {
         Self {
             blocks,
             prose: true,
+            plain_suffix: None,
         }
     }
     pub fn image_sources(&self) -> impl Iterator<Item = &str> {
@@ -343,6 +362,46 @@ impl Rich {
         _window: &Window,
         cx: &App,
         images: &crate::image_loader::Images,
+    ) -> AnyElement {
+        self.render_selectable(_window, cx, images, None)
+    }
+    pub fn selection_pieces(&self) -> Vec<(String, &'static str)> {
+        let mut pieces = Vec::new();
+        for block in &self.blocks {
+            match block {
+                Block::Text(text, _) => {
+                    pieces.push((text.text.clone(), self.plain_suffix.unwrap_or("\n")))
+                }
+                Block::Code(text) => pieces.push((text.clone(), "\n")),
+                Block::Table(rows) => {
+                    for row in rows {
+                        for (col, (text, _)) in row.iter().enumerate() {
+                            pieces.push((
+                                text.clone(),
+                                if col + 1 == row.len() { "\n" } else { "\t" },
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        pieces
+    }
+    pub fn has_nontext(&self) -> bool {
+        self.blocks.iter().any(|b| {
+            matches!(
+                b,
+                Block::Image(_) | Block::ExternalImage { .. } | Block::Math(_)
+            )
+        })
+    }
+    pub fn render_selectable(
+        &self,
+        _window: &Window,
+        cx: &App,
+        images: &crate::image_loader::Images,
+        selection: Option<&crate::output_selection::Selection>,
     ) -> AnyElement {
         let t = cx.theme();
         div()
@@ -368,7 +427,7 @@ impl Rich {
                                     t.font.base
                                 })
                         })
-                        .child(text.render(id, cx))
+                        .child(text.render(id, cx, selection))
                         .into_any_element(),
                     Block::Code(text) => div()
                         .id(("rich-code", id))
@@ -380,7 +439,10 @@ impl Rich {
                         .rounded(t.radius.sm())
                         .font_family(t.font.mono.clone())
                         .text_size(t.font.code)
-                        .child(text.clone())
+                        .child(match selection {
+                            Some(selection) => selection.text(StyledText::new(text.clone()), cx),
+                            None => text.clone().into_any_element(),
+                        })
                         .into_any_element(),
                     Block::ExternalImage { source, alt } => match images.get(source) {
                         Some(Some(Ok(image))) => img(image.clone())
@@ -472,7 +534,11 @@ impl Rich {
                                                     .bg(t.card.bg)
                                                     .text_color(t.card.fg)
                                             })
-                                            .child(text.clone())
+                                            .child(match selection {
+                                                Some(selection) => selection
+                                                    .text(StyledText::new(text.clone()), cx),
+                                                None => text.clone().into_any_element(),
+                                            })
                                     },
                                 ))
                             }))

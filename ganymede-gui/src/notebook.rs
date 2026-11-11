@@ -49,7 +49,7 @@ pub fn init(cx: &mut gpui::App) {
                 "ctrl-z"
             },
             UndoStructure,
-            Some("Notebook && !CodeCell"),
+            Some("Notebook && !CodeCell && !OutputText"),
         ),
         gpui::KeyBinding::new(
             if cfg!(target_os = "macos") {
@@ -58,16 +58,28 @@ pub fn init(cx: &mut gpui::App) {
                 "ctrl-shift-z"
             },
             RedoStructure,
-            Some("Notebook && !CodeCell"),
+            Some("Notebook && !CodeCell && !OutputText"),
         ),
-        gpui::KeyBinding::new("shift-up", ExtendCellsUp, Some("NotebookCell && !CodeCell")),
+        gpui::KeyBinding::new(
+            "shift-up",
+            ExtendCellsUp,
+            Some("NotebookCell && !CodeCell && !OutputText"),
+        ),
         gpui::KeyBinding::new(
             "shift-down",
             ExtendCellsDown,
-            Some("NotebookCell && !CodeCell"),
+            Some("NotebookCell && !CodeCell && !OutputText"),
         ),
-        gpui::KeyBinding::new("up", PreviousCell, Some("NotebookCell && !CodeCell")),
-        gpui::KeyBinding::new("down", NextCell, Some("NotebookCell && !CodeCell")),
+        gpui::KeyBinding::new(
+            "up",
+            PreviousCell,
+            Some("NotebookCell && !CodeCell && !OutputText"),
+        ),
+        gpui::KeyBinding::new(
+            "down",
+            NextCell,
+            Some("NotebookCell && !CodeCell && !OutputText"),
+        ),
         gpui::KeyBinding::new(
             if cfg!(target_os = "macos") {
                 "cmd-c"
@@ -75,7 +87,7 @@ pub fn init(cx: &mut gpui::App) {
                 "ctrl-c"
             },
             CopyCells,
-            Some("NotebookCell && !CodeCell"),
+            Some("NotebookCell && !CodeCell && !OutputText"),
         ),
         gpui::KeyBinding::new(
             if cfg!(target_os = "macos") {
@@ -84,7 +96,7 @@ pub fn init(cx: &mut gpui::App) {
                 "ctrl-x"
             },
             CutCells,
-            Some("NotebookCell && !CodeCell"),
+            Some("NotebookCell && !CodeCell && !OutputText"),
         ),
         gpui::KeyBinding::new(
             if cfg!(target_os = "macos") {
@@ -93,12 +105,24 @@ pub fn init(cx: &mut gpui::App) {
                 "ctrl-v"
             },
             PasteCells,
-            Some("NotebookCell && !CodeCell"),
+            Some("NotebookCell && !CodeCell && !OutputText"),
         ),
-        gpui::KeyBinding::new("backspace", DeleteCells, Some("NotebookCell && !CodeCell")),
-        gpui::KeyBinding::new("delete", DeleteCells, Some("NotebookCell && !CodeCell")),
+        gpui::KeyBinding::new(
+            "backspace",
+            DeleteCells,
+            Some("NotebookCell && !CodeCell && !OutputText"),
+        ),
+        gpui::KeyBinding::new(
+            "delete",
+            DeleteCells,
+            Some("NotebookCell && !CodeCell && !OutputText"),
+        ),
         gpui::KeyBinding::new(key, FindNotebook, Some("Notebook")),
-        gpui::KeyBinding::new("escape", CloseFind, Some("Notebook && !CodeCell")),
+        gpui::KeyBinding::new(
+            "escape",
+            CloseFind,
+            Some("Notebook && !CodeCell && !OutputText"),
+        ),
     ]);
 }
 

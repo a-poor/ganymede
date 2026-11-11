@@ -54,7 +54,11 @@ actions!(
 pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("escape", SelectCell, Some("CodeCell")),
-        KeyBinding::new("enter", EditCell, Some("NotebookCell && !CodeCell")),
+        KeyBinding::new(
+            "enter",
+            EditCell,
+            Some("NotebookCell && !CodeCell && !OutputText"),
+        ),
         KeyBinding::new("shift-enter", RunAndAdvance, Some("NotebookCell")),
     ]);
     let context = Some("CodeCell");
@@ -427,6 +431,7 @@ pub struct CodeCell {
     queued: bool,
     output: Vec<crate::execution::OutputBlock>,
     rich_output: Vec<crate::rich::Rich>,
+    output_selection: crate::output_selection::Selection,
     markdown_preview: Option<crate::rich::Rich>,
     input_prompt: Option<Entity<stdin_prompt::StdinPrompt>>,
     input_return_focus: Option<FocusHandle>,
@@ -458,6 +463,11 @@ pub struct CodeCell {
 }
 
 impl CodeCell {
+    #[cfg(test)]
+    pub(crate) fn output_position(&self, index: usize) -> Point<Pixels> {
+        self.output_selection.position_for_index(index)
+    }
+
     pub fn view_offset(&self) -> (f32, f32) {
         let offset = self.scroll.offset();
         (offset.x.into(), offset.y.into())
@@ -512,6 +522,7 @@ impl CodeCell {
             queued: false,
             output: Vec::new(),
             rich_output: Vec::new(),
+            output_selection: crate::output_selection::Selection::new(cx),
             markdown_preview: None,
             input_prompt: None,
             input_return_focus: None,
@@ -1309,6 +1320,12 @@ impl Render for CodeCell {
             self.cell_focus.focus(window, cx);
         }
         self.load_images(cx);
+        self.output_selection.prepare(
+            self.rich_output
+                .iter()
+                .flat_map(|rich| rich.selection_pieces())
+                .collect(),
+        );
         let theme = cx.theme();
         let surface = theme.card;
         let prompt = match self.running_frame {
@@ -1859,6 +1876,7 @@ impl Render for CodeCell {
                     if event.button == MouseButton::Left
                         && event.modifiers.shift
                         && !this.focus.is_focused(window)
+                        && !this.output_selection.contains(event.position)
                     {
                         cx.emit(CellEvent::ExtendSelection);
                         cx.stop_propagation();
@@ -1903,7 +1921,7 @@ impl Render for CodeCell {
                                     bar.bg(surface.primary).text_color(surface.primary_fg)
                                 }),
                         )
-                        .child(div().flex_1().min_w_0().flex().flex_col().children(
+                        .child(self.output_selection.wrap(div().flex_1().min_w_0().flex().flex_col().children(
                             self.output.iter().enumerate().map(|(index, output)| {
                                 div()
                                     .w_full()
@@ -1939,14 +1957,30 @@ impl Render for CodeCell {
                                             .overflow_x_scroll()
                                             .px(px(13.))
                                             .text_color(theme.app.fg)
-                                            .child(self.rich_output[index].render(
+                                            .child(self.rich_output[index].render_selectable(
                                                 window,
                                                 cx,
                                                 &self.images,
-                                            )),
+                                                Some(&self.output_selection),
+                                            ))
+                                            .when(self.rich_output[index].has_nontext(), |view| {
+                                                let fallback = output.data.as_ref().and_then(|data| {
+                                                    ["text/plain", "text/latex"].iter().find_map(|mime| data.get(*mime).and_then(crate::rich::mime_text))
+                                                }).map(|text| crate::rich::plain_text(&text));
+                                                let available = fallback.is_some();
+                                                view.child(div().id(("copy-output-fallback", index))
+                                                    .text_size(theme.font.sm).text_color(theme.app.muted_fg)
+                                                    .when(available, |view| view.cursor_pointer())
+                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                                    .on_click(move |_, _, cx| {
+                                                        if let Some(text) = &fallback { cx.write_to_clipboard(ClipboardItem::new_string(text.clone())); }
+                                                        cx.stop_propagation();
+                                                    })
+                                                    .child(if available { "Copy text representation" } else { "No text representation available" }))
+                                            }),
                                     )
                             }),
-                        )),
+                        ))),
                 )
             })
             .when_some(self.input_prompt.as_ref(), |cell, prompt| {
@@ -2438,6 +2472,59 @@ impl Element for CellText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn output_focus_copies_without_editing_or_running_notebook_commands(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let window = cx.update(|cx| {
+            cx.set_global(
+                crate::theme::ThemeSpec::light().resolve(&crate::theme::Derivation::default()),
+            );
+            init(cx);
+            crate::output_selection::init(cx);
+            cx.open_window(Default::default(), |window, cx| {
+                cx.new(|cx| {
+                    let mut cell = CodeCell::new(window, cx);
+                    cell.buffer.text = "original source".into();
+                    cell.set_output(vec![crate::execution::OutputBlock {
+                        text: "α café\ntraceback 😀\n".into(),
+                        execution_count: None,
+                        data: None,
+                    }]);
+                    cell
+                })
+            })
+            .unwrap()
+        });
+        let cell = cx.update(|cx| window.root(cx).unwrap());
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        let start = visual.update(|_, cx| cell.read(cx).output_selection.position_for_index(0))
+            + point(px(0.2), px(5.));
+        visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        visual.simulate_mouse_up(start, MouseButton::Left, Default::default());
+        visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-a cmd-c"
+        } else {
+            "ctrl-a ctrl-c"
+        });
+        visual.update(|_, cx| {
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().unwrap(),
+                "α café\ntraceback 😀\n"
+            )
+        });
+        visual.simulate_input("m");
+        visual.simulate_keystrokes("backspace enter");
+        visual.update(|window, cx| {
+            let cell = cell.read(cx);
+            assert_eq!(cell.text(), "original source");
+            assert!(!cell.focus.is_focused(window));
+            assert_eq!(cell.kind, ganymede_core::notebook::CellKind::Code);
+            assert_eq!(cell.output[0].text, "α café\ntraceback 😀\n");
+        });
+    }
 
     #[gpui::test]
     fn document_viewport_reaches_panel_edges_and_reveals_first_and_last_lines(

@@ -264,6 +264,56 @@ mod tests {
     }
 
     #[gpui::test]
+    fn output_focus_blocks_structural_edit_shortcuts(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let cx = cx.add_empty_window();
+        let book = fixture(cx, &runtime);
+        struct Root(Entity<Notebook>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.0.clone()
+            }
+        }
+        cx.update(|window, cx| {
+            crate::output_selection::init(cx);
+            window.replace_root(cx, |_, _| Root(book.clone()));
+        });
+        cx.run_until_parked();
+        let (original, position) = cx.update(|_, cx| {
+            let book = book.read(cx);
+            (
+                book.session.document().to_json(),
+                book.cells[0].read(cx).output_position(0),
+            )
+        });
+        cx.simulate_click(
+            position + gpui::point(gpui::px(0.2), gpui::px(5.)),
+            Default::default(),
+        );
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-a cmd-c"
+        } else {
+            "ctrl-a ctrl-c"
+        });
+        cx.update(|_, cx| assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), "saved\n"));
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-x cmd-v cmd-z cmd-shift-z"
+        } else {
+            "ctrl-x ctrl-v ctrl-z ctrl-shift-z"
+        });
+        cx.simulate_keystrokes("backspace delete enter m y r");
+        cx.update(|_, cx| {
+            let book = book.read(cx);
+            assert_eq!(book.cells.len(), 4);
+            assert_eq!(book.session.document().to_json(), original);
+            assert!(book.undo_structure.is_empty());
+        });
+    }
+
+    #[gpui::test]
     fn cell_type_shortcuts_preserve_command_focus_and_group_history(cx: &mut gpui::TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
