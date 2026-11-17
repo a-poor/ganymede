@@ -1718,6 +1718,7 @@ impl Render for Notebook {
                             .into_any_element()
                         })
                         .size_full()
+                        .pt(gpui::px(8.))
                         .px_4()
                         .pl_3(),
                     )

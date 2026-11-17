@@ -111,7 +111,12 @@ impl Render for Planet {
             .bg(t.launcher_art_bg)
             .text_color(t.launcher_art_fg)
             .when_some(self.image.clone(), |v, image| {
-                v.child(img(image).size_full().object_fit(ObjectFit::Cover))
+                v.child(
+                    img(image)
+                        .size_full()
+                        .object_fit(ObjectFit::Cover)
+                        .opacity(0.5),
+                )
             })
     }
 }

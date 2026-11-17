@@ -6,6 +6,11 @@ the corresponding version section below. Earlier release notes are available in
 
 ## Unreleased
 
+### Changed
+
+- Soften the connection window's background artwork.
+- Add a small gap between the notebook toolbar and the first cell.
+
 ## 0.4.0 — 2026-11-11
 
 ### Added
