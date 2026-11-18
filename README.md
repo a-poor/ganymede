@@ -8,7 +8,7 @@ A native Jupyter client for macOS and Linux, written in Rust with GPUI.
 Create or connect to a Jupyter server, edit notebooks, run cells, and manage files
 and kernels in a desktop app.
 
-![Ganymede’s notebook editor and connection launcher with its pixel-art planet background](docs/images/ganymede-preview.png)
+![Ganymede starts a local Jupyter server, runs notebook cells, and renames the notebook to demo.ipynb.](docs/images/ganymede-demo.webp)
 
 ## Install
 
